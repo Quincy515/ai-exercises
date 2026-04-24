@@ -12,4 +12,6 @@ serde_json = { workspace = true }
 reqwest = { workspace = true }
 futures-util = { workspace = true }
 base64 = "0.22"
+thiserror = { workspace = true }
 async-openai = { workspace = true, features = ["chat-completion", "responses"] }
+axum = "0.8.9"

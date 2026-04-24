@@ -1,0 +1,5 @@
+### 请求 LLM 接口
+POST http://localhost:3000/chat
+Content-Type: application/json
+
+{ "message": "你好，你是？" }
