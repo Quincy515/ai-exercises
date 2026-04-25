@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    env,
     io::{self, Write},
 };
 
@@ -9,18 +8,14 @@ use async_openai::types::chat::{
     ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
     ChatCompletionRequestSystemMessage, ChatCompletionRequestToolMessage,
     ChatCompletionRequestUserMessage, ChatCompletionResponseMessage, ChatCompletionTool,
-    ChatCompletionToolChoiceOption, CreateChatCompletionRequestArgs, CreateChatCompletionResponse,
-    FunctionObjectArgs, ToolChoiceOptions,
+    ChatCompletionToolChoiceOption, CreateChatCompletionRequestArgs, FunctionObjectArgs,
+    ToolChoiceOptions,
 };
+use async_openai::{Client, config::OpenAIConfig};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-const DEFAULT_MODEL: &str = "deepseek-v4-flash";
-const DEFAULT_DEEPSEEK_API_BASE: &str = "https://api.deepseek.com";
-const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
-const DEEPSEEK_API_BASE_ENV: &str = "DEEPSEEK_API_BASE";
-const DEEPSEEK_API_URL_ENV: &str = "DEEPSEEK_API_URL";
-const DEEPSEEK_MODEL_ENV: &str = "DEEPSEEK_MODEL";
+const MODEL: &str = "gpt-5.4-mini";
 type ToolFn = fn(&str) -> String;
 
 #[tokio::main]
@@ -30,10 +25,7 @@ async fn main() -> Result<(), anyhow::Error> {
 }
 
 struct ReActAgent {
-    pub client: reqwest::Client,
-    pub api_base: String,
-    pub api_key: String,
-    pub model: String,
+    pub client: Client<OpenAIConfig>,
     pub messages: Vec<ChatCompletionRequestMessage>,
     pub tool: ChatCompletionTool,
     pub available_tools: HashMap<&'static str, ToolFn>,
@@ -43,11 +35,7 @@ impl ReActAgent {
     async fn new() -> Result<Self, anyhow::Error> {
         dotenvy::dotenv().ok();
 
-        let api_key = env::var(DEEPSEEK_API_KEY_ENV)
-            .map_err(|_| anyhow::anyhow!("请先设置环境变量 {DEEPSEEK_API_KEY_ENV}"))?;
-        let api_base = deepseek_api_base();
-        let model = env::var(DEEPSEEK_MODEL_ENV).unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-        let client = reqwest::Client::new();
+        let client = Client::new();
 
         let messages = vec![ChatCompletionRequestSystemMessage::from("你是一个强大的聊天机器人，请根据用户的提问进行答复，如果需要调用工具请直接调用，不知道请直接回复不清楚").into()];
 
@@ -64,9 +52,6 @@ impl ReActAgent {
 
         Ok(Self {
             client,
-            api_base,
-            api_key,
-            model,
             messages,
             tool,
             available_tools: HashMap::from([("calculator", calculator as ToolFn)]),
@@ -144,7 +129,7 @@ impl ReActAgent {
     ) -> Result<ChatCompletionResponseMessage, anyhow::Error> {
         let mut request = CreateChatCompletionRequestArgs::default();
         request
-            .model(self.model.clone())
+            .model(MODEL)
             .messages(self.messages.clone())
             .tools(self.tool.clone());
 
@@ -152,29 +137,7 @@ impl ReActAgent {
             request.tool_choice(tool_choice);
         }
 
-        let mut request = serde_json::to_value(request.build()?)?;
-        request["thinking"] = json!({"type": "disabled"});
-
-        let response = self
-            .client
-            .post(format!("{}/chat/completions", self.api_base))
-            .bearer_auth(&self.api_key)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(request.to_string())
-            .send()
-            .await?;
-        let status = response.status();
-        let response_text = response.text().await?;
-        if !status.is_success() {
-            return Err(anyhow::anyhow!(
-                "DeepSeek API 请求失败 ({status}): {response_text}"
-            ));
-        }
-
-        let response: CreateChatCompletionResponse =
-            serde_json::from_str(&response_text).map_err(|error| {
-                anyhow::anyhow!("DeepSeek API 响应解析失败: {error}; content: {response_text}")
-            })?;
+        let response = self.client.chat().create(request.build()?).await?;
         response
             .choices
             .first()
@@ -224,18 +187,4 @@ fn calculator(expression: &str) -> String {
         Ok(_) => json!({"error": "无效表达式, 错误信息: 结果不是有限数字"}).to_string(),
         Err(error) => json!({"error": format!("无效表达式, 错误信息: {error}")}).to_string(),
     }
-}
-
-fn deepseek_api_base() -> String {
-    let api_base = env::var(DEEPSEEK_API_BASE_ENV)
-        .or_else(|_| env::var(DEEPSEEK_API_URL_ENV))
-        .unwrap_or_else(|_| DEFAULT_DEEPSEEK_API_BASE.to_string());
-
-    api_base
-        .trim()
-        .trim_end_matches('/')
-        .trim_end_matches("/chat/completions")
-        .trim_end_matches("/v1")
-        .trim_end_matches('/')
-        .to_string()
 }
