@@ -40,3 +40,5 @@ logs/
 
 # macOS system files
 .DS_Store
+/http-client.private.env.json
+.omx/

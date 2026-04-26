@@ -16,3 +16,7 @@ base64 = "0.22"
 thiserror = { workspace = true }
 async-openai = { workspace = true, features = ["chat-completion", "responses"] }
 axum = "0.8.9"
+validator = { version = "0.20", features = ["derive"] }
+schemars = "1.2.1"
+derive-name = "1.1.0"
+typeshift = "0.5.1"
