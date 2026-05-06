@@ -75,6 +75,8 @@ impl UserInfo {
             .as_object_mut()
             .context("UserInfo schema 必须是 JSON object")?
             .remove("$schema");
+
+        println!("schema: {schema:#?}");
         Ok(schema)
     }
 
