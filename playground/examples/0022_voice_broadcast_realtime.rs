@@ -12,9 +12,10 @@ use async_openai::{
     types::{
         audio::{AudioResponseFormat, CreateTranscriptionRequestArgs},
         realtime::{
-            RealtimeClientEventConversationItemCreate, RealtimeClientEventResponseCreate,
-            RealtimeClientEventSessionUpdate, RealtimeConversationItem, RealtimeFunctionTool,
-            RealtimeServerEvent, RealtimeSession, RealtimeTool, Session,
+            RealtimeClientEvent, RealtimeClientEventConversationItemCreate,
+            RealtimeClientEventResponseCreate, RealtimeClientEventSessionUpdate,
+            RealtimeConversationItem, RealtimeFunctionTool, RealtimeServerEvent, RealtimeSession,
+            RealtimeTool, Session,
         },
     },
 };
@@ -129,15 +130,11 @@ impl RealtimeAgent {
             ..Default::default()
         };
 
-        self.write
-            .send(
-                RealtimeClientEventSessionUpdate {
-                    event_id: None,
-                    session: Session::RealtimeSession(Box::new(session)),
-                }
-                .into(),
-            )
-            .await?;
+        self.send_client_event(RealtimeClientEventSessionUpdate {
+            event_id: None,
+            session: Session::RealtimeSession(Box::new(session)),
+        })
+        .await?;
 
         Ok(())
     }
@@ -270,9 +267,8 @@ impl RealtimeAgent {
         }))?;
 
         let event: RealtimeClientEventConversationItemCreate = item.into();
-        self.write.send(event.into()).await?;
-        self.write
-            .send(RealtimeClientEventResponseCreate::default().into())
+        self.send_client_event(event).await?;
+        self.send_client_event(RealtimeClientEventResponseCreate::default())
             .await?;
         Ok(())
     }
@@ -299,10 +295,18 @@ impl RealtimeAgent {
         }))?;
 
         let event: RealtimeClientEventConversationItemCreate = item.into();
-        self.write.send(event.into()).await?;
-        self.write
-            .send(RealtimeClientEventResponseCreate::default().into())
+        self.send_client_event(event).await?;
+        self.send_client_event(RealtimeClientEventResponseCreate::default())
             .await?;
+        Ok(())
+    }
+
+    async fn send_client_event(
+        &mut self,
+        event: impl Into<RealtimeClientEvent>,
+    ) -> anyhow::Result<()> {
+        let text = serde_json::to_string(&event.into())?;
+        self.write.send(Message::from(text)).await?;
         Ok(())
     }
 }
