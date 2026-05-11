@@ -1,293 +1,227 @@
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk,
     ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessage,
     ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
     ChatCompletionRequestSystemMessage, ChatCompletionRequestToolMessage,
     ChatCompletionRequestUserMessage, ChatCompletionResponseStream, ChatCompletionTool,
-    ChatCompletionToolChoiceOption, CreateChatCompletionRequestArgs, FunctionCall,
-    FunctionCallStream, FunctionObjectArgs, ToolChoiceOptions,
+    ChatCompletionTools, CreateChatCompletionRequestArgs, FunctionCall, FunctionCallStream,
+    FunctionObjectArgs,
 };
 use async_openai::{Client, config::OpenAIConfig};
 use futures_util::StreamExt;
+use schemars::{JsonSchema, schema_for};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     io::{self, Write},
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
+use validator::Validate;
 
 const MODEL: &str = "gpt-5.4-mini";
+const MAX_TOOL_ROUNDS: usize = 8;
 type ToolFn = fn(&str) -> String;
+
 const SYSTEM_PROMPT: &str = r#"你是一个智能企业报销助手。你的任务是根据用户的请求和公司的报销政策，帮助员工填写并提交差旅报销单。
+
+公司报销政策：
+- 必须先查询员工信息，拿到员工姓名和职级。
+- 必须用 calculator 计算交通费、住宿费、餐饮费之和，得到 total_cost。
+- total_cost 小于等于 1000 元时，报销级别是“标准”。
+- total_cost 大于 1000 元且小于等于 2000 元时，报销级别是“高级”。
+- total_cost 大于 2000 元时，报销级别是“VIP”。
+- total_cost 大于 2000 元时，只有员工职级为“总监”才可以填“VIP”；其他职级必须填“高级”。
 
 你必须遵循以下思考和行动的循环模式（ReAct）：
 
 1. **思考(Thought)**
-   - **回顾目标**：当前我的最终目标是什么？(例如：填写并提交一份完整的报销单)
-   - **分析现状**：我已经获取了哪些信息？还缺少哪些信息？
-   - **运用CoT(Chain-of-Thought)**：仔细阅读并一步一步地应用报销政策。例如，计算总金额、判断报销级别等。把你的计算和推理过程写在思考中。
-   - **规划下一步**：接下来我应该做什么？是查询信息，还是计算，还是准备提交？
+   - **回顾目标**：当前最终目标是什么？例如：填写并提交一份完整的报销单。
+   - **分析现状**：已经获取了哪些信息？还缺少哪些信息？
+   - **运用CoT(Chain-of-Thought)**：仔细阅读并逐步应用报销政策，例如计算总金额、判断报销级别。
+   - **规划下一步**：接下来应该查询信息、计算金额、向用户提问，还是准备提交？
 
 2. **行动(Action)**
-   - 根据你的思考，决定是调用工具还是向用户提问。
-   - 你可用的工具有：`get_employee_info`、`submit_reimbursement`、`calculator`。
-   - 如果所有信息都已集齐并计算完毕，你的最后一步行动应该是调用 `submit_reimbursement` 工具。
-   - 在调用工具之前也请输出思考过程，不要直接调用，避免造成高延迟体验。
+   - 根据你的思考，决定调用工具或向用户提问。
+   - 可用工具有：`get_employee_info`、`submit_reimbursement`、`calculator`。
+   - 所有信息都已集齐并计算完毕后，最后一步行动必须调用 `submit_reimbursement` 工具。
+   - 调用工具之前请先输出简短思考，给用户持续反馈。
 
 请开始工作。
 "#;
 
 #[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {
+async fn main() -> anyhow::Result<()> {
     let mut agent = ReActAgent::new().await?;
     agent.chat_loop().await
 }
 
 struct ReActAgent {
-    pub client: Client<OpenAIConfig>,
-    pub messages: Vec<ChatCompletionRequestMessage>,
-    pub tool: ChatCompletionTool,
-    pub available_tools: HashMap<&'static str, ToolFn>,
+    client: Client<OpenAIConfig>,
+    messages: Vec<ChatCompletionRequestMessage>,
+    tools: Vec<ChatCompletionTools>,
+    available_tools: HashMap<&'static str, ToolFn>,
 }
 
 impl ReActAgent {
-    async fn new() -> Result<Self, anyhow::Error> {
+    async fn new() -> anyhow::Result<Self> {
         dotenvy::dotenv().ok();
 
-        let client = Client::new();
-
-        let messages = vec![ChatCompletionRequestSystemMessage::from(SYSTEM_PROMPT).into()];
-
-        let tool = ChatCompletionTool {
-            function: FunctionObjectArgs::default().name("calculator").description("一个可以计算数学表达式的计算器").parameters(json!({
-                    "type":"object",
-                    "properties": {"expression":{"type":"string","description":"需要计算的数学表达式，例如：'123+456+789'"}},
-                    "required":["expression"],
-                    "additionalProperties": false
-                }))
-                .strict(true)
-                .build()?,
-        };
+        let tools = vec![
+            ChatCompletionTools::Function(GetEmployeeInfoInput::tool()?),
+            ChatCompletionTools::Function(SubmitReimbursementInput::tool()?),
+            ChatCompletionTools::Function(CalculatorInput::tool()?),
+        ];
 
         Ok(Self {
-            client,
-            messages,
-            tool,
-            available_tools: HashMap::from([("calculator", calculator as ToolFn)]),
+            client: Client::new(),
+            messages: vec![ChatCompletionRequestSystemMessage::from(SYSTEM_PROMPT).into()],
+            tools,
+            available_tools: HashMap::from([
+                (
+                    GetEmployeeInfoInput::tool_name(),
+                    call_get_employee_info as ToolFn,
+                ),
+                (
+                    SubmitReimbursementInput::tool_name(),
+                    call_submit_reimbursement as ToolFn,
+                ),
+                (CalculatorInput::tool_name(), call_calculator as ToolFn),
+            ]),
         })
     }
 
     async fn process_query(&mut self, query: &str) -> anyhow::Result<()> {
-        // 将用户传递的数据添加到消息列表中
-        self.messages
-            .push(ChatCompletionRequestUserMessage::from(query).into());
-        // Python：print("Assistant: ", end="", flush=True)
-        // 读用户输入并显示 Assistant: 提示，不要默认换行，立刻把内容输出到终端
-        print!("Assistant: ");
-        io::stdout().flush()?;
+        // 中文：只有用户真的输入内容时才追加 user message；工具调用后的下一轮复用当前历史。
+        // English: Append a user message only for real input; tool follow-up rounds reuse history.
+        if !query.is_empty() {
+            self.messages
+                .push(ChatCompletionRequestUserMessage::from(query).into());
+        }
 
-        // 调用 ai 发起请求
-        let mut response = self.create_chat_completion_stream(None).await?;
+        for _ in 0..MAX_TOOL_ROUNDS {
+            print!("Assistant: ");
+            io::stdout().flush()?;
 
-        // 设置变量，判断是否执行工具调用，组装 content 和 tool_calls
+            let (content, tool_calls) = self.stream_assistant_turn().await?;
+
+            if tool_calls.is_empty() {
+                self.messages
+                    .push(ChatCompletionRequestAssistantMessage::from(content).into());
+                println!();
+                return Ok(());
+            }
+
+            self.push_assistant_tool_message(content, tool_calls.clone())?;
+            self.execute_tool_calls(tool_calls)?;
+            println!();
+        }
+
+        anyhow::bail!("工具调用轮次超过上限: {MAX_TOOL_ROUNDS}");
+    }
+
+    async fn stream_assistant_turn(
+        &self,
+    ) -> anyhow::Result<(String, Vec<ChatCompletionMessageToolCalls>)> {
+        let mut response = self.create_chat_completion_stream().await?;
         let mut content = String::new();
-        let mut is_tool_calls = false;
-        let mut tool_calls_object: HashMap<u32, ChatCompletionMessageToolCallChunk> =
-            HashMap::new();
+        let mut tool_call_chunks: HashMap<u32, ChatCompletionMessageToolCallChunk> = HashMap::new();
 
         while let Some(chunk_result) = response.next().await {
             let chunk = chunk_result?;
-
             let Some(choice) = chunk.choices.first() else {
                 continue;
             };
 
             let delta = &choice.delta;
 
-            // 叠加内容和工具调用
             if let Some(chunk_content) = delta.content.as_ref() {
                 content.push_str(chunk_content);
-                // 如果是直接生成则流式打印输出的内容
                 print!("{chunk_content}");
                 io::stdout().flush()?;
             }
 
-            // 判断这轮是不是工具调用
             if let Some(chunk_tool_calls) = &delta.tool_calls {
-                is_tool_calls = true;
-
-                for chunk_tool_call in chunk_tool_calls {
-                    let entry = tool_calls_object
-                        .entry(chunk_tool_call.index)
-                        .or_insert_with(|| ChatCompletionMessageToolCallChunk {
-                            index: chunk_tool_call.index,
-                            id: None,
-                            r#type: None,
-                            function: None,
-                        });
-
-                    if entry.id.is_none() {
-                        entry.id = chunk_tool_call.id.clone();
-                    }
-
-                    if entry.r#type.is_none() {
-                        entry.r#type = chunk_tool_call.r#type.clone();
-                    }
-
-                    if let Some(function_delta) = &chunk_tool_call.function {
-                        let function = entry.function.get_or_insert(FunctionCallStream {
-                            name: None,
-                            arguments: None,
-                        });
-
-                        if function.name.is_none() {
-                            function.name = function_delta.name.clone();
-                        }
-
-                        if let Some(arguments_delta) = &function_delta.arguments {
-                            function
-                                .arguments
-                                .get_or_insert_with(String::new)
-                                .push_str(arguments_delta);
-                        }
-                    }
-                }
+                merge_tool_call_chunks(&mut tool_call_chunks, chunk_tool_calls);
             }
         }
 
-        // 如果是工具调用，则需要将 tool_calls_object 转换成列表
-        let mut tool_calls_chunks: Vec<_> = tool_calls_object.into_values().collect();
-        tool_calls_chunks.sort_by_key(|tool_call| tool_call.index);
+        Ok((content, build_tool_calls(tool_call_chunks)?))
+    }
 
-        let tool_calls: Vec<ChatCompletionMessageToolCalls> = tool_calls_chunks
-            .into_iter()
-            .map(|tool_call| {
-                let function = tool_call
-                    .function
-                    .ok_or_else(|| anyhow::anyhow!("工具调用缺少"))?;
-
-                Ok(ChatCompletionMessageToolCalls::Function(
-                    ChatCompletionMessageToolCall {
-                        id: tool_call.id.ok_or_else(|| anyhow!("工具调用缺少id"))?,
-                        function: FunctionCall {
-                            name: function
-                                .name
-                                .ok_or_else(|| anyhow!("工具调用缺少 function.name"))?,
-                            arguments: function.arguments.unwrap_or_default(),
-                        },
-                    },
-                ))
-            })
-            .collect::<anyhow::Result<_>>()?;
-
-        if tool_calls.is_empty() {
-            self.messages
-                .push(ChatCompletionRequestAssistantMessage::from(content).into());
-            println!();
-            return Ok(());
-        }
-
-        // 将模型第一次回复的内容添加到历史消息中
+    fn push_assistant_tool_message(
+        &mut self,
+        content: String,
+        tool_calls: Vec<ChatCompletionMessageToolCalls>,
+    ) -> anyhow::Result<()> {
         let mut assistant_message = ChatCompletionRequestAssistantMessageArgs::default();
         if !content.is_empty() {
             assistant_message.content(content);
         }
-        assistant_message.tool_calls(tool_calls.clone());
+        assistant_message.tool_calls(tool_calls);
         self.messages.push(assistant_message.build()?.into());
+        Ok(())
+    }
 
-        // 循环调用对应的工具
-        if is_tool_calls {
-            for tool_call in tool_calls {
-                let ChatCompletionMessageToolCalls::Function(tool_call) = tool_call else {
-                    continue;
-                };
+    fn execute_tool_calls(
+        &mut self,
+        tool_calls: Vec<ChatCompletionMessageToolCalls>,
+    ) -> anyhow::Result<()> {
+        for tool_call in tool_calls {
+            let ChatCompletionMessageToolCalls::Function(tool_call) = tool_call else {
+                continue;
+            };
 
-                let tool_name = tool_call.function.name.as_str();
-                let tool_args: Value = tool_call.function.arguments.parse()?;
-                println!("\nTool Call: {tool_name}");
-                println!("Tool Parameters: {tool_args}");
-                let expression = tool_args["expression"].as_str().unwrap_or_default();
-                let function_to_call = self
-                    .available_tools
-                    .get(tool_name)
-                    .ok_or_else(|| anyhow!("未知工具: {tool_name}"))?;
+            let tool_name = tool_call.function.name;
+            let tool_arguments = tool_call.function.arguments;
 
-                // 调用工具
-                let result = function_to_call(expression);
-                println!("Tool [{tool_name}] Result: {result}");
+            println!("\nTool Call: {tool_name}");
+            println!(
+                "Tool Parameters: {}",
+                format_tool_arguments(&tool_arguments)
+            );
 
-                // 将工具结果添加到历史消息中
-                self.messages.push({
-                    ChatCompletionRequestToolMessage {
-                        content: result.into(),
-                        tool_call_id: tool_call.id,
-                    }
-                    .into()
-                });
-            }
+            let result = match self.available_tools.get(tool_name.as_str()) {
+                Some(function_to_call) => function_to_call(&tool_arguments),
+                None => json!({"error": format!("未知工具: {tool_name}")}).to_string(),
+            };
 
-            // 再次调用模型，让它基于工具调用的结果生成最终回复内容
-            let mut second_response = self
-                .create_chat_completion_stream(Some(ChatCompletionToolChoiceOption::Mode(
-                    ToolChoiceOptions::None,
-                )))
-                .await?;
+            println!("Tool [{tool_name}] Result: {result}");
 
-            print!("Assistant: ");
-            io::stdout().flush()?;
-
-            let mut final_content = String::new();
-            while let Some(chunk_result) = second_response.next().await {
-                let chunk = chunk_result?;
-                let Some(choice) = chunk.choices.first() else {
-                    continue;
-                };
-                if let Some(chunk_content) = choice.delta.content.as_ref() {
-                    final_content.push_str(chunk_content);
-                    print!("{chunk_content}");
-                    io::stdout().flush()?;
+            self.messages.push(
+                ChatCompletionRequestToolMessage {
+                    content: result.into(),
+                    tool_call_id: tool_call.id,
                 }
-            }
-
-            self.messages
-                .push(ChatCompletionRequestAssistantMessage::from(final_content).into());
-            println!();
+                .into(),
+            );
         }
 
         Ok(())
     }
-    async fn create_chat_completion_stream(
-        &self,
-        tool_choice: Option<ChatCompletionToolChoiceOption>,
-    ) -> Result<ChatCompletionResponseStream, anyhow::Error> {
-        let mut request = CreateChatCompletionRequestArgs::default();
-        request
+
+    async fn create_chat_completion_stream(&self) -> anyhow::Result<ChatCompletionResponseStream> {
+        let request = CreateChatCompletionRequestArgs::default()
             .model(MODEL)
             .messages(self.messages.clone())
-            .tools(self.tool.clone())
-            .stream(true);
+            .tools(self.tools.clone())
+            .stream(true)
+            .build()?;
 
-        if let Some(tool_choice) = tool_choice {
-            request.tool_choice(tool_choice);
-        }
-
-        let stream = self.client.chat().create_stream(request.build()?).await?;
-        Ok(stream)
+        Ok(self.client.chat().create_stream(request).await?)
     }
 
-    /// 交互式 REPL 循环；输入 `quit` 退出。
-    async fn chat_loop(&mut self) -> Result<(), anyhow::Error> {
-        // 异步读取标准输入，避免阻塞 tokio 运行时
+    /// 中文：交互式 REPL 循环；输入 `quit` 退出。
+    /// English: Interactive REPL loop; enter `quit` to exit.
+    async fn chat_loop(&mut self) -> anyhow::Result<()> {
         let stdin = tokio::io::stdin();
         let mut reader = BufReader::new(stdin);
 
         loop {
             print!("\nQuery: ");
-            // 立即刷新提示符，保证在等待输入前可见
             io::stdout().flush().ok();
 
-            // 部分 IDE 控制台可能传入非 UTF-8 字节，按字节读取可以避免 REPL 直接退出。
             let mut line = Vec::new();
             if reader.read_until(b'\n', &mut line).await? == 0 {
                 break;
@@ -302,68 +236,296 @@ impl ReActAgent {
                 break;
             }
 
-            // 单轮出错不应中断整个会话，只打印错误信息继续下一轮
             match self.process_query(query).await {
                 Ok(()) => {}
-                Err(e) => eprintln!("\nError: {e:#}"),
+                Err(error) => eprintln!("\nError: {error:#}"),
             }
         }
+
         Ok(())
     }
 }
 
+fn merge_tool_call_chunks(
+    tool_call_chunks: &mut HashMap<u32, ChatCompletionMessageToolCallChunk>,
+    chunk_tool_calls: &[ChatCompletionMessageToolCallChunk],
+) {
+    for chunk_tool_call in chunk_tool_calls {
+        let entry = tool_call_chunks
+            .entry(chunk_tool_call.index)
+            .or_insert_with(|| ChatCompletionMessageToolCallChunk {
+                index: chunk_tool_call.index,
+                id: None,
+                r#type: None,
+                function: None,
+            });
+
+        if entry.id.is_none() {
+            entry.id = chunk_tool_call.id.clone();
+        }
+
+        if entry.r#type.is_none() {
+            entry.r#type = chunk_tool_call.r#type.clone();
+        }
+
+        if let Some(function_delta) = &chunk_tool_call.function {
+            let function = entry.function.get_or_insert(FunctionCallStream {
+                name: None,
+                arguments: None,
+            });
+
+            if function.name.is_none() {
+                function.name = function_delta.name.clone();
+            }
+
+            if let Some(arguments_delta) = &function_delta.arguments {
+                function
+                    .arguments
+                    .get_or_insert_with(String::new)
+                    .push_str(arguments_delta);
+            }
+        }
+    }
+}
+
+fn build_tool_calls(
+    tool_call_chunks: HashMap<u32, ChatCompletionMessageToolCallChunk>,
+) -> anyhow::Result<Vec<ChatCompletionMessageToolCalls>> {
+    let mut tool_call_chunks: Vec<_> = tool_call_chunks.into_values().collect();
+    tool_call_chunks.sort_by_key(|tool_call| tool_call.index);
+
+    tool_call_chunks
+        .into_iter()
+        .map(|tool_call| {
+            let function = tool_call
+                .function
+                .ok_or_else(|| anyhow!("工具调用缺少 function"))?;
+
+            Ok(ChatCompletionMessageToolCalls::Function(
+                ChatCompletionMessageToolCall {
+                    id: tool_call.id.ok_or_else(|| anyhow!("工具调用缺少 id"))?,
+                    function: FunctionCall {
+                        name: function
+                            .name
+                            .ok_or_else(|| anyhow!("工具调用缺少 function.name"))?,
+                        arguments: function.arguments.unwrap_or_default(),
+                    },
+                },
+            ))
+        })
+        .collect()
+}
+
+fn format_tool_arguments(arguments: &str) -> String {
+    match serde_json::from_str::<Value>(arguments) {
+        Ok(value) => serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()),
+        Err(_) => arguments.to_owned(),
+    }
+}
+
+// 中文：ToolInput 把 Pydantic BaseModel 的公共能力集中到一个 trait。
+// English: ToolInput centralizes the shared Pydantic BaseModel-like behavior.
+trait ToolInput: Sized + JsonSchema + DeserializeOwned + Validate {
+    fn tool_name() -> &'static str;
+    fn description() -> &'static str;
+
+    /// 中文：schemars 根据 struct 自动生成 schema，类似 Pydantic 的 model_json_schema()。
+    /// English: schemars generates JSON Schema from the struct, similar to model_json_schema().
+    fn model_json_schema() -> anyhow::Result<Value> {
+        let mut schema = serde_json::to_value(schema_for!(Self))?;
+        schema
+            .as_object_mut()
+            .context("schema 必须是 JSON object")?
+            .remove("$schema");
+        Ok(schema)
+    }
+
+    /// 中文：把输入 struct 转成 OpenAI tool 定义。
+    /// English: Convert the input struct into an OpenAI tool definition.
+    fn tool() -> anyhow::Result<ChatCompletionTool> {
+        Ok(ChatCompletionTool {
+            function: FunctionObjectArgs::default()
+                .name(Self::tool_name())
+                .description(Self::description())
+                .parameters(Self::model_json_schema()?)
+                .strict(true)
+                .build()?,
+        })
+    }
+
+    /// 中文：解析模型返回的 arguments JSON，并执行 validator 校验。
+    /// English: Parse the model-returned arguments JSON and run validator checks.
+    fn model_validate_json(arguments: &str) -> anyhow::Result<Self> {
+        let input: Self = serde_json::from_str(arguments)
+            .with_context(|| format!("工具参数不是有效 JSON: {arguments}"))?;
+        input.validate()?;
+        Ok(input)
+    }
+}
+
+macro_rules! impl_tool_input {
+    ($ty:ty, $name:literal, $description:literal) => {
+        impl ToolInput for $ty {
+            fn tool_name() -> &'static str {
+                $name
+            }
+
+            fn description() -> &'static str {
+                $description
+            }
+        }
+    };
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema, Validate)]
+#[serde(deny_unknown_fields)]
+struct GetEmployeeInfoInput {
+    /// 员工工号。/ Employee ID to query.
+    #[validate(length(min = 1))]
+    employee_id: String,
+}
+
+impl_tool_input!(
+    GetEmployeeInfoInput,
+    "get_employee_info",
+    "根据员工工号查询员工信息，包括姓名和职级"
+);
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(deny_unknown_fields)]
+struct SubmitReimbursementInput {
+    /// 员工工号。/ Employee ID.
+    #[validate(length(min = 1))]
+    employee_id: String,
+    /// 员工姓名。/ Employee name.
+    #[validate(length(min = 1))]
+    employee_name: String,
+    /// 提交日期，格式 YYYY-MM-DD。/ Submission date in YYYY-MM-DD format.
+    #[validate(length(min = 1))]
+    submission_date: String,
+    /// 出差开始日期，格式 YYYY-MM-DD。/ Trip start date in YYYY-MM-DD format.
+    #[validate(length(min = 1))]
+    trip_start_date: String,
+    /// 出差结束日期，格式 YYYY-MM-DD。/ Trip end date in YYYY-MM-DD format.
+    #[validate(length(min = 1))]
+    trip_end_date: String,
+    /// 出差目的地。/ Business trip destination.
+    #[validate(length(min = 1))]
+    destination: String,
+    /// 交通费用。/ Transportation cost.
+    #[validate(range(min = 0.0))]
+    transportation_cost: f64,
+    /// 住宿费用。/ Accommodation cost.
+    #[validate(range(min = 0.0))]
+    accommodation_cost: f64,
+    /// 餐饮费用。/ Meal cost.
+    #[validate(range(min = 0.0))]
+    meal_cost: f64,
+    /// 总报销金额。/ Total reimbursement cost.
+    #[validate(range(min = 0.0))]
+    total_cost: f64,
+    /// 报销级别。/ Reimbursement level.
+    reimbursement_level: ReimbursementLevel,
+}
+
+impl_tool_input!(
+    SubmitReimbursementInput,
+    "submit_reimbursement",
+    "提交已填写的报销表单"
+);
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+enum ReimbursementLevel {
+    #[serde(rename = "标准")]
+    Standard,
+    #[serde(rename = "高级")]
+    Premium,
+    #[serde(rename = "VIP")]
+    Vip,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema, Validate)]
+#[serde(deny_unknown_fields)]
+struct CalculatorInput {
+    /// 数学表达式，例如：'123+456+789'。/ Math expression, for example '123+456+789'.
+    #[validate(length(min = 1))]
+    expression: String,
+}
+
+impl_tool_input!(
+    CalculatorInput,
+    "calculator",
+    "一个简单的计算器，可以执行数学表达式"
+);
+
+fn run_typed_tool<T, F>(arguments: &str, function: F) -> String
+where
+    T: ToolInput,
+    F: FnOnce(T) -> String,
+{
+    match T::model_validate_json(arguments) {
+        Ok(input) => function(input),
+        Err(error) => json!({"error": format!("工具参数校验失败: {error:#}")}).to_string(),
+    }
+}
+
+fn call_get_employee_info(arguments: &str) -> String {
+    run_typed_tool::<GetEmployeeInfoInput, _>(arguments, |input| {
+        get_employee_info(&input.employee_id)
+    })
+}
+
+fn call_submit_reimbursement(arguments: &str) -> String {
+    run_typed_tool::<SubmitReimbursementInput, _>(arguments, submit_reimbursement)
+}
+
+fn call_calculator(arguments: &str) -> String {
+    run_typed_tool::<CalculatorInput, _>(arguments, |input| calculator(&input.expression))
+}
+
+/// 根据员工工号查询员工信息，包括姓名和职级。
+/// Query employee information by employee ID, including name and level.
+fn get_employee_info(employee_id: &str) -> String {
+    println!("--- 正在查询工号 {employee_id} 的信息... ---");
+    if employee_id == "E12345" {
+        return json!({"name": "张三", "level": "经理"}).to_string();
+    }
+    json!({"error": "该员工不存在"}).to_string()
+}
+
+/// 提交已填写的报销表单。
+/// Submit the completed reimbursement form.
+fn submit_reimbursement(input: SubmitReimbursementInput) -> String {
+    println!("--- 已提交报销信息 ---");
+
+    let form = json!({
+        "employee_id": input.employee_id,
+        "employee_name": input.employee_name,
+        "submission_date": input.submission_date,
+        "trip_start_date": input.trip_start_date,
+        "trip_end_date": input.trip_end_date,
+        "destination": input.destination,
+        "transportation_cost": input.transportation_cost,
+        "accommodation_cost": input.accommodation_cost,
+        "meal_cost": input.meal_cost,
+        "total_cost": input.total_cost,
+        "reimbursement_level": input.reimbursement_level,
+    });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&form).unwrap_or_else(|_| form.to_string())
+    );
+
+    json!({"status": "success", "message": "报销单提交成功"}).to_string()
+}
+
+/// 一个简单的计算器，可以执行数学表达式。
+/// A simple calculator that evaluates math expressions.
 fn calculator(expression: &str) -> String {
     match fasteval::ez_eval(expression, &mut fasteval::EmptyNamespace) {
         Ok(result) if result.is_finite() => json!({"result": result}).to_string(),
         Ok(_) => json!({"error": "无效表达式, 错误信息: 结果不是有限数字"}).to_string(),
         Err(error) => json!({"error": format!("无效表达式, 错误信息: {error}")}).to_string(),
     }
-}
-
-#[derive(Debug, Clone)]
-struct GetEmployeeInfoInput {
-    employee_id: String,
-}
-
-#[derive(Debug, Clone)]
-struct SubmitReimbursementInput {
-    employee_id: String,
-    employee_name: String,
-    submission_date: String,
-    trip_start_date: String,
-    trip_end_date: String,
-    destination: String,
-    transportation_cost: f64,
-    accommodation_cost: f64,
-    meal_cost: f64,
-    total_cost: f64,
-    reimbursement_level: ReimbursementLevel,
-}
-
-#[derive(Debug, Clone)]
-enum ReimbursementLevel {
-    Standard,
-    Manager,
-    VIP,
-}
-
-#[derive(Debug, Clone)]
-struct CalculatorInput {
-    expression: String,
-}
-
-/// 根据员工工号查询员工信息，包括姓名和职级
-fn get_employee_info(employee_id: &str) -> String {
-    println!("--- 正在查询工号 {employee_id} 的信息... ---");
-    if employee_id == "E12345" {
-        return json!({"name": "张三", "level": "经理"}).to_string();
-    }
-    json!({"error": "未找到该员工"}).to_string()
-}
-
-/// 提交已填写的报销表单
-fn submit_reimbursement(input: SubmitReimbursementInput) -> String {
-    println!("--- 已提交报销信息 ---");
-    println!("{input:?}");
-    json!({"status": "success", "message": "报销单提交成功"}).to_string()
 }
