@@ -26,14 +26,6 @@ type ToolFn = fn(&str) -> String;
 
 const SYSTEM_PROMPT: &str = r#"你是一个智能企业报销助手。你的任务是根据用户的请求和公司的报销政策，帮助员工填写并提交差旅报销单。
 
-公司报销政策：
-- 必须先查询员工信息，拿到员工姓名和职级。
-- 必须用 calculator 计算交通费、住宿费、餐饮费之和，得到 total_cost。
-- total_cost 小于等于 1000 元时，报销级别是“标准”。
-- total_cost 大于 1000 元且小于等于 2000 元时，报销级别是“高级”。
-- total_cost 大于 2000 元时，报销级别是“VIP”。
-- total_cost 大于 2000 元时，只有员工职级为“总监”才可以填“VIP”；其他职级必须填“高级”。
-
 你必须遵循以下思考和行动的循环模式（ReAct）：
 
 1. **思考(Thought)**
@@ -46,7 +38,7 @@ const SYSTEM_PROMPT: &str = r#"你是一个智能企业报销助手。你的任�
    - 根据你的思考，决定调用工具或向用户提问。
    - 可用工具有：`get_employee_info`、`submit_reimbursement`、`calculator`。
    - 所有信息都已集齐并计算完毕后，最后一步行动必须调用 `submit_reimbursement` 工具。
-   - 调用工具之前请先输出简短思考，给用户持续反馈。
+   - 在调用工具之前也请输出思考过程，不要直接调用，避免造成高延迟体验。
 
 请开始工作。
 "#;
@@ -337,6 +329,7 @@ trait ToolInput: Sized + JsonSchema + DeserializeOwned + Validate {
             .as_object_mut()
             .context("schema 必须是 JSON object")?
             .remove("$schema");
+        strip_ref_siblings(&mut schema);
         Ok(schema)
     }
 
@@ -360,6 +353,29 @@ trait ToolInput: Sized + JsonSchema + DeserializeOwned + Validate {
             .with_context(|| format!("工具参数不是有效 JSON: {arguments}"))?;
         input.validate()?;
         Ok(input)
+    }
+}
+
+fn strip_ref_siblings(schema: &mut Value) {
+    match schema {
+        Value::Object(object) if object.contains_key("$ref") => {
+            let reference = object
+                .remove("$ref")
+                .expect("checked that the schema object contains $ref");
+            object.clear();
+            object.insert("$ref".to_owned(), reference);
+        }
+        Value::Object(object) => {
+            for value in object.values_mut() {
+                strip_ref_siblings(value);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_ref_siblings(item);
+            }
+        }
+        _ => {}
     }
 }
 
