@@ -13,6 +13,16 @@ logger:
   # By default the logger has filtering only logs that came from your code or logs that came from `loco` framework. to see all third party libraries
   # Uncomment the line below to override to see all third party libraries you can enable this config and override the logger filters.
   # override_filter: trace
+  file_appender:
+    enable: true
+    non_blocking: true
+    level: debug
+    format: compact
+    rotation: daily # 每天一个文件 never、hourly、minutely
+    dir: ./logs
+    filename_prefix: server
+    filename_suffix: log
+    max_log_files: 30
 
 # Web server configuration
 server:
@@ -89,3 +99,9 @@ auth:
     secret: hXtPGG2Cs3LqTi5no0YF
     # Token expiration time in seconds
     expiration: 604800 # 7 days
+
+# Redis Cache Configuration
+cache:
+  kind: Redis
+  uri: '{{ get_env(name="REDIS_URL", default="redis://localhost:6379") }}'
+  max_size: 10 # Maximum number of connections in the pool
