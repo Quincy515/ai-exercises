@@ -24,6 +24,11 @@ async fn exposes_openapi_json_for_auth_routes() {
                 document["paths"]["/api/auth/login"]["post"]["responses"]["401"]["description"],
                 "邮箱或密码错误"
             );
+            assert!(document["paths"].get("/api/status").is_some());
+            assert_eq!(
+                document["paths"]["/api/status"]["get"]["summary"],
+                "系统健康检查"
+            );
         }
     })
     .await;

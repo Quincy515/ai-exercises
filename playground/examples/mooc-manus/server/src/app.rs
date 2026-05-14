@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use loco_openapi::{
+    openapi::clear_routes,
     prelude::{set_jwt_location, OpenApi},
     OpenapiInitializerWithSetup,
 };
@@ -59,7 +60,10 @@ impl Hooks for App {
     }
 
     fn routes(_ctx: &AppContext) -> AppRoutes {
+        clear_routes();
+
         AppRoutes::with_default_routes() // controller routes below
+            .add_route(controllers::status::routes())
             .add_route(controllers::auth::routes())
     }
     async fn connect_workers(ctx: &AppContext, queue: &Queue) -> Result<()> {
