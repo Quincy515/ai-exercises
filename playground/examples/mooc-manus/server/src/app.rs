@@ -20,8 +20,8 @@ use std::path::Path;
 
 #[allow(unused_imports)]
 use crate::{
-    controllers, models::_entities::users, openapi::ApiDoc, tasks,
-    workers::downloader::DownloadWorker,
+    application::storage::configure_storage, controllers, models::_entities::users,
+    openapi::ApiDoc, tasks, workers::downloader::DownloadWorker,
 };
 
 pub struct App;
@@ -57,6 +57,10 @@ impl Hooks for App {
             },
             None,
         ))])
+    }
+
+    async fn after_context(ctx: AppContext) -> Result<AppContext> {
+        configure_storage(ctx).await
     }
 
     fn routes(_ctx: &AppContext) -> AppRoutes {

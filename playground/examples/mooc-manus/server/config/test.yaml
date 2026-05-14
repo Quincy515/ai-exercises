@@ -93,3 +93,9 @@ auth:
     secret: TsPYrzHBWbdyKZEF007l
     # Token expiration time in seconds
     expiration: 604800 # 7 days
+
+# Application Custom Settings / 应用自定义配置
+settings:
+  # Storage Configuration / 存储配置
+  storage:
+    kind: memory

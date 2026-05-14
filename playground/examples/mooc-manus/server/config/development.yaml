@@ -112,3 +112,17 @@ cache:
   kind: Redis
   uri: '{{ get_env(name="REDIS_URL", default="redis://localhost:6379") }}'
   max_size: 10 # Maximum number of connections in the pool
+
+# Application Custom Settings / 应用自定义配置
+settings:
+  # Storage Configuration / 存储配置
+  storage:
+    kind: local
+    path: ./storage
+    # Cloudflare R2 example / Cloudflare R2 示例:
+    # kind: r2
+    # bucket: '{{ get_env(name="R2_BUCKET", default="") }}'
+    # account_id: '{{ get_env(name="R2_ACCOUNT_ID", default="") }}'
+    # access_key_id: '{{ get_env(name="R2_ACCESS_KEY_ID", default="") }}'
+    # secret_access_key: '{{ get_env(name="R2_SECRET_ACCESS_KEY", default="") }}'
+    # region: auto
