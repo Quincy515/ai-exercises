@@ -2,6 +2,7 @@ pub mod app;
 pub mod application;
 pub mod controllers;
 pub mod data;
+pub mod infrastructure;
 pub mod initializers;
 pub mod mailers;
 pub mod models;

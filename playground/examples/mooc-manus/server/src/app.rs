@@ -20,7 +20,7 @@ use std::path::Path;
 
 #[allow(unused_imports)]
 use crate::{
-    application::storage::configure_storage, controllers, models::_entities::users,
+    controllers, infrastructure::storage::configure_storage, models::_entities::users,
     openapi::ApiDoc, tasks, workers::downloader::DownloadWorker,
 };
 
