@@ -1,0 +1,74 @@
+# 高德地图MCP接口
+
+## 1. 高德 MCP 初始化
+
+xh POST 'https://mcp.amap.com/mcp?key=7285748d4f9fd3ff67adb738da793837' \
+  Accept:'application/json, text/event-stream' \
+  Content-Type:'application/json' \
+  <<'JSON'
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {
+      "roots": {},
+      "sampling": {},
+      "elicitation": {}
+    },
+    "clientInfo": {
+      "name": "MoocManus",
+      "version": "1.0.0"
+    }
+  }
+}
+JSON
+
+
+## 2. 高德 MCP 初始化成功通知(MCP 无状态所以没有影响)
+
+xh POST 'https://mcp.amap.com/mcp?key=7285748d4f9fd3ff67adb738da793837' \
+  Accept:'application/json, text/event-stream' \
+  Content-Type:'application/json' \
+  <<'JSON'
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/initialized"
+}
+JSON
+
+
+## 3. 高德 MCP 获取工具列表
+
+xh POST 'https://mcp.amap.com/mcp?key=7285748d4f9fd3ff67adb738da793837' \
+  Accept:'application/json, text/event-stream' \
+  Content-Type:'application/json' \
+  <<'JSON'
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/list",
+  "params": {}
+}
+JSON
+
+
+## 4. 高德 MCP 调用工具获取天气
+
+xh POST 'https://mcp.amap.com/mcp?key=7285748d4f9fd3ff67adb738da793837' \
+  Accept:'application/json, text/event-stream' \
+  Content-Type:'application/json' \
+  <<'JSON'
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "maps_weather",
+    "arguments": {
+      "city": "广州"
+    }
+  }
+}
+JSON
