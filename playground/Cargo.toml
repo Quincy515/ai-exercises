@@ -27,3 +27,4 @@ validator = { version = "0.20", features = ["derive"] }
 schemars = "1.2.1"
 derive-name = "1.1.0"
 typeshift = "0.5.1"
+rmcp = { workspace = true }

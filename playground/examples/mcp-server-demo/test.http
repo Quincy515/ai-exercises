@@ -1,0 +1,85 @@
+# 本地 calculator MCP 接口
+
+## 0. 先启动本地 MCP 服务
+
+```shell
+cargo run
+```
+
+## 1. MCP 初始化，并保存 session id
+
+
+SESSION_ID=$(
+  xh --headers POST http://127.0.0.1:8000/mcp \
+    Accept:'application/json, text/event-stream' \
+    Content-Type:'application/json' \
+    <<'JSON' | awk 'tolower($1) == "mcp-session-id:" {gsub("\r", "", $2); print $2}'
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "2025-11-25",
+    "capabilities": {},
+    "clientInfo": {
+      "name": "MoocManus",
+      "version": "1.0.0"
+    }
+  }
+}
+JSON
+)
+
+echo "mcp-session-id=$SESSION_ID"
+
+## 2. MCP 初始化成功通知
+
+xh POST http://127.0.0.1:8000/mcp \
+  Accept:'application/json, text/event-stream' \
+  Content-Type:'application/json' \
+  Mcp-Protocol-Version:'2025-11-25' \
+  mcp-session-id:"$SESSION_ID" \
+  <<'JSON'
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/initialized",
+  "params": {}
+}
+JSON
+
+## 3. 获取工具列表
+
+xh POST http://127.0.0.1:8000/mcp \
+  Accept:'application/json, text/event-stream' \
+  Content-Type:'application/json' \
+  Mcp-Protocol-Version:'2025-11-25' \
+  mcp-session-id:"$SESSION_ID" \
+  <<'JSON'
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/list",
+  "params": {}
+}
+JSON
+
+## 4. 调用 calculator 工具
+
+xh POST http://127.0.0.1:8000/mcp \
+  Accept:'application/json, text/event-stream' \
+  Content-Type:'application/json' \
+  Mcp-Protocol-Version:'2025-11-25' \
+  mcp-session-id:"$SESSION_ID" \
+  <<'JSON'
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "calculator",
+    "arguments": {
+      "expression": "1+2*3"
+    }
+  }
+}
+JSON
