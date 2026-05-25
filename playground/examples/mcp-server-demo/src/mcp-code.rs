@@ -121,6 +121,7 @@ async fn run_temp_script(
     }
 }
 
+// 根据不同的语言类型执行不同的操作。/ Execute different commands by language.
 fn build_run_command(
     language: &str,
     base_dir: &Path,
@@ -128,6 +129,7 @@ fn build_run_command(
     script_path: &Path,
 ) -> Command {
     match language {
+        // 使用 uv 来运行对应的 Python 文件。/ Run the Python script with uv.
         "python" => {
             let mut command = Command::new(
                 std::env::var("MCP_CODE_UV_CMD").unwrap_or_else(|_| DEFAULT_UV_CMD.to_string()),
@@ -139,6 +141,7 @@ fn build_run_command(
                 .arg(script_name);
             command
         }
+        // 使用 node 命令运行脚本。/ Run the script with node.
         "node" => {
             let mut command = Command::new(
                 std::env::var("MCP_CODE_NODE_CMD").unwrap_or_else(|_| DEFAULT_NODE_CMD.to_string()),
@@ -150,6 +153,7 @@ fn build_run_command(
     }
 }
 
+// 获取输出与错误结果。/ Extract stdout and stderr from command output.
 fn format_output(output: std::process::Output) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
