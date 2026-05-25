@@ -21,6 +21,10 @@ path = "src/mcp-client-stdio.rs"
 name = "mcp-bash"
 path = "src/mcp-bash.rs"
 
+[[bin]]
+name = "mcp-code"
+path = "src/mcp-code.rs"
+
 [dependencies]
 rmcp = { version = "1.7.0", features = [
     "client",
