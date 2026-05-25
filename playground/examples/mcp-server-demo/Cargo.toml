@@ -10,6 +10,10 @@ name = "mcp-client-demo"
 path = "src/mcp-client-demo.rs"
 
 [[bin]]
+name = "mcp-client-connect-api"
+path = "src/mcp-client-connect-api.rs"
+
+[[bin]]
 name = "mcp-server-stdio"
 path = "src/mcp-server-stdio.rs"
 
@@ -24,6 +28,10 @@ path = "src/mcp-bash.rs"
 [[bin]]
 name = "mcp-code"
 path = "src/mcp-code.rs"
+
+[[bin]]
+name = "mcp-external-api"
+path = "src/mcp-external-api.rs"
 
 [dependencies]
 rmcp = { version = "1.7.0", features = [
@@ -41,3 +49,4 @@ serde_json = "1.0"
 anyhow = "1"
 fasteval = "0.2.4"
 axum = "0.8.9"
+reqwest = { version = "0.13.3", default-features = false, features = ["json", "rustls"] }
