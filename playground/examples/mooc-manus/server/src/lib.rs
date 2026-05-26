@@ -5,6 +5,7 @@ pub mod data;
 pub mod domain;
 pub mod infrastructure;
 pub mod initializers;
+pub mod interfaces;
 pub mod mailers;
 pub mod models;
 pub mod openapi;

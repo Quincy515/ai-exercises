@@ -1,0 +1,2 @@
+pub mod sea_orm_app_config_repository;
+pub use sea_orm_app_config_repository::SeaOrmAppConfigRepository;
