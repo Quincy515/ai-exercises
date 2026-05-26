@@ -3,7 +3,7 @@ use validator::Validate;
 
 /// 语言模型配置
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Validate)]
-struct LlmConfig {
+pub struct LlmConfig {
     #[validate(url)]
     pub base_url: Option<String>,
     pub api_key: Option<String>,
@@ -27,16 +27,8 @@ impl Default for LlmConfig {
 }
 
 /// 应用配置信息，包含Agent配置、LLM提供商、A2A网络、MCP服务配置等
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-struct AppConfig {
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+pub struct AppConfig {
     /// 语言模型配置
     pub llm_config: LlmConfig,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            llm_config: LlmConfig::default(),
-        }
-    }
 }
