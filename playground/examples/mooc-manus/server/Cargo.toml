@@ -13,15 +13,17 @@ default-run = "server-cli"
 loco-rs = { version = "0.16" }
 
 [dependencies]
+anyhow = "1"
+thiserror = "2"
 loco-rs = { workspace = true, features = ["cache_redis", "storage_aws_s3"] }
 loco-openapi = { version = "0.1.2", default-features = false, features = [
-  "swagger",
-  "redoc",
+    "swagger",
+    "redoc",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 tokio = { version = "1.45", default-features = false, features = [
-  "rt-multi-thread",
+    "rt-multi-thread",
 ] }
 async-trait = { version = "0.1" }
 axum = { version = "0.8" }
@@ -30,10 +32,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 regex = { version = "1.11" }
 migration = { path = "migration" }
 sea-orm = { version = "1.1", features = [
-  "sqlx-sqlite",
-  "sqlx-postgres",
-  "runtime-tokio-rustls",
-  "macros",
+    "sqlx-sqlite",
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+    "macros",
 ] }
 chrono = { version = "0.4" }
 validator = { version = "0.20" }
