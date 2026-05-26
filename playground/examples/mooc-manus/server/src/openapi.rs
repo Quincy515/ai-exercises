@@ -11,6 +11,7 @@ use loco_openapi::prelude::{OpenApi, SecurityAddon};
     tags(
         (name = "认证", description = "认证相关接口"),
         (name = "状态模块", description = "包含 **状态监测** 等 API 接口，用于监测系统的运行状态"),
+        (name = "设置模块", description = "应用配置信息，包含 **Agent** 配置、**LLM** 提供商配置、**A2A** 网络配置、**MCP** 服务配置等"),
     )
 )]
 pub struct ApiDoc;
