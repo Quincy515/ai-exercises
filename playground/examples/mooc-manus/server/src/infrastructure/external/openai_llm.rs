@@ -224,4 +224,31 @@ mod tests {
         assert_eq!(request["parallel_tool_calls"], json!(false));
         assert_eq!(request["response_format"]["type"], json!("json_object"));
     }
+
+    #[tokio::test]
+    #[ignore = "requires LLM_API_KEY and live provider access"]
+    async fn invokes_live_llm_when_configured() -> Result<()> {
+        let llm = OpenAILLM::new(LlmConfig {
+            base_url: std::env::var("LLM_BASE_URL").ok(),
+            api_key: std::env::var("LLM_API_KEY").ok(),
+            model_name: std::env::var("LLM_MODEL_NAME").ok(),
+            temperature: Some(0.7),
+            max_tokens: Some(8192),
+        });
+
+        let response = llm
+            .invoke(
+                vec![Message::from_iter([
+                    ("role".to_string(), "user".into()),
+                    ("content".to_string(), "Hello, how are you?".into()),
+                ])],
+                None,
+                None,
+                None,
+            )
+            .await?;
+
+        assert!(!response.is_empty());
+        Ok(())
+    }
 }
