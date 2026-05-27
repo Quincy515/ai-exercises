@@ -8,7 +8,8 @@ async fn can_get_status() {
     request::<App, _, _>(|request, _ctx| async move {
         let res = request.get("/api/status").await;
         assert_eq!(res.status_code(), 200);
-        res.assert_json(&serde_json::json!(null));
+        let body: serde_json::Value = serde_json::from_str(&res.text()).unwrap();
+        assert!(body.as_array().is_some_and(|items| !items.is_empty()));
     })
     .await;
 }
