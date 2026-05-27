@@ -4,6 +4,8 @@
 use loco_openapi::prelude::{openapi, routes};
 use loco_rs::prelude::*;
 
+use crate::views::HealthStatusResponse;
+
 #[utoipa::path(
     get,
     path = "/api/status",
@@ -11,7 +13,7 @@ use loco_rs::prelude::*;
     summary = "系统健康检查",
     description = "监测系统的 Postgres、Redis、storage、后端服务等组件的状态信息。",
     responses(
-        (status = 200, description = "系统状态正常"),
+        (status = 200, description = "系统状态正常", body = Vec<HealthStatusResponse>),
         (status = 500, description = "系统状态异常")
     )
 )]
