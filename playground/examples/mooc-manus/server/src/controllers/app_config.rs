@@ -5,6 +5,12 @@
 use loco_openapi::prelude::{openapi, routes};
 use loco_rs::prelude::*;
 
+use crate::{
+    application::error::AppError,
+    interfaces::service_dependencies,
+    views::{LlmConfigRequest, LlmConfigResponse},
+};
+
 #[utoipa::path(
     get,
     path = "/api/app_configs/llm",
@@ -12,13 +18,18 @@ use loco_rs::prelude::*;
     summary = "获取 LLM 配置信息",
     description = "包含 LLM 提供商的 base_url、temperature、model_name、max_tokens；api_key 只返回是否已配置。",
     responses(
-        (status = 200, description = "LLM 配置信息"),
+        (status = 200, description = "LLM 配置信息", body = LlmConfigResponse),
         (status = 500, description = "配置读取失败")
     )
 )]
 #[debug_handler]
-pub async fn get_llm_config(State(_ctx): State<AppContext>) -> Result<Response> {
-    format::empty()
+pub async fn get_llm_config(State(ctx): State<AppContext>) -> Result<Response> {
+    let service = service_dependencies::get_app_config_service(&ctx);
+    let llm_config = service
+        .get_llm_config()
+        .await
+        .map_err(|err| AppError::internal("app_config.get_llm_config_failed", err.to_string()))?;
+    format::json(LlmConfigResponse::from(llm_config))
 }
 
 #[utoipa::path(
@@ -27,14 +38,25 @@ pub async fn get_llm_config(State(_ctx): State<AppContext>) -> Result<Response> 
     tag = "设置模块",
     summary = "更新 LLM 配置信息",
     description = "更新 LLM 配置信息；api_key 为空时保留旧值。",
+    request_body = LlmConfigRequest,
     responses(
-        (status = 200, description = "LLM 配置更新成功"),
+        (status = 200, description = "LLM 配置更新成功", body = LlmConfigResponse),
         (status = 500, description = "配置写入失败")
     )
 )]
 #[debug_handler]
-pub async fn update_llm_config(State(_ctx): State<AppContext>) -> Result<Response> {
-    format::empty()
+pub async fn update_llm_config(
+    State(ctx): State<AppContext>,
+    Json(config): Json<LlmConfigRequest>,
+) -> Result<Response> {
+    let service = service_dependencies::get_app_config_service(&ctx);
+    let llm_config = service
+        .update_llm_config(config.into())
+        .await
+        .map_err(|err| {
+            AppError::internal("app_config.update_llm_config_failed", err.to_string())
+        })?;
+    format::json(LlmConfigResponse::from(llm_config))
 }
 
 pub fn routes() -> Routes {
