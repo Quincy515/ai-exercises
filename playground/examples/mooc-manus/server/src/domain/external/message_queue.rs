@@ -13,17 +13,17 @@ pub type SharedMessageQueue = Arc<dyn MessageQueue>;
 pub trait MessageQueue: Send + Sync {
     /// 写入一条任务消息。
     /// Push one task message into the queue.
-    async fn put(&self, message: MessageQueuePayload) -> Result<()>;
+    async fn put(&self, message: MessageQueuePayload) -> Result<String>;
 
     /// 根据传递的开始 id + 阻塞时间，获取一条数据
     async fn get(
         &self,
         start_id: Option<&str>,
-        block_ms: Option<u64>,
-    ) -> Result<Option<(&str, MessageQueuePayload)>>;
+        block_ms: Option<usize>,
+    ) -> Result<Option<(String, MessageQueuePayload)>>;
 
     /// 获取并移除消息队列中的第一条消息
-    async fn pop(&self) -> Result<Option<(&str, MessageQueuePayload)>>;
+    async fn pop(&self) -> Result<Option<(String, MessageQueuePayload)>>;
 
     /// 清空消息队列中的所有消息
     async fn clear(&self) -> Result<()>;

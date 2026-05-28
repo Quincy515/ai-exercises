@@ -30,6 +30,7 @@ axum = { version = "0.8" }
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 regex = { version = "1.11" }
+redis = { version = "1", features = ["tokio-rustls-comp"] }
 migration = { path = "migration" }
 sea-orm = { version = "1.1", features = [
     "sqlx-sqlite",
