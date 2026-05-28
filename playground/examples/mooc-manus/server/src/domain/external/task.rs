@@ -59,12 +59,6 @@ pub trait Task: Send + Sync {
     where
         Self: Sized;
 
-    /// 关联函数：根据传递的任务运行器创建任务。
-    /// Create a task with the provided task runner.
-    fn create(task_runner: SharedTaskRunner) -> Result<SharedTask>
-    where
-        Self: Sized;
-
     /// 关联函数：销毁所有任务实例。
     /// Destroy all task instances.
     async fn destroy() -> Result<()>
