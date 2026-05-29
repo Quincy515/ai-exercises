@@ -3,6 +3,7 @@ pub mod event;
 pub mod health_status;
 pub mod memory;
 pub mod plan;
+pub mod tool_result;
 
 pub use app_config::{AppConfig, LlmConfig};
 pub use event::{
@@ -12,3 +13,4 @@ pub use event::{
 pub use health_status::HealthStatus;
 pub use memory::{Memory, Message};
 pub use plan::{ExecutionStatus, Plan, Step};
+pub use tool_result::ToolResult;
