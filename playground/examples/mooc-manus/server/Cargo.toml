@@ -44,6 +44,7 @@ uuid = { version = "1.6", features = ["v4"] }
 include_dir = { version = "0.7" }
 utoipa = { version = "5.5" }
 async-openai = { version = "0.40", features = ["full"] }
+llm_json = "1"
 
 [[bin]]
 name = "server-cli"
