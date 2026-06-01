@@ -75,6 +75,7 @@ impl Model {
                 temperature: self.temperature,
                 max_tokens: db_max_tokens_to_domain(self.max_tokens)?,
             },
+            ..AppConfig::default()
         })
     }
 }

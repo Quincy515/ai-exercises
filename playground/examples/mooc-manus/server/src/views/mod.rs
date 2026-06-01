@@ -2,5 +2,7 @@ pub mod app_config;
 pub mod auth;
 pub mod health_status;
 
-pub use app_config::{LlmConfigRequest, LlmConfigResponse};
+pub use app_config::{
+    AgentConfigRequest, AgentConfigResponse, LlmConfigRequest, LlmConfigResponse,
+};
 pub use health_status::HealthStatusResponse;

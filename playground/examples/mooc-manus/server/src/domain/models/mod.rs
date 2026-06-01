@@ -6,7 +6,7 @@ pub mod memory;
 pub mod plan;
 pub mod tool_result;
 
-pub use app_config::{AppConfig, LlmConfig};
+pub use app_config::{AgentConfig, AppConfig, LlmConfig};
 pub use event::{
     BaseEvent, BrowserToolContent, DoneEvent, ErrorEvent, Event, EventType, McpToolContent,
     MessageEvent, MessageRole, PlanEvent, PlanEventStatus, StepEvent, StepEventStatus, TitleEvent,

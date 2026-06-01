@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::domain::models::LlmConfig;
+use crate::domain::models::{AgentConfig, LlmConfig};
 
 /// LLM 配置更新请求。
 /// Request payload for updating LLM config.
@@ -48,6 +48,44 @@ impl From<LlmConfig> for LlmConfigResponse {
             model_name: config.model_name,
             temperature: config.temperature,
             max_tokens: config.max_tokens,
+        }
+    }
+}
+
+/// Agent 配置更新请求。
+/// Request payload for updating Agent config.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct AgentConfigRequest {
+    pub max_iterations: usize,
+    pub max_retries: usize,
+    pub max_search_results: usize,
+}
+
+impl From<AgentConfigRequest> for AgentConfig {
+    fn from(request: AgentConfigRequest) -> Self {
+        Self {
+            max_iterations: request.max_iterations,
+            max_retries: request.max_retries,
+            max_search_results: request.max_search_results,
+        }
+    }
+}
+
+/// Agent 配置响应。
+/// Response payload for Agent config.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AgentConfigResponse {
+    pub max_iterations: usize,
+    pub max_retries: usize,
+    pub max_search_results: usize,
+}
+
+impl From<AgentConfig> for AgentConfigResponse {
+    fn from(config: AgentConfig) -> Self {
+        Self {
+            max_iterations: config.max_iterations,
+            max_retries: config.max_retries,
+            max_search_results: config.max_search_results,
         }
     }
 }
