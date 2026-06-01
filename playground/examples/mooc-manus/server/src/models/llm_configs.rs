@@ -14,12 +14,12 @@ pub use super::_entities::llm_configs::{ActiveModel, Column, Entity, Model};
 use anyhow::{Context, Result};
 use sea_orm::entity::prelude::*;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
-    IntoActiveModel, QueryFilter, QueryOrder,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, EntityTrait, IntoActiveModel,
+    QueryFilter, QueryOrder,
 };
 use uuid::Uuid;
 
-use crate::domain::models::{AppConfig, LlmConfig};
+use crate::domain::models::LlmConfig;
 
 pub type LlmConfigs = Entity;
 
@@ -51,7 +51,10 @@ impl Model {
     ///
     /// 系统级配置当前用 `user_id IS NULL` 表示，并排除软删除记录。
     /// System-level config currently means `user_id IS NULL`, excluding soft-deleted rows.
-    pub async fn find_system_config(db: &DatabaseConnection) -> Result<Option<Self>> {
+    pub async fn find_system_config<C>(db: &C) -> Result<Option<Self>>
+    where
+        C: ConnectionTrait,
+    {
         let model = Entity::find()
             .filter(system_llm_config_condition())
             .order_by_asc(Column::Id)
@@ -61,21 +64,18 @@ impl Model {
         Ok(model)
     }
 
-    /// 将数据库行转换成领域层应用配置。
-    /// Convert a database row into the domain application config.
+    /// 将数据库行转换成领域层 LLM 配置。
+    /// Convert a database row into the domain LLM config.
     ///
     /// 这里集中处理数据库字段类型和领域字段类型的差异。
     /// This centralizes conversion between database field types and domain field types.
-    pub fn into_app_config(self) -> Result<AppConfig> {
-        Ok(AppConfig {
-            llm_config: LlmConfig {
-                base_url: self.base_url,
-                api_key: self.api_key,
-                model_name: self.model_name,
-                temperature: self.temperature,
-                max_tokens: db_max_tokens_to_domain(self.max_tokens)?,
-            },
-            ..AppConfig::default()
+    pub fn into_llm_config(self) -> Result<LlmConfig> {
+        Ok(LlmConfig {
+            base_url: self.base_url,
+            api_key: self.api_key,
+            model_name: self.model_name,
+            temperature: self.temperature,
+            max_tokens: db_max_tokens_to_domain(self.max_tokens)?,
         })
     }
 }
@@ -122,26 +122,27 @@ impl ActiveModel {
 /// `llm_configs` 表入口。
 /// Entrypoint for the `llm_configs` table.
 impl Entity {
-    /// 从数据库加载应用配置。
-    /// Load application config from the database.
-    ///
-    /// 当前只读取 LLM 配置，后续 Agent、A2A、MCP 配置可以在这里继续聚合。
-    /// This currently loads only LLM config; Agent, A2A, and MCP config can be aggregated here later.
-    pub async fn load_app_config(db: &DatabaseConnection) -> Result<Option<AppConfig>> {
+    /// 从数据库加载 LLM 配置。
+    /// Load LLM config from the database.
+    pub async fn load_llm_config<C>(db: &C) -> Result<Option<LlmConfig>>
+    where
+        C: ConnectionTrait,
+    {
         Model::find_system_config(db)
             .await?
-            .map(Model::into_app_config)
+            .map(Model::into_llm_config)
             .transpose()
     }
 
-    /// 保存应用配置。
-    /// Save application config.
+    /// 保存 LLM 配置。
+    /// Save LLM config.
     ///
     /// 已存在系统级 LLM 配置时更新；没有记录时创建一条新的系统级配置。
     /// Updates the existing system-level LLM config, or inserts a new one when missing.
-    pub async fn save_app_config(db: &DatabaseConnection, config: AppConfig) -> Result<()> {
-        let llm_config = config.llm_config;
-
+    pub async fn save_llm_config<C>(db: &C, llm_config: LlmConfig) -> Result<()>
+    where
+        C: ConnectionTrait,
+    {
         match Model::find_system_config(db).await? {
             Some(model) => {
                 let mut active_model = model.into_active_model();
