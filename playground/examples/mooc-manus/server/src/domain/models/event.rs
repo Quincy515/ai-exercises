@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use crate::domain::models::{Plan, Step};
+use crate::domain::models::{File, Plan, Step, ToolResult};
 
 /// 事件类型
 /// Event type.
@@ -73,6 +73,20 @@ pub enum StepEventStatus {
     /// 失败
     /// Failed.
     Failed,
+}
+
+/// 工具事件状态
+/// Tool event status.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolEventStatus {
+    /// 调用中
+    /// Calling.
+    #[default]
+    Calling,
+    /// 调用完毕
+    /// Called.
+    Called,
 }
 
 /// 消息角色
@@ -214,7 +228,7 @@ pub struct MessageEvent {
     /// 附件列表信息
     /// Attachment list.
     #[serde(default)]
-    pub attachments: Vec<Value>,
+    pub attachments: Vec<File>,
 }
 
 impl Default for MessageEvent {
@@ -231,12 +245,61 @@ impl Default for MessageEvent {
     }
 }
 
+/// 工具内容
+/// Tool content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserToolContent {
+    /// 浏览器快照截图
+    /// Browser screenshot.
+    pub screenshot: String,
+}
+
+/// MCP 工具内容
+/// MCP tool content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpToolContent {
+    /// MCP 工具返回结果
+    /// MCP tool result.
+    pub result: Value,
+}
+
+/// 工具扩展内容
+/// Extended tool content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ToolContent {
+    Browser(BrowserToolContent),
+    Mcp(McpToolContent),
+}
+
 /// 工具事件
 /// Tool event.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolEvent {
     #[serde(flatten, default)]
     pub base: BaseEvent,
+    /// 工具调用 id
+    /// Tool call id.
+    pub tool_call_id: String,
+    /// 工具集的名字
+    /// Tool collection name.
+    pub tool_name: String,
+    /// 工具扩展内容
+    /// Extended tool content.
+    pub tool_content: Option<ToolContent>,
+    /// LLM 调用的函数 / 工具名字
+    /// LLM-called function or tool name.
+    pub function_name: String,
+    /// LLM 生成的工具调用参数
+    /// LLM-generated tool arguments.
+    pub function_args: Map<String, Value>,
+    /// 工具调用结果
+    /// Tool call result.
+    pub function_result: Option<ToolResult<Value>>,
+    /// 工具事件状态
+    /// Tool event status.
+    #[serde(default)]
+    pub status: ToolEventStatus,
 }
 
 impl Default for ToolEvent {
@@ -246,6 +309,13 @@ impl Default for ToolEvent {
                 event_type: EventType::Tool,
                 ..BaseEvent::default()
             },
+            tool_call_id: String::new(),
+            tool_name: String::new(),
+            tool_content: None,
+            function_name: String::new(),
+            function_args: Map::new(),
+            function_result: None,
+            status: ToolEventStatus::Calling,
         }
     }
 }
@@ -337,8 +407,11 @@ fn event_now() -> DateTime<Utc> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BaseEvent, Event, EventType, MessageEvent, MessageRole, PlanEvent, TitleEvent};
-    use serde_json::Value;
+    use super::{
+        BaseEvent, BrowserToolContent, Event, EventType, McpToolContent, MessageEvent, MessageRole,
+        PlanEvent, TitleEvent, ToolContent, ToolEvent, ToolEventStatus,
+    };
+    use serde_json::{json, Value};
     use uuid::Uuid;
 
     #[test]
@@ -403,6 +476,60 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&MessageRole::Assistant).unwrap(),
             "\"assistant\""
+        );
+    }
+
+    #[test]
+    fn tool_event_defaults_match_python() {
+        let value = serde_json::to_value(ToolEvent::default()).unwrap();
+
+        assert_eq!(value.get("type"), Some(&Value::String("tool".to_string())));
+        assert_eq!(
+            value.get("tool_call_id"),
+            Some(&Value::String(String::new()))
+        );
+        assert_eq!(value.get("tool_name"), Some(&Value::String(String::new())));
+        assert_eq!(value.get("tool_content"), Some(&Value::Null));
+        assert_eq!(
+            value.get("function_name"),
+            Some(&Value::String(String::new()))
+        );
+        assert_eq!(value.get("function_args"), Some(&json!({})));
+        assert_eq!(value.get("function_result"), Some(&Value::Null));
+        assert_eq!(
+            value.get("status"),
+            Some(&Value::String("calling".to_string()))
+        );
+    }
+
+    #[test]
+    fn tool_content_matches_python_union_shape() {
+        let browser = ToolContent::Browser(BrowserToolContent {
+            screenshot: "snapshot.png".to_string(),
+        });
+        assert_eq!(
+            serde_json::to_value(browser).unwrap(),
+            json!({ "screenshot": "snapshot.png" })
+        );
+
+        let mcp = ToolContent::Mcp(McpToolContent {
+            result: json!({ "answer": 42 }),
+        });
+        assert_eq!(
+            serde_json::to_value(mcp).unwrap(),
+            json!({ "result": { "answer": 42 } })
+        );
+    }
+
+    #[test]
+    fn tool_event_status_uses_python_enum_values() {
+        assert_eq!(
+            serde_json::to_string(&ToolEventStatus::Calling).unwrap(),
+            "\"calling\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ToolEventStatus::Called).unwrap(),
+            "\"called\""
         );
     }
 
