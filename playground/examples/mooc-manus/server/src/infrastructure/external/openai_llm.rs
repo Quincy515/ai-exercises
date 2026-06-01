@@ -7,7 +7,7 @@ use serde_json::{json, Map, Value};
 use tracing::{error, info};
 
 use crate::domain::{
-    external::{Llm, Message, Response, ResponseFormat, Tool, ToolChoice},
+    external::{Llm, LlmMessage, Response, ResponseFormat, Tool, ToolChoice},
     models::LlmConfig,
 };
 
@@ -58,7 +58,7 @@ impl OpenAILLM {
 
     fn build_request(
         &self,
-        messages: Vec<Message>,
+        messages: Vec<LlmMessage>,
         tools: Option<Vec<Tool>>,
         response_format: Option<ResponseFormat>,
         tool_choice: Option<ToolChoice>,
@@ -101,7 +101,7 @@ impl OpenAILLM {
 impl Llm for OpenAILLM {
     async fn invoke(
         &self,
-        messages: Vec<Message>,
+        messages: Vec<LlmMessage>,
         tools: Option<Vec<Tool>>,
         response_format: Option<ResponseFormat>,
         tool_choice: Option<ToolChoice>,
@@ -170,7 +170,7 @@ mod tests {
         });
 
         let request = llm.build_request(
-            vec![Message::from_iter([
+            vec![LlmMessage::from_iter([
                 ("role".to_string(), "user".into()),
                 ("content".to_string(), "Hello".into()),
             ])],
@@ -207,7 +207,7 @@ mod tests {
         ]);
 
         let request = llm.build_request(
-            vec![Message::from_iter([
+            vec![LlmMessage::from_iter([
                 ("role".to_string(), "user".into()),
                 ("content".to_string(), "Search".into()),
             ])],
@@ -238,7 +238,7 @@ mod tests {
 
         let response = llm
             .invoke(
-                vec![Message::from_iter([
+                vec![LlmMessage::from_iter([
                     ("role".to_string(), "user".into()),
                     ("content".to_string(), "Hello, how are you?".into()),
                 ])],

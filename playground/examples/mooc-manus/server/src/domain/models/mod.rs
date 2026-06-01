@@ -3,6 +3,7 @@ pub mod event;
 pub mod file;
 pub mod health_status;
 pub mod memory;
+pub mod message;
 pub mod plan;
 pub mod tool_result;
 
@@ -14,6 +15,7 @@ pub use event::{
 };
 pub use file::File;
 pub use health_status::HealthStatus;
-pub use memory::{Memory, Message};
+pub use memory::{Memory, Message as MemoryMessage};
+pub use message::Message;
 pub use plan::{ExecutionStatus, Plan, Step};
 pub use tool_result::ToolResult;

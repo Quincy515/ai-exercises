@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 
-pub type Message = Map<String, Value>;
+pub type LlmMessage = Map<String, Value>;
 pub type Tool = Map<String, Value>;
 pub type ResponseFormat = Map<String, Value>;
 pub type ToolChoice = String;
@@ -16,7 +16,7 @@ pub trait Llm: Send + Sync {
     /// Invoke the LLM with messages, tools, response format, and tool choice.
     async fn invoke(
         &self,
-        messages: Vec<Message>,
+        messages: Vec<LlmMessage>,
         tools: Option<Vec<Tool>>,
         response_format: Option<ResponseFormat>,
         tool_choice: Option<ToolChoice>,

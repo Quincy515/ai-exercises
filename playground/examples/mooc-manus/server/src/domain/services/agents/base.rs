@@ -9,8 +9,10 @@ use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::domain::{
-    external::{JsonParser, Llm, Message, ResponseFormat},
-    models::{AgentConfig, ErrorEvent, Event, Memory, ToolEvent, ToolEventStatus, ToolResult},
+    external::{JsonParser, Llm, LlmMessage, ResponseFormat},
+    models::{
+        AgentConfig, ErrorEvent, Event, Memory, Message, ToolEvent, ToolEventStatus, ToolResult,
+    },
     services::tools::{BaseTool, ToolArguments, ToolSchema},
 };
 
@@ -105,6 +107,50 @@ impl BaseAgent {
     /// 压缩 Agent 的记忆。
     pub fn compact_memory(&mut self) {
         self.memory.compact();
+    }
+
+    /// Agent 的状态回滚，该函数用于确保 Agent 的消息列表状态是正确的，用于发送新消息、暂停/停止任务、通知用户
+    pub fn roll_back(&mut self, message: Message) -> Result<()> {
+        // 1. 取出记忆中的最后一条消息，检查是否是工具调用
+        let Some(tool_call) = self
+            .memory
+            .get_last_message()
+            .and_then(get_tool_calls)
+            .and_then(|tool_calls| tool_calls.first())
+        else {
+            return Ok(());
+        };
+
+        // 2. 取出消息中的工具调用参数，并提取工具名字
+        let function_name = tool_call
+            .get("function")
+            .and_then(Value::as_object)
+            .and_then(|function| function.get("name"))
+            .and_then(Value::as_str);
+
+        // 4. 判断当前的工具是不是通知用户（message_ask_user)
+        if function_name == Some("message_ask_user") {
+            self.memory.add_message(LlmMessage::from_iter([
+                ("role".to_string(), Value::String("tool".to_string())),
+                (
+                    "tool_call_id".to_string(),
+                    tool_call.get("id").cloned().unwrap_or(Value::Null),
+                ),
+                (
+                    "function_name".to_string(),
+                    Value::String("message_ask_user".to_string()),
+                ),
+                (
+                    "content".to_string(),
+                    Value::String(serde_json::to_string(&message)?),
+                ),
+            ]));
+        } else {
+            // 5. 否则直接删除最后一条消息
+            self.memory.roll_back();
+        }
+
+        Ok(())
     }
 
     /// 传递消息和响应格式调用 Agent，返回本轮依次产生的事件。
@@ -233,9 +279,9 @@ impl BaseAgent {
     /// 调用语言模型并处理记忆内容。
     async fn invoke_llm(
         &mut self,
-        messages: Vec<Message>,
+        messages: Vec<LlmMessage>,
         format: Option<&str>,
-    ) -> Result<Message> {
+    ) -> Result<LlmMessage> {
         // 1. 将消息添加到记忆中
         self.add_to_memory(messages);
 
@@ -318,7 +364,7 @@ impl BaseAgent {
     }
 
     /// 将对应的信息添加到记忆中。
-    fn add_to_memory(&mut self, messages: Vec<Message>) {
+    fn add_to_memory(&mut self, messages: Vec<LlmMessage>) {
         // 1. 检查记忆的消息列表是否为空，如果为空则需要添加预设 Prompt 作为初始记忆
         if self.memory.empty() {
             self.memory
@@ -361,6 +407,11 @@ pub trait Agent: Send + Sync {
         self.base_mut().compact_memory();
     }
 
+    /// 回滚 Agent 末尾尚未闭合的工具调用。
+    fn roll_back(&mut self, message: Message) -> Result<()> {
+        self.base_mut().roll_back(message)
+    }
+
     /// 传递消息和响应格式调用 Agent，返回本轮依次产生的事件。
     async fn invoke(&mut self, query: &str, format: Option<&str>) -> Result<Vec<Event>> {
         self.base_mut().invoke(query, format).await
@@ -377,15 +428,15 @@ impl Agent for BaseAgent {
     }
 }
 
-fn text_message(role: &str, content: &str) -> Message {
-    Message::from_iter([
+fn text_message(role: &str, content: &str) -> LlmMessage {
+    LlmMessage::from_iter([
         ("role".to_string(), Value::String(role.to_string())),
         ("content".to_string(), Value::String(content.to_string())),
     ])
 }
 
-fn tool_message(tool_call_id: String, function_name: String, content: Value) -> Message {
-    Message::from_iter([
+fn tool_message(tool_call_id: String, function_name: String, content: Value) -> LlmMessage {
+    LlmMessage::from_iter([
         ("role".to_string(), Value::String("tool".to_string())),
         ("tool_call_id".to_string(), Value::String(tool_call_id)),
         ("function_name".to_string(), Value::String(function_name)),
@@ -393,7 +444,7 @@ fn tool_message(tool_call_id: String, function_name: String, content: Value) -> 
     ])
 }
 
-fn get_tool_calls(message: &Message) -> Option<&[Value]> {
+fn get_tool_calls(message: &LlmMessage) -> Option<&[Value]> {
     message
         .get("tool_calls")
         .and_then(Value::as_array)
@@ -401,13 +452,13 @@ fn get_tool_calls(message: &Message) -> Option<&[Value]> {
         .map(Vec::as_slice)
 }
 
-fn is_empty_assistant_message(message: &Message) -> bool {
+fn is_empty_assistant_message(message: &LlmMessage) -> bool {
     message.get("role").and_then(Value::as_str) == Some("assistant")
         && !has_content(message)
         && get_tool_calls(message).is_none()
 }
 
-fn has_content(message: &Message) -> bool {
+fn has_content(message: &LlmMessage) -> bool {
     message.get("content").is_some_and(|content| match content {
         Value::Null => false,
         Value::String(content) => !content.is_empty(),
@@ -415,7 +466,7 @@ fn has_content(message: &Message) -> bool {
     })
 }
 
-fn filter_llm_message(message: Message) -> Message {
+fn filter_llm_message(message: LlmMessage) -> LlmMessage {
     // 8. 非 AI 消息则记录日志，并存储 message
     if message.get("role").and_then(Value::as_str) != Some("assistant") {
         warn!(
@@ -426,7 +477,7 @@ fn filter_llm_message(message: Message) -> Message {
     }
 
     // 7. 取出工具调用结果，限制 LLM 一次只调用一个工具
-    let mut filtered_message = Message::from_iter([
+    let mut filtered_message = LlmMessage::from_iter([
         ("role".to_string(), Value::String("assistant".to_string())),
         (
             "content".to_string(),
@@ -461,7 +512,7 @@ mod tests {
         services::tools::{tool, ToolDefinition},
     };
 
-    type Requests = Arc<Mutex<Vec<Vec<Message>>>>;
+    type Requests = Arc<Mutex<Vec<Vec<LlmMessage>>>>;
     type ToolCounts = Arc<Mutex<Vec<usize>>>;
 
     struct MockLlm {
@@ -474,7 +525,7 @@ mod tests {
     impl Llm for MockLlm {
         async fn invoke(
             &self,
-            messages: Vec<Message>,
+            messages: Vec<LlmMessage>,
             tools: Option<Vec<Tool>>,
             _response_format: Option<ResponseFormat>,
             _tool_choice: Option<ToolChoice>,
@@ -561,15 +612,19 @@ mod tests {
         }
     }
 
-    fn assistant_message(content: Value) -> Message {
-        Message::from_iter([
+    fn assistant_message(content: Value) -> LlmMessage {
+        LlmMessage::from_iter([
             ("role".to_string(), json!("assistant")),
             ("content".to_string(), content),
         ])
     }
 
-    fn tool_call_message() -> Message {
-        Message::from_iter([
+    fn tool_call_message() -> LlmMessage {
+        tool_call_message_named("echo")
+    }
+
+    fn tool_call_message_named(function_name: &str) -> LlmMessage {
+        LlmMessage::from_iter([
             ("role".to_string(), json!("assistant")),
             ("content".to_string(), Value::Null),
             (
@@ -577,7 +632,7 @@ mod tests {
                 json!([{
                     "id": "call-1",
                     "function": {
-                        "name": "echo",
+                        "name": function_name,
                         "arguments": "{\"text\":\"hello\"}"
                     }
                 }]),
@@ -715,7 +770,7 @@ mod tests {
     #[test]
     fn compact_memory_forwards_to_memory() {
         let (mut agent, _, _) = agent(Vec::new(), Vec::new());
-        agent.memory.add_message(Message::from_iter([
+        agent.memory.add_message(LlmMessage::from_iter([
             ("role".to_string(), json!("assistant")),
             ("content".to_string(), json!("answer")),
             ("reasoning_content".to_string(), json!("hidden")),
@@ -724,5 +779,57 @@ mod tests {
         agent.compact_memory();
 
         assert!(!agent.memory().get_messages()[0].contains_key("reasoning_content"));
+    }
+
+    #[test]
+    fn roll_back_removes_unfinished_tool_call() {
+        let (mut agent, _, _) = agent(Vec::new(), Vec::new());
+        agent.memory.add_message(tool_call_message());
+
+        agent.roll_back(Message::default()).unwrap();
+
+        assert!(agent.memory().empty());
+    }
+
+    #[test]
+    fn roll_back_closes_message_ask_user_tool_call() {
+        let (mut agent, _, _) = agent(Vec::new(), Vec::new());
+        agent
+            .memory
+            .add_message(tool_call_message_named("message_ask_user"));
+
+        agent
+            .roll_back(Message {
+                message: "继续执行".to_string(),
+                attachments: vec!["/tmp/report.pdf".to_string()],
+            })
+            .unwrap();
+
+        let messages = agent.memory().get_messages();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(Memory::get_message_role(&messages[1]), Some("tool"));
+        assert_eq!(messages[1].get("tool_call_id"), Some(&json!("call-1")));
+        assert_eq!(
+            messages[1].get("function_name"),
+            Some(&json!("message_ask_user"))
+        );
+        assert_eq!(
+            messages[1].get("content"),
+            Some(&json!(
+                "{\"message\":\"继续执行\",\"attachments\":[\"/tmp/report.pdf\"]}"
+            ))
+        );
+    }
+
+    #[test]
+    fn roll_back_keeps_memory_without_pending_tool_call() {
+        let (mut agent, _, _) = agent(Vec::new(), Vec::new());
+        agent
+            .memory
+            .add_message(text_message("assistant", "completed"));
+
+        agent.roll_back(Message::default()).unwrap();
+
+        assert_eq!(agent.memory().get_messages().len(), 1);
     }
 }
