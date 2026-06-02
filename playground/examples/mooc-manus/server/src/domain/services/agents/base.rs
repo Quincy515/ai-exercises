@@ -11,7 +11,8 @@ use uuid::Uuid;
 use crate::domain::{
     external::{JsonParser, Llm, LlmMessage, ResponseFormat},
     models::{
-        AgentConfig, ErrorEvent, Event, Memory, Message, ToolEvent, ToolEventStatus, ToolResult,
+        AgentConfig, ErrorEvent, Event, Memory, Message, MessageEvent, ToolEvent, ToolEventStatus,
+        ToolResult,
     },
     services::tools::{BaseTool, ToolArguments, ToolSchema},
 };
@@ -104,6 +105,11 @@ impl BaseAgent {
         &self.memory
     }
 
+    /// 返回 JSON 输出解析器。
+    pub fn json_parser(&self) -> &dyn JsonParser {
+        self.json_parser.as_ref()
+    }
+
     /// 压缩 Agent 的记忆。
     pub fn compact_memory(&mut self) {
         self.memory.compact();
@@ -167,10 +173,12 @@ impl BaseAgent {
             .await?;
 
         // 3. 循环遍历直到最大迭代次数
+        let mut reached_max_iterations = true;
         for _ in 0..self.agent_config.max_iterations {
             // 4. 如果响应内容无法调用则表示 LLM 生成了文本回答，这个时候就是最终答案
             let Some(tool_calls) = get_tool_calls(&message) else {
-                return Ok(events);
+                reached_max_iterations = false;
+                break;
             };
 
             // 5. 循环遍历工具参数并执行
@@ -247,14 +255,30 @@ impl BaseAgent {
             message = self.invoke_llm(tool_messages, None).await?;
         }
 
-        // 13. 超过最大重试次数后，将错误抛出
-        events.push(Event::Error(ErrorEvent {
-            error: format!(
-                "Agent迭代超过最大迭代次数: {}, 任务处理失败",
-                self.agent_config.max_iterations
-            ),
-            ..ErrorEvent::default()
-        }));
+        // 13. 超过最大迭代次数后，返回错误事件
+        if reached_max_iterations {
+            events.push(Event::Error(ErrorEvent {
+                error: format!(
+                    "Agent迭代超过最大迭代次数: {}, 任务处理失败",
+                    self.agent_config.max_iterations
+                ),
+                ..ErrorEvent::default()
+            }));
+        }
+
+        // 14. 在指定步骤内完成了迭代则返回消息事件
+        if let Some(content) = message.get("content").and_then(Value::as_str) {
+            events.push(Event::Message(MessageEvent {
+                message: content.to_owned(),
+                ..MessageEvent::default()
+            }));
+        } else {
+            events.push(Event::Error(ErrorEvent {
+                error: "Agent未能生成有效回复内容".to_string(),
+                ..ErrorEvent::default()
+            }));
+        }
+
         Ok(events)
     }
 
@@ -686,7 +710,7 @@ mod tests {
 
         let events = agent.invoke("echo hello", None).await.unwrap();
 
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         let Event::Tool(calling) = &events[0] else {
             panic!("第一个事件必须是工具调用中事件");
         };
@@ -705,6 +729,11 @@ mod tests {
                 .and_then(|data| data.get("text")),
             Some(&json!("hello"))
         );
+
+        let Event::Message(message) = &events[2] else {
+            panic!("第三个事件必须是最终消息事件");
+        };
+        assert_eq!(message.message, "final answer");
 
         let roles = agent
             .memory()
@@ -733,7 +762,11 @@ mod tests {
 
         let events = agent.invoke("hello", None).await.unwrap();
 
-        assert!(events.is_empty());
+        assert_eq!(events.len(), 1);
+        let Event::Message(message) = &events[0] else {
+            panic!("事件必须是最终消息事件");
+        };
+        assert_eq!(message.message, "continue");
         assert_eq!(requests.lock().unwrap().len(), 2);
         let roles = agent
             .memory()
@@ -765,6 +798,52 @@ mod tests {
         let result = called.function_result.as_ref().unwrap();
         assert!(!result.success);
         assert_eq!(result.message.as_deref(), Some("工具执行失败"));
+    }
+
+    #[tokio::test]
+    async fn invoke_reports_iteration_limit_before_returning_last_message() {
+        let (mut agent, _, _) = agent(
+            vec![
+                tool_call_message(),
+                tool_call_message(),
+                tool_call_message(),
+                assistant_message(json!("late answer")),
+            ],
+            vec![Box::new(EchoTool::new(false))],
+        );
+
+        let events = agent.invoke("echo hello", None).await.unwrap();
+
+        assert_eq!(events.len(), 8);
+        let Event::Error(error) = &events[6] else {
+            panic!("第七个事件必须是最大迭代次数错误");
+        };
+        assert_eq!(error.error, "Agent迭代超过最大迭代次数: 3, 任务处理失败");
+        let Event::Message(message) = &events[7] else {
+            panic!("第八个事件必须是最终消息事件");
+        };
+        assert_eq!(message.message, "late answer");
+    }
+
+    #[tokio::test]
+    async fn invoke_reports_missing_final_content() {
+        let (mut agent, _, _) = agent(
+            vec![
+                tool_call_message(),
+                tool_call_message(),
+                tool_call_message(),
+                tool_call_message(),
+            ],
+            vec![Box::new(EchoTool::new(false))],
+        );
+
+        let events = agent.invoke("echo hello", None).await.unwrap();
+
+        assert_eq!(events.len(), 8);
+        let Event::Error(error) = &events[7] else {
+            panic!("第八个事件必须是最终回复内容错误");
+        };
+        assert_eq!(error.error, "Agent未能生成有效回复内容");
     }
 
     #[test]

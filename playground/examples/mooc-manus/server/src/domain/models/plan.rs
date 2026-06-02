@@ -24,6 +24,7 @@ pub enum ExecutionStatus {
 /// 计划中的每一个步骤 / 子任务
 /// A step or subtask inside a plan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct Step {
     /// 子任务 id
     /// Step id.
@@ -83,6 +84,7 @@ impl Step {
 /// 规划 Domain 模型，用于存储用户传递消息拆分出来的子任务 / 子步骤
 /// Domain model that stores subtasks split from the user's message.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct Plan {
     /// 计划 id
     /// Plan id.
@@ -223,5 +225,30 @@ mod tests {
             serde_json::to_string(&ExecutionStatus::Completed).unwrap(),
             "\"completed\""
         );
+    }
+
+    #[test]
+    fn deserializes_planner_output_with_python_defaults() {
+        let plan: Plan = serde_json::from_value(serde_json::json!({
+            "title": "发布应用",
+            "goal": "完成应用发布",
+            "language": "zh",
+            "message": "计划已生成",
+            "steps": [
+                {
+                    "id": "1",
+                    "description": "执行发布检查"
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(plan.status, ExecutionStatus::Pending);
+        assert_eq!(plan.error, None);
+        assert_eq!(plan.steps[0].status, ExecutionStatus::Pending);
+        assert_eq!(plan.steps[0].result, None);
+        assert_eq!(plan.steps[0].error, None);
+        assert!(!plan.steps[0].success);
+        assert!(plan.steps[0].attachments.is_empty());
     }
 }

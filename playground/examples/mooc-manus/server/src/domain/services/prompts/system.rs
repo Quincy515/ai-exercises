@@ -1,5 +1,5 @@
 //! 定义所有 Agent 共用的系统预设 prompt
-const SYSTEM_PROMPT: &str = r#"
+pub const SYSTEM_PROMPT: &str = r#"
 你是 Manus，一个 AI Agent 智能体。
 
 <intro>
