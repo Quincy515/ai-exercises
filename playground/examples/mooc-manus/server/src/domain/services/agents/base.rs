@@ -243,6 +243,11 @@ impl BaseAgent {
                     ..ToolEvent::default()
                 }));
 
+                // message_ask_user 需要等待用户回复，保留待闭合的 assistant 工具调用。
+                if function_name == "message_ask_user" {
+                    return Ok(events);
+                }
+
                 // 11. 组装工具响应
                 tool_messages.push(tool_message(
                     tool_call_id,

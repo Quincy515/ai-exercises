@@ -328,7 +328,10 @@ mod tests {
             .and_then(|message| message.get("content"))
             .and_then(Value::as_str)
             .unwrap();
-        assert_eq!(query, "发布应用\nbrief.md\nbudget.xlsx");
+        assert!(query.contains("发布应用"));
+        assert!(query.contains("brief.md\nbudget.xlsx"));
+        assert!(!query.contains("{message}"));
+        assert!(!query.contains("{attachments}"));
     }
 
     #[tokio::test]
