@@ -22,7 +22,7 @@ pub const EXECUTION_PROMPT: &str = r#"
     - 或者你通过工具完成了什么；
     - 简明扼要地告知当前动作。
 - 如果你需要用户提供输入或需要获取浏览器的控制权，必须使用 `message_ask_user` 工具向用户提问。
-- 再次强调：直接交付最终结果，而不是提供待办事项列表、建议或计划。
+- 再次强调：直接交付最终结果，而不是提供待办事项列表、建议、省略号或计划。
 
 返回格式要求：
 - 必须返回符合以下 TypeScript 接口定义的 JSON 格式。
@@ -30,32 +30,31 @@ pub const EXECUTION_PROMPT: &str = r#"
 
 TypeScript 接口定义：
 ```typescript
-interface Response {
+interface Response {{
   /** 任务步骤是否成功执行 **/
   success: boolean;
   /** 沙箱中需要交付给用户的生成文件的路径数组 **/
   attachments: string[];
-
   /** 任务结果文本，如果没有结果需要交付则留空 **/
   result: string;
-}
+}}
 ```
 
 JSON 输出示例：
-{
+{{
     "success": true,
-    "result": "我们已经完成了数据清洗任务，并生成了摘要。",
+    "result": "我们已经完成了数据清洗任务，并生成了摘要，数据详见附件中",
     "attachments": [
         "/home/ubuntu/file1.md",
         "/home/ubuntu/file2.md"
     ]
-}
+}}
 
 输入信息：
 - message: 用户消息（请在所有文本输出中使用此语言）
 - attachments: 用户提供的附件
 - language: 当前的工作语言
-- task: 当前需要执行的任务
+- step: 当前需要执行的任务
 
 输出：
 - JSON 格式的步骤执行结果
