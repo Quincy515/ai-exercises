@@ -5,6 +5,7 @@ pub mod health_status;
 pub mod memory;
 pub mod message;
 pub mod plan;
+pub mod search;
 pub mod tool_result;
 
 pub use app_config::{AgentConfig, AppConfig, LlmConfig};
@@ -18,4 +19,5 @@ pub use health_status::HealthStatus;
 pub use memory::{Memory, Message as MemoryMessage};
 pub use message::Message;
 pub use plan::{ExecutionStatus, Plan, Step};
+pub use search::{SearchResultItem, SearchResults};
 pub use tool_result::ToolResult;
