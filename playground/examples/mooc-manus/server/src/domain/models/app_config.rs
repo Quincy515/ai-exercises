@@ -1,5 +1,8 @@
+use std::{borrow::Cow, collections::HashMap};
+
 use serde::{Deserialize, Serialize};
-use validator::Validate;
+use serde_json::{Map, Value};
+use validator::{Validate, ValidationError};
 
 /// 语言模型配置
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Validate)]
@@ -50,20 +53,108 @@ impl Default for AgentConfig {
     }
 }
 
+/// MCP 传输类型枚举
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTransport {
+    /// 本地输入输出
+    Stdio,
+    /// 流式事件传输
+    Sse,
+    /// 可流式的 HTTP
+    #[default]
+    StreamableHttp,
+}
+
+/// MCP 单条服务配置
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Validate)]
+#[validate(schema(function = "validate_mcp_server_config"))]
+#[serde(default)]
+pub struct McpServerConfig {
+    /// 传输协议
+    pub transport: McpTransport,
+    /// 是否开启
+    pub enabled: bool,
+    /// MCP 服务的描述
+    pub description: Option<String>,
+    /// 环境变量配置
+    pub env: Option<Map<String, Value>>,
+    /// stdio 启动命令
+    pub command: Option<String>,
+    /// stdio 命令参数
+    pub args: Option<Vec<String>>,
+    /// Streamable HTTP / SSE 服务 URL
+    pub url: Option<String>,
+    /// Streamable HTTP / SSE 请求头
+    pub headers: Option<Map<String, Value>>,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            transport: McpTransport::StreamableHttp,
+            enabled: true,
+            description: None,
+            env: None,
+            command: None,
+            args: None,
+            url: None,
+            headers: None,
+        }
+    }
+}
+
+/// 校验 mcp_server_config 的相关信息，包含 url+command
+fn validate_mcp_server_config(config: &McpServerConfig) -> Result<(), ValidationError> {
+    match config.transport {
+        // 1. 判断 transport 是否为 sse/streamable_http
+        McpTransport::Sse | McpTransport::StreamableHttp
+            // 2. 这两种输出方式需要判断 url 是否传递
+            if config.url.as_deref().unwrap_or_default().is_empty() =>
+        {
+            Err(ValidationError::new("mcp_server_url_required")
+                .with_message(Cow::Borrowed("在sse或streamable_http模式下必须传递url")))
+        }
+        // 3. 判断 transport 是否为 stdio 类型
+        McpTransport::Stdio if config.command.as_deref().unwrap_or_default().is_empty() => {
+            // 4. 判断 command 也就是启动命令是否传递
+            Err(ValidationError::new("mcp_server_command_required")
+                .with_message(Cow::Borrowed("在stdio模式下必须传递command")))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// 应用 MCP 配置
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, Validate)]
+#[serde(default)]
+pub struct McpConfig {
+    /// MCP 服务器配置
+    #[serde(rename = "mcpServers", alias = "mcp_servers")]
+    #[validate(nested)]
+    pub mcp_servers: HashMap<String, McpServerConfig>,
+}
+
 /// 应用配置信息，包含Agent配置、LLM提供商、A2A网络、MCP服务配置等
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default, Validate)]
 pub struct AppConfig {
     /// 语言模型配置
     #[serde(default)]
+    #[validate(nested)]
     pub llm_config: LlmConfig,
     /// Agent 通用配置
     #[serde(default)]
+    #[validate(nested)]
     pub agent_config: AgentConfig,
+    /// MCP 服务配置
+    #[serde(default)]
+    #[validate(nested)]
+    pub mcp_config: McpConfig,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentConfig, AppConfig, LlmConfig};
+    use super::{AgentConfig, AppConfig, LlmConfig, McpConfig, McpServerConfig, McpTransport};
     use validator::Validate;
 
     #[test]
@@ -76,6 +167,12 @@ mod tests {
             Some("deepseek-v4-pro")
         );
         assert_eq!(config.agent_config, AgentConfig::default());
+        assert_eq!(config.mcp_config, McpConfig::default());
+        assert_eq!(
+            McpServerConfig::default().transport,
+            McpTransport::StreamableHttp
+        );
+        assert!(McpServerConfig::default().enabled);
     }
 
     #[test]
@@ -119,12 +216,80 @@ mod tests {
     }
 
     #[test]
-    fn loads_legacy_config_without_agent_settings() {
+    fn loads_legacy_config_without_agent_or_mcp_settings() {
         let config: AppConfig = serde_json::from_value(serde_json::json!({
             "llm_config": LlmConfig::default()
         }))
         .unwrap();
 
         assert_eq!(config.agent_config, AgentConfig::default());
+        assert_eq!(config.mcp_config, McpConfig::default());
+    }
+
+    #[test]
+    fn validates_mcp_server_fields_for_each_transport() {
+        assert!(McpServerConfig::default().validate().is_err());
+
+        assert!(McpServerConfig {
+            url: Some("https://mcp.example.com".to_string()),
+            ..McpServerConfig::default()
+        }
+        .validate()
+        .is_ok());
+
+        assert!(McpServerConfig {
+            transport: McpTransport::Sse,
+            ..McpServerConfig::default()
+        }
+        .validate()
+        .is_err());
+
+        assert!(McpServerConfig {
+            transport: McpTransport::Stdio,
+            command: Some("npx".to_string()),
+            ..McpServerConfig::default()
+        }
+        .validate()
+        .is_ok());
+
+        let mut mcp_config = McpConfig::default();
+        mcp_config
+            .mcp_servers
+            .insert("invalid".to_string(), McpServerConfig::default());
+        assert!(AppConfig {
+            mcp_config,
+            ..AppConfig::default()
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn uses_python_mcp_json_shape() {
+        let config: AppConfig = serde_json::from_value(serde_json::json!({
+            "llm_config": LlmConfig::default(),
+            "agent_config": AgentConfig::default(),
+            "mcp_config": {
+                "mcpServers": {
+                    "demo": {
+                        "transport": "streamable_http",
+                        "url": "https://mcp.example.com",
+                        "custom_server_field": "server-value"
+                    }
+                },
+                "custom_mcp_field": "mcp-value"
+            },
+            "custom_app_field": "app-value"
+        }))
+        .unwrap();
+
+        assert!(config.validate().is_ok());
+
+        let serialized = serde_json::to_value(config).unwrap();
+        assert_eq!(
+            serialized["mcp_config"]["mcpServers"]["demo"]["transport"],
+            "streamable_http"
+        );
+        assert!(serialized["mcp_config"].get("mcp_servers").is_none());
     }
 }

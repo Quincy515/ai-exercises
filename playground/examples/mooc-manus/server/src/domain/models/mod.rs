@@ -8,7 +8,7 @@ pub mod plan;
 pub mod search;
 pub mod tool_result;
 
-pub use app_config::{AgentConfig, AppConfig, LlmConfig};
+pub use app_config::{AgentConfig, AppConfig, LlmConfig, McpConfig, McpServerConfig, McpTransport};
 pub use event::{
     BaseEvent, BrowserToolContent, DoneEvent, ErrorEvent, Event, EventType, McpToolContent,
     MessageEvent, MessageRole, PlanEvent, PlanEventStatus, StepEvent, StepEventStatus, TitleEvent,

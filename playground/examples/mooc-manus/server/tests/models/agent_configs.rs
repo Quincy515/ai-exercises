@@ -58,6 +58,7 @@ async fn app_config_repository_persists_llm_and_agent_configs() {
             max_retries: 5,
             max_search_results: 16,
         },
+        ..AppConfig::default()
     };
 
     repository.save(expected.clone()).await.unwrap();
@@ -85,6 +86,7 @@ async fn app_config_repository_loads_legacy_llm_row_with_default_agent_config() 
         Some(AppConfig {
             llm_config,
             agent_config: AgentConfig::default(),
+            ..AppConfig::default()
         })
     );
 }
