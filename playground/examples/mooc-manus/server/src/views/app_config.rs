@@ -228,6 +228,13 @@ impl From<McpConfig> for McpConfigResponse {
     }
 }
 
+/// MCP 服务启用状态更新请求。
+/// Request payload for updating one MCP server enabled state.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+pub struct McpServerEnabledRequest {
+    pub enabled: bool,
+}
+
 fn default_mcp_enabled() -> bool {
     true
 }

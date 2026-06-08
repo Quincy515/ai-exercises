@@ -11,7 +11,7 @@ use crate::{
     application::{error::AppError, services::app_config_service::McpServerNotFound},
     interfaces::service_dependencies,
     views::{
-        app_config::{McpConfigRequest, McpConfigResponse},
+        app_config::{McpConfigRequest, McpConfigResponse, McpServerEnabledRequest},
         AgentConfigRequest, AgentConfigResponse, LlmConfigRequest, LlmConfigResponse,
     },
 };
@@ -199,7 +199,7 @@ pub async fn delete_mcp_server(
     tag = "设置模块",
     summary = "更新 MCP 服务器启用状态",
     description="根据传递的 server_name + enabled 更新指定 MCP 服务器的启用状态",
-    request_body = bool,
+    request_body = McpServerEnabledRequest,
     params(
         ("server_name" = String, Path, description = "MCP 服务名称")
     ),
@@ -213,11 +213,11 @@ pub async fn delete_mcp_server(
 pub async fn set_mcp_server_enabled(
     State(ctx): State<AppContext>,
     Path(server_name): Path<String>,
-    Json(enabled): Json<bool>,
+    Json(request): Json<McpServerEnabledRequest>,
 ) -> Result<Response> {
     let service = service_dependencies::get_app_config_service(&ctx);
     let config = service
-        .set_mcp_server_enabled(&server_name, enabled)
+        .set_mcp_server_enabled(&server_name, request.enabled)
         .await
         .map_err(|err| map_app_config_error(err, "app_config.set_mcp_server_enabled_failed"))?;
     format::json(McpConfigResponse::from(config))
