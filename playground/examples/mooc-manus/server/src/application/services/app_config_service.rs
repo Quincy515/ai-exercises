@@ -1,8 +1,29 @@
 use anyhow::Result;
 use validator::Validate;
 
-use crate::domain::models::{AgentConfig, AppConfig, LlmConfig};
+use crate::domain::models::{AgentConfig, AppConfig, LlmConfig, McpConfig};
 use crate::domain::repositories::AppConfigRepository;
+
+#[derive(Debug)]
+pub struct McpServerNotFound {
+    server_name: String,
+}
+
+impl McpServerNotFound {
+    fn new(server_name: impl Into<String>) -> Self {
+        Self {
+            server_name: server_name.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for McpServerNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "该MCP服务[{}]不存在，请核实后重试", self.server_name)
+    }
+}
+
+impl std::error::Error for McpServerNotFound {}
 
 /// 应用配置服务。
 /// Application config service.
@@ -79,6 +100,68 @@ impl<R: AppConfigRepository> AppConfigService<R> {
         self.app_config_repository.save(config.clone()).await?;
         Ok(config.agent_config)
     }
+
+    /// 获取 MCP 配置。
+    pub async fn get_mcp_config(&self) -> Result<McpConfig> {
+        Ok(self.load_app_config().await?.mcp_config)
+    }
+
+    /// 根据传递的数据新增或更新 MCP 配置。
+    pub async fn update_and_create_mcp_servers(&self, mcp_config: McpConfig) -> Result<McpConfig> {
+        // 1. 获取应用配置
+        // 1. Load application config
+        let mut config = self.load_app_config().await?;
+
+        // 2. 使用新的 mcp_config 更新原始的配置
+        // 2. Update the original config with the new mcp_config.
+        config.mcp_config.mcp_servers.extend(mcp_config.mcp_servers);
+        config.mcp_config.validate()?;
+
+        // 3. 调用数据仓库完成存储或更新
+        self.app_config_repository.save(config.clone()).await?;
+        Ok(config.mcp_config)
+    }
+
+    /// 根据传递的名字删除 MCP 服务
+    pub async fn delete_mcp_server(&self, server_name: &str) -> Result<McpConfig> {
+        // 1. 获取应用配置
+        // 1. Load application config
+        let mut config = self.load_app_config().await?;
+
+        // 2. 从配置中删除指定的 MCP 服务器
+        // 2. Remove the specified MCP server from the config.
+        if config.mcp_config.mcp_servers.remove(server_name).is_none() {
+            return Err(McpServerNotFound::new(server_name).into());
+        }
+
+        // 3. 调用数据仓库完成存储或更新
+        self.app_config_repository.save(config.clone()).await?;
+        Ok(config.mcp_config)
+    }
+
+    /// 更新MCP服务的启用状态
+    pub async fn set_mcp_server_enabled(
+        &self,
+        server_name: &str,
+        enabled: bool,
+    ) -> Result<McpConfig> {
+        // 1. 获取应用配置
+        // 1. Load application config
+        let mut config = self.load_app_config().await?;
+
+        // 2. 查询对应服务的名字是否存在
+        if let Some(server) = config.mcp_config.mcp_servers.get_mut(server_name) {
+            // 3.如果存在则更新该MCP服务的启用状态
+            server.enabled = enabled;
+        } else {
+            return Err(McpServerNotFound::new(server_name).into());
+        }
+
+        // 4. 调用数据仓库完成存储或更新
+        // 4. Save the updated config to the repository.
+        self.app_config_repository.save(config.clone()).await?;
+        Ok(config.mcp_config)
+    }
 }
 
 #[cfg(test)]
@@ -88,9 +171,9 @@ mod tests {
     use anyhow::Result;
     use async_trait::async_trait;
 
-    use super::AppConfigService;
+    use super::{AppConfigService, McpServerNotFound};
     use crate::domain::{
-        models::{AgentConfig, AppConfig, LlmConfig},
+        models::{AgentConfig, AppConfig, LlmConfig, McpConfig, McpServerConfig},
         repositories::AppConfigRepository,
     };
 
@@ -175,5 +258,95 @@ mod tests {
             service.get_agent_config().await.unwrap(),
             AgentConfig::default()
         );
+    }
+
+    #[tokio::test]
+    async fn merges_mcp_servers_by_name() {
+        let mut initial_mcp_config = McpConfig::default();
+        initial_mcp_config.mcp_servers.insert(
+            "existing".to_string(),
+            streamable_http_server("https://old.example.com", true),
+        );
+
+        let service = AppConfigService::new(MemoryAppConfigRepository::new(AppConfig {
+            mcp_config: initial_mcp_config,
+            ..AppConfig::default()
+        }));
+
+        let mut incoming_mcp_config = McpConfig::default();
+        incoming_mcp_config.mcp_servers.insert(
+            "existing".to_string(),
+            streamable_http_server("https://new.example.com", false),
+        );
+        incoming_mcp_config.mcp_servers.insert(
+            "new".to_string(),
+            streamable_http_server("https://mcp.example.com", true),
+        );
+
+        let updated = service
+            .update_and_create_mcp_servers(incoming_mcp_config)
+            .await
+            .unwrap();
+
+        assert_eq!(updated.mcp_servers.len(), 2);
+        assert_eq!(
+            updated.mcp_servers.get("existing").unwrap().url.as_deref(),
+            Some("https://new.example.com")
+        );
+        assert!(!updated.mcp_servers.get("existing").unwrap().enabled);
+        assert!(updated.mcp_servers.contains_key("new"));
+    }
+
+    #[tokio::test]
+    async fn deletes_mcp_server_by_name() {
+        let mut mcp_config = McpConfig::default();
+        mcp_config.mcp_servers.insert(
+            "demo".to_string(),
+            streamable_http_server("https://mcp.example.com", true),
+        );
+
+        let service = AppConfigService::new(MemoryAppConfigRepository::new(AppConfig {
+            mcp_config,
+            ..AppConfig::default()
+        }));
+
+        let updated = service.delete_mcp_server("demo").await.unwrap();
+
+        assert!(updated.mcp_servers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reports_missing_mcp_server() {
+        let service = AppConfigService::new(MemoryAppConfigRepository::new(AppConfig::default()));
+
+        let err = service.delete_mcp_server("missing").await.unwrap_err();
+
+        assert!(err.is::<McpServerNotFound>());
+    }
+
+    #[tokio::test]
+    async fn sets_mcp_server_enabled() {
+        let mut mcp_config = McpConfig::default();
+        mcp_config.mcp_servers.insert(
+            "demo".to_string(),
+            streamable_http_server("https://mcp.example.com", false),
+        );
+
+        let service = AppConfigService::new(MemoryAppConfigRepository::new(AppConfig {
+            mcp_config,
+            ..AppConfig::default()
+        }));
+
+        let updated = service.set_mcp_server_enabled("demo", true).await.unwrap();
+
+        assert!(updated.mcp_servers.get("demo").unwrap().enabled);
+    }
+
+    fn streamable_http_server(url: &str, enabled: bool) -> McpServerConfig {
+        McpServerConfig {
+            enabled,
+            url: Some(url.to_string()),
+            ..McpServerConfig::default()
+        }
     }
 }

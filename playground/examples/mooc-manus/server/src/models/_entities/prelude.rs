@@ -2,4 +2,5 @@
 
 pub use super::agent_configs::Entity as AgentConfigs;
 pub use super::llm_configs::Entity as LlmConfigs;
+pub use super::mcp_servers::Entity as McpServers;
 pub use super::users::Entity as Users;

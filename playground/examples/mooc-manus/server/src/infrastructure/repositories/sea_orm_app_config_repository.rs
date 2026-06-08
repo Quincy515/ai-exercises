@@ -4,7 +4,7 @@ use sea_orm::{DatabaseConnection, TransactionTrait};
 
 use crate::{
     domain::{models::AppConfig, repositories::AppConfigRepository},
-    models::{agent_configs::AgentConfigs, llm_configs::LlmConfigs},
+    models::{agent_configs::AgentConfigs, llm_configs::LlmConfigs, mcp_servers::McpServers},
 };
 
 pub struct SeaOrmAppConfigRepository {
@@ -22,8 +22,9 @@ impl AppConfigRepository for SeaOrmAppConfigRepository {
     async fn load(&self) -> Result<Option<AppConfig>> {
         let llm_config = LlmConfigs::load_llm_config(&self.db).await?;
         let agent_config = AgentConfigs::load_agent_config(&self.db).await?;
+        let mcp_config = McpServers::load_mcp_config(&self.db).await?;
 
-        if llm_config.is_none() && agent_config.is_none() {
+        if llm_config.is_none() && agent_config.is_none() && mcp_config.is_none() {
             return Ok(None);
         }
 
@@ -33,6 +34,9 @@ impl AppConfigRepository for SeaOrmAppConfigRepository {
         }
         if let Some(agent_config) = agent_config {
             config.agent_config = agent_config;
+        }
+        if let Some(mcp_config) = mcp_config {
+            config.mcp_config = mcp_config;
         }
 
         Ok(Some(config))
@@ -44,6 +48,7 @@ impl AppConfigRepository for SeaOrmAppConfigRepository {
                 Box::pin(async move {
                     LlmConfigs::save_llm_config(txn, config.llm_config).await?;
                     AgentConfigs::save_agent_config(txn, config.agent_config).await?;
+                    McpServers::save_mcp_config(txn, config.mcp_config).await?;
                     Ok(())
                 })
             })
