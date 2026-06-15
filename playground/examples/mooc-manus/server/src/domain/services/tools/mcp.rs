@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, bail, Context, Result};
+use async_trait::async_trait;
 use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::{
     model::{CallToolRequestParams, ClientInfo, Tool},
@@ -34,6 +35,8 @@ use serde_json::{json, Map, Value};
 use tracing::{error, info};
 
 use crate::domain::models::{McpConfig, McpServerConfig, McpTransport, ToolResult};
+
+use super::base::{BaseTool, ToolArguments, ToolDefinition};
 
 type ClientSession = RunningService<RoleClient, ClientInfo>;
 
@@ -415,6 +418,107 @@ impl McpClientManager {
     }
 }
 
+/// MCP 工具包，包含所有已配置并已启动的 MCP 工具。
+/// MCP tool collection containing configured and connected MCP tools.
+pub struct McpTool {
+    /// MCP 客户端管理器。
+    /// MCP client manager.
+    manager: Option<McpClientManager>,
+    /// MCP 工具声明。
+    /// MCP tool definitions exposed through BaseTool.
+    definitions: Vec<ToolDefinition>,
+    /// 是否初始化标识。
+    /// Whether the tool collection has been initialized.
+    initialized: bool,
+}
+
+impl McpTool {
+    /// 构造函数，创建空的 MCP 工具包。
+    /// Create an empty MCP tool collection.
+    pub fn new() -> Self {
+        Self {
+            manager: None,
+            definitions: Vec::new(),
+            initialized: false,
+        }
+    }
+
+    /// 初始化 MCP 工具包。
+    /// Initialize MCP sessions and cache BaseTool-compatible definitions.
+    pub async fn initialize(&mut self, mcp_config: Option<McpConfig>) -> Result<()> {
+        // 1.判断是否初始化，如果已经初始化则直接返回
+        if self.initialized {
+            return Ok(());
+        }
+
+        // 2.初始化 MCP 客户端管理器
+        let mut manager = McpClientManager::new(mcp_config);
+        manager.initialize().await;
+
+        // 3.获取 MCP 服务器工具列表并转换为 BaseTool 工具声明
+        let definitions = manager
+            .get_all_tools()
+            .await
+            .into_iter()
+            .map(ToolDefinition::try_from)
+            .collect::<Result<Vec<_>>>();
+        let definitions = match definitions {
+            Ok(definitions) => definitions,
+            Err(error) => {
+                manager.cleanup().await;
+                return Err(error);
+            }
+        };
+
+        self.definitions = definitions;
+        self.manager = Some(manager);
+        self.initialized = true;
+
+        Ok(())
+    }
+}
+
+impl Default for McpTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl BaseTool for McpTool {
+    fn name(&self) -> &str {
+        "mcp"
+    }
+
+    fn tool_definitions(&self) -> &[ToolDefinition] {
+        &self.definitions
+    }
+
+    async fn call_tool(&self, tool_name: &str, kwargs: ToolArguments) -> Result<ToolResult<Value>> {
+        let manager = self
+            .manager
+            .as_ref()
+            .ok_or_else(|| anyhow!("MCP工具包未初始化"))?;
+        let result = manager.invoke(tool_name, kwargs).await;
+
+        Ok(ToolResult {
+            success: result.success,
+            message: result.message,
+            data: result.data.map(Value::String),
+        })
+    }
+
+    async fn cleanup(&mut self) -> Result<()> {
+        if let Some(manager) = self.manager.as_mut() {
+            manager.cleanup().await;
+        }
+        self.manager = None;
+        self.definitions.clear();
+        self.initialized = false;
+        Ok(())
+    }
+}
+
 fn prefixed_tool_name(server_name: &str, tool_name: &str) -> String {
     if server_name.starts_with("mcp_") {
         format!("{server_name}_{tool_name}")
@@ -592,5 +696,64 @@ mod tests {
             http_headers(Some(&invalid)).unwrap_err().to_string(),
             "请求头[X-Retry]必须是字符串"
         );
+    }
+
+    #[tokio::test]
+    async fn initializes_and_cleans_up_mcp_tool() {
+        let mut tool = McpTool::new();
+
+        tool.initialize(Some(McpConfig::default())).await.unwrap();
+        tool.initialize(Some(McpConfig::default())).await.unwrap();
+
+        assert_eq!(tool.name(), "mcp");
+        assert!(tool.initialized);
+        assert!(tool.get_tools().is_empty());
+
+        tool.cleanup().await.unwrap();
+
+        assert!(!tool.initialized);
+        assert!(tool.manager.is_none());
+        assert!(tool.tool_definitions().is_empty());
+    }
+
+    #[tokio::test]
+    async fn forwards_mcp_tool_calls_to_manager() {
+        let manager = manager_with_servers(&["demo"]);
+        let mut tool = McpTool::new();
+        tool.manager = Some(manager);
+        tool.definitions = vec![ToolDefinition::try_from(Map::from_iter([
+            ("type".to_string(), json!("function")),
+            (
+                "function".to_string(),
+                json!({
+                    "name": "mcp_demo_search",
+                    "description": "[demo] 搜索内容",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"}
+                        },
+                        "required": ["query"]
+                    }
+                }),
+            ),
+        ]))
+        .unwrap()];
+        tool.initialized = true;
+
+        let result = tool
+            .invoke(
+                "mcp_demo_search",
+                Map::from_iter([
+                    ("query".to_string(), json!("Rust MCP")),
+                    ("extra".to_string(), json!("ignored")),
+                ]),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.success);
+        assert_eq!(result.message.as_deref(), Some("MCP服务器[demo]未连接"));
+        assert!(result.data.is_none());
     }
 }

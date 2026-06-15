@@ -146,6 +146,57 @@ impl ToolDefinition {
     }
 }
 
+impl TryFrom<ToolSchema> for ToolDefinition {
+    type Error = anyhow::Error;
+
+    /// 从完整的 OpenAI function schema 创建工具定义。
+    /// Create a tool definition from a complete OpenAI function schema.
+    fn try_from(schema: ToolSchema) -> Result<Self> {
+        let function = schema
+            .get("function")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("工具声明缺少function"))?;
+        let name = function
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("工具声明缺少name"))?
+            .to_string();
+        let description = function
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or(&name)
+            .to_string();
+        let input_schema = function
+            .get("parameters")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("工具[{name}]声明缺少parameters"))?;
+        let parameters = input_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let required = input_schema
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|required| {
+                required
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        Ok(Self {
+            name,
+            description,
+            parameters,
+            required,
+            schema,
+        })
+    }
+}
+
 /// 定义 OpenAI 工具声明(装饰器)，用于将一个函数 / 方法，添加上对应的工具声明。
 /// Define an OpenAI tool declaration, replacing the Python decorator.
 pub fn tool(
@@ -215,6 +266,12 @@ pub trait BaseTool: Send + Sync {
     /// 调用已过滤参数后的具体工具。
     /// Dispatch the concrete tool with filtered arguments.
     async fn call_tool(&self, tool_name: &str, kwargs: ToolArguments) -> Result<ToolResult<Value>>;
+
+    /// 清理工具持有的长期资源；普通工具使用默认空实现。
+    /// Clean up long-lived resources; stateless tools use the default no-op implementation.
+    async fn cleanup(&mut self) -> Result<()> {
+        Ok(())
+    }
 
     /// 获取所有已注册工具的 schema 信息，用于绑定给 LLM。
     /// Return registered tool schemas for LLM binding.
@@ -345,6 +402,38 @@ mod tests {
         assert!(!tool.has_tool("missing"));
     }
 
+    #[test]
+    fn creates_tool_definition_from_complete_schema() {
+        let definition = ToolDefinition::try_from(Map::from_iter([
+            ("type".to_string(), json!("function")),
+            (
+                "function".to_string(),
+                json!({
+                    "name": "dynamic_search",
+                    "description": "动态搜索工具",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"}
+                        },
+                        "required": ["query"],
+                        "additionalProperties": false
+                    }
+                }),
+            ),
+        ]))
+        .unwrap();
+
+        assert_eq!(definition.name, "dynamic_search");
+        assert_eq!(definition.description, "动态搜索工具");
+        assert_eq!(definition.parameters["query"]["type"], "string");
+        assert_eq!(definition.required, vec!["query"]);
+        assert_eq!(
+            definition.schema["function"]["parameters"]["additionalProperties"],
+            false
+        );
+    }
+
     #[tokio::test]
     async fn invoke_filters_hallucinated_arguments() {
         let tool = EchoTool::new();
@@ -367,5 +456,14 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.to_string(), "工具[missing]未找到");
+    }
+
+    #[tokio::test]
+    async fn cleanup_is_a_no_op_for_stateless_tools() {
+        let mut tool = EchoTool::new();
+
+        tool.cleanup().await.unwrap();
+
+        assert!(tool.has_tool("echo"));
     }
 }
