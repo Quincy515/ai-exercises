@@ -191,7 +191,6 @@ fn system_mcp_server_condition() -> Condition {
 fn db_transport_to_domain(transport: &str) -> Result<McpTransport> {
     match transport {
         "stdio" => Ok(McpTransport::Stdio),
-        "sse" => Ok(McpTransport::Sse),
         "streamable_http" => Ok(McpTransport::StreamableHttp),
         value => bail!("unsupported mcp_servers.transport: {value}"),
     }
@@ -200,7 +199,6 @@ fn db_transport_to_domain(transport: &str) -> Result<McpTransport> {
 fn domain_transport_to_db(transport: McpTransport) -> &'static str {
     match transport {
         McpTransport::Stdio => "stdio",
-        McpTransport::Sse => "sse",
         McpTransport::StreamableHttp => "streamable_http",
     }
 }

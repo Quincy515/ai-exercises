@@ -59,8 +59,6 @@ impl Default for AgentConfig {
 pub enum McpTransport {
     /// 本地输入输出
     Stdio,
-    /// 流式事件传输
-    Sse,
     /// 可流式的 HTTP
     #[default]
     StreamableHttp,
@@ -83,9 +81,9 @@ pub struct McpServerConfig {
     pub command: Option<String>,
     /// stdio 命令参数
     pub args: Option<Vec<String>>,
-    /// Streamable HTTP / SSE 服务 URL
+    /// Streamable HTTP 服务 URL
     pub url: Option<String>,
-    /// Streamable HTTP / SSE 请求头
+    /// Streamable HTTP 请求头
     pub headers: Option<Map<String, Value>>,
 }
 
@@ -107,13 +105,12 @@ impl Default for McpServerConfig {
 /// 校验 mcp_server_config 的相关信息，包含 url+command
 fn validate_mcp_server_config(config: &McpServerConfig) -> Result<(), ValidationError> {
     match config.transport {
-        // 1. 判断 transport 是否为 sse/streamable_http
-        McpTransport::Sse | McpTransport::StreamableHttp
-            // 2. 这两种输出方式需要判断 url 是否传递
-            if config.url.as_deref().unwrap_or_default().is_empty() =>
-        {
+        // 1. 判断 transport 是否为 streamable_http
+        McpTransport::StreamableHttp
+            // 2. streamable_http 需要判断 url 是否传递
+            if config.url.as_deref().unwrap_or_default().is_empty() => {
             Err(ValidationError::new("mcp_server_url_required")
-                .with_message(Cow::Borrowed("在sse或streamable_http模式下必须传递url")))
+                .with_message(Cow::Borrowed("在streamable_http模式下必须传递url")))
         }
         // 3. 判断 transport 是否为 stdio 类型
         McpTransport::Stdio if config.command.as_deref().unwrap_or_default().is_empty() => {
@@ -236,13 +233,6 @@ mod tests {
         }
         .validate()
         .is_ok());
-
-        assert!(McpServerConfig {
-            transport: McpTransport::Sse,
-            ..McpServerConfig::default()
-        }
-        .validate()
-        .is_err());
 
         assert!(McpServerConfig {
             transport: McpTransport::Stdio,

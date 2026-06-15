@@ -99,7 +99,6 @@ impl From<AgentConfig> for AgentConfigResponse {
 #[serde(rename_all = "snake_case")]
 pub enum McpTransportPayload {
     Stdio,
-    Sse,
     #[default]
     StreamableHttp,
 }
@@ -108,7 +107,6 @@ impl From<McpTransportPayload> for McpTransport {
     fn from(transport: McpTransportPayload) -> Self {
         match transport {
             McpTransportPayload::Stdio => Self::Stdio,
-            McpTransportPayload::Sse => Self::Sse,
             McpTransportPayload::StreamableHttp => Self::StreamableHttp,
         }
     }
@@ -118,7 +116,6 @@ impl From<McpTransport> for McpTransportPayload {
     fn from(transport: McpTransport) -> Self {
         match transport {
             McpTransport::Stdio => Self::Stdio,
-            McpTransport::Sse => Self::Sse,
             McpTransport::StreamableHttp => Self::StreamableHttp,
         }
     }
@@ -258,6 +255,20 @@ mod tests {
                     "transport": "streamable_http",
                     "url": "https://mcp.example.com",
                     "env": ["invalid"]
+                }
+            }
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_unsupported_sse_transport() {
+        let result = serde_json::from_value::<McpConfigRequest>(serde_json::json!({
+            "mcpServers": {
+                "demo": {
+                    "transport": "sse",
+                    "url": "https://mcp.example.com/sse"
                 }
             }
         }));
