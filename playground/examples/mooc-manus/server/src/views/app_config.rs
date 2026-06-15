@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use utoipa::ToSchema;
 
+use crate::application::services::McpServerToolInfo;
 use crate::domain::models::{AgentConfig, LlmConfig, McpConfig, McpServerConfig, McpTransport};
 
 /// LLM 配置更新请求。
@@ -225,6 +226,52 @@ impl From<McpConfig> for McpConfigResponse {
     }
 }
 
+/// MCP 服务列表条目。
+/// One MCP server item in the tool-list response.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ListMcpServerItem {
+    /// 服务名字。
+    /// MCP server name.
+    pub server_name: String,
+    /// 启用状态。
+    /// Whether the MCP server is enabled.
+    pub enabled: bool,
+    /// 传输协议。
+    /// MCP transport type.
+    pub transport: McpTransportPayload,
+    /// 工具名字列表。
+    /// Tool names provided by this MCP server.
+    pub tools: Vec<String>,
+}
+
+impl From<McpServerToolInfo> for ListMcpServerItem {
+    fn from(server: McpServerToolInfo) -> Self {
+        Self {
+            server_name: server.server_name,
+            enabled: server.enabled,
+            transport: server.transport.into(),
+            tools: server.tools,
+        }
+    }
+}
+
+/// 获取 MCP 服务列表响应结构。
+/// Response payload for the MCP server tool list.
+#[derive(Clone, Debug, Default, Serialize, ToSchema)]
+pub struct ListMcpServerResponse {
+    /// MCP 服务列表。
+    /// MCP server items.
+    pub mcp_servers: Vec<ListMcpServerItem>,
+}
+
+impl From<Vec<McpServerToolInfo>> for ListMcpServerResponse {
+    fn from(servers: Vec<McpServerToolInfo>) -> Self {
+        Self {
+            mcp_servers: servers.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 /// MCP 服务启用状态更新请求。
 /// Request payload for updating one MCP server enabled state.
 #[derive(Clone, Debug, Deserialize, ToSchema)]
@@ -238,7 +285,8 @@ fn default_mcp_enabled() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::McpConfigRequest;
+    use super::{ListMcpServerResponse, McpConfigRequest};
+    use crate::{application::services::McpServerToolInfo, domain::models::McpTransport};
 
     #[test]
     fn accepts_empty_mcp_config_request_like_python_default() {
@@ -274,5 +322,29 @@ mod tests {
         }));
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn serializes_mcp_server_tool_list_response() {
+        let response = ListMcpServerResponse::from(vec![McpServerToolInfo {
+            server_name: "demo".to_string(),
+            enabled: true,
+            transport: McpTransport::StreamableHttp,
+            tools: vec!["search".to_string(), "read".to_string()],
+        }]);
+
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            serde_json::json!({
+                "mcp_servers": [
+                    {
+                        "server_name": "demo",
+                        "enabled": true,
+                        "transport": "streamable_http",
+                        "tools": ["search", "read"]
+                    }
+                ]
+            })
+        );
     }
 }

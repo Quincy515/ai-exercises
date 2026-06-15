@@ -1,8 +1,19 @@
 use anyhow::Result;
 use validator::Validate;
 
-use crate::domain::models::{AgentConfig, AppConfig, LlmConfig, McpConfig};
+use crate::domain::models::{AgentConfig, AppConfig, LlmConfig, McpConfig, McpTransport};
 use crate::domain::repositories::AppConfigRepository;
+use crate::domain::services::tools::McpClientManager;
+
+/// MCP 服务器及其工具信息。
+/// MCP server information with cached tool names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpServerToolInfo {
+    pub server_name: String,
+    pub enabled: bool,
+    pub transport: McpTransport,
+    pub tools: Vec<String>,
+}
 
 #[derive(Debug)]
 pub struct McpServerNotFound {
@@ -101,9 +112,46 @@ impl<R: AppConfigRepository> AppConfigService<R> {
         Ok(config.agent_config)
     }
 
-    /// 获取 MCP 配置。
-    pub async fn get_mcp_config(&self) -> Result<McpConfig> {
-        Ok(self.load_app_config().await?.mcp_config)
+    /// 获取 MCP 服务器列表。
+    pub async fn get_mcp_servers(&self) -> Result<Vec<McpServerToolInfo>> {
+        // 1. 获取当前应用配置
+        let app_config = self.load_app_config().await?;
+
+        // 2. 创建 MCP 客户端管理器，对配置信息不进行过滤
+        let mut mcp_client_manager = McpClientManager::new(Some(app_config.mcp_config.clone()));
+
+        // 3. 初始化 MCP 客户端管理器
+        mcp_client_manager.initialize().await;
+
+        // 4. 获取 MCP 客户端管理器的工具列表
+        let tools = mcp_client_manager.tools();
+
+        // 5. 循环组装响应的工具格式
+        let mut mcp_servers = app_config
+            .mcp_config
+            .mcp_servers
+            .into_iter()
+            .map(|(server_name, server_config)| McpServerToolInfo {
+                tools: tools
+                    .get(&server_name)
+                    .map(|tools| {
+                        tools
+                            .iter()
+                            .map(|tool| tool.name.to_string())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+                server_name,
+                enabled: server_config.enabled,
+                transport: server_config.transport,
+            })
+            .collect::<Vec<_>>();
+        mcp_servers.sort_by(|left, right| left.server_name.cmp(&right.server_name));
+
+        // 6. 清除 MCP 客户端管理器的相关资源
+        mcp_client_manager.cleanup().await;
+
+        Ok(mcp_servers)
     }
 
     /// 根据传递的数据新增或更新 MCP 配置。
@@ -173,7 +221,7 @@ mod tests {
 
     use super::{AppConfigService, McpServerNotFound};
     use crate::domain::{
-        models::{AgentConfig, AppConfig, LlmConfig, McpConfig, McpServerConfig},
+        models::{AgentConfig, AppConfig, LlmConfig, McpConfig, McpServerConfig, McpTransport},
         repositories::AppConfigRepository,
     };
 
@@ -258,6 +306,32 @@ mod tests {
             service.get_agent_config().await.unwrap(),
             AgentConfig::default()
         );
+    }
+
+    #[tokio::test]
+    async fn lists_disabled_mcp_servers_without_tools() {
+        let mut mcp_config = McpConfig::default();
+        mcp_config.mcp_servers.insert(
+            "disabled".to_string(),
+            McpServerConfig {
+                transport: McpTransport::Stdio,
+                enabled: false,
+                command: Some("unused".to_string()),
+                ..McpServerConfig::default()
+            },
+        );
+        let service = AppConfigService::new(MemoryAppConfigRepository::new(AppConfig {
+            mcp_config,
+            ..AppConfig::default()
+        }));
+
+        let servers = service.get_mcp_servers().await.unwrap();
+
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].server_name, "disabled");
+        assert!(!servers[0].enabled);
+        assert_eq!(servers[0].transport, McpTransport::Stdio);
+        assert!(servers[0].tools.is_empty());
     }
 
     #[tokio::test]

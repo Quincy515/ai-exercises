@@ -12,7 +12,8 @@ use crate::{
     interfaces::service_dependencies,
     views::{
         app_config::{McpConfigRequest, McpConfigResponse, McpServerEnabledRequest},
-        AgentConfigRequest, AgentConfigResponse, LlmConfigRequest, LlmConfigResponse,
+        AgentConfigRequest, AgentConfigResponse, ListMcpServerResponse, LlmConfigRequest,
+        LlmConfigResponse,
     },
 };
 
@@ -122,18 +123,18 @@ pub async fn update_agent_config(
     summary = "获取 MCP 服务器工具列表",
     description = "获取当前系统的 MCP 服务器列表，包含 MCP 服务名字、工具列表、启用状态等",
     responses(
-        (status = 200, description = "MCP 服务器工具获取成功", body = McpConfigResponse),
+        (status = 200, description = "MCP 服务器工具获取成功", body = ListMcpServerResponse),
         (status = 500, description = "MCP 服务器工具获取失败")
     )
 )]
 #[debug_handler]
 pub async fn get_mcp_servers(State(ctx): State<AppContext>) -> Result<Response> {
     let service = service_dependencies::get_app_config_service(&ctx);
-    let config = service
-        .get_mcp_config()
+    let mcp_servers = service
+        .get_mcp_servers()
         .await
         .map_err(|err| AppError::internal("app_config.get_mcp_servers_failed", err.to_string()))?;
-    format::json(McpConfigResponse::from(config))
+    format::json(ListMcpServerResponse::from(mcp_servers))
 }
 
 /// 根据传递的配置信息创建 MCP 服务

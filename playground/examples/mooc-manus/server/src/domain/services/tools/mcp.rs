@@ -60,6 +60,11 @@ impl McpClientManager {
         }
     }
 
+    /// 只读返回缓存的 MCP 工具参数声明，键是服务名字，值是服务对应的工具声明
+    pub fn tools(&self) -> &HashMap<String, Vec<Tool>> {
+        &self.tools
+    }
+
     /// 初始化函数，用于连接所有配置的 MCP 服务器
     pub async fn initialize(&mut self) {
         // 1.检查下是否已经初始化成功
