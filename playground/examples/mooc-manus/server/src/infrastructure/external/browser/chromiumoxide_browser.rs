@@ -1,7 +1,10 @@
 //! 基于 chromiumoxide 的浏览器 CDP 适配器。
 //! Chromiumoxide based browser CDP adapter.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -25,6 +28,7 @@ use super::browser_fun::{
 
 const MAX_CONTENT_CHARS: usize = 50_000;
 const MAX_INIT_RETRIES: usize = 5;
+const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const PAGE_LOAD_TIMEOUT: Duration = Duration::from_secs(15);
 const PAGE_LOAD_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const BLOCKED_ENV_VARS: &[&str] = &[
@@ -52,6 +56,7 @@ struct BrowserSession {
     browser: ChromeBrowser,
     page: Page,
     handler: Option<tokio::task::JoinHandle<()>>,
+    last_used: Instant,
     _temp_dir: tempfile::TempDir,
     interactive_elements_cache: Vec<InteractiveElement>,
 }
@@ -80,8 +85,18 @@ impl ChromiumoxideBrowser {
     async fn ensure_browser(&self) -> Result<tokio::sync::MutexGuard<'_, Option<BrowserSession>>> {
         let mut guard = self.session.lock().await;
 
+        if guard.as_ref().is_some_and(BrowserSession::is_idle) {
+            if let Some(session) = guard.take() {
+                session.shutdown().await;
+            }
+        }
+
         if guard.is_none() {
             *guard = Some(self.initialize().await?);
+        }
+
+        if let Some(session) = guard.as_mut() {
+            session.touch();
         }
 
         Ok(guard)
@@ -411,9 +426,18 @@ impl BrowserSession {
             browser,
             page,
             handler: Some(handler),
+            last_used: Instant::now(),
             _temp_dir: temp_dir,
             interactive_elements_cache: Vec::new(),
         })
+    }
+
+    fn is_idle(&self) -> bool {
+        self.last_used.elapsed() > IDLE_TIMEOUT
+    }
+
+    fn touch(&mut self) {
+        self.last_used = Instant::now();
     }
 
     async fn shutdown(mut self) {
