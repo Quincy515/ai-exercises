@@ -47,8 +47,14 @@ include_dir = { version = "0.7" }
 utoipa = { version = "5.5" }
 async-openai = { version = "0.40", features = ["full"] }
 llm_json = "1"
-reqwest = { version = "0.13", features = ["rustls", "cookies", "gzip", "deflate"] }
+reqwest = { version = "0.13", features = [
+    "rustls",
+    "cookies",
+    "gzip",
+    "deflate",
+] }
 scraper = "0.27"
+html-to-markdown-rs = "3.6"
 chromiumoxide = "0.9"
 futures = "0.3"
 tempfile = "3"

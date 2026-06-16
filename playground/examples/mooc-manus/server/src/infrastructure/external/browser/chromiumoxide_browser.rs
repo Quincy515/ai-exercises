@@ -190,8 +190,8 @@ impl ChromiumoxideBrowser {
             .into_value::<String>()
             .unwrap_or_default();
 
-        // 2.使用 Rust 简单提取 html 文档中的可见文本，保留 markdownify 的整理思路
-        let markdown_content = html_to_text(&visible_content);
+        // 2.使用 html-to-markdown-rs 将 HTML 文档转换为 Markdown；失败时回退到纯文本提取
+        let markdown_content = html_to_markdown_or_text(&visible_content);
 
         // 3.模型上下文长度有限，提取最大不超过50k个字符
         Ok(truncate_chars(markdown_content, MAX_CONTENT_CHARS))
@@ -756,6 +756,14 @@ fn html_to_text(html: &str) -> String {
     } else {
         text
     }
+}
+
+fn html_to_markdown_or_text(html: &str) -> String {
+    html_to_markdown_rs::convert(html, None)
+        .ok()
+        .and_then(|result| result.content)
+        .filter(|content| !content.trim().is_empty())
+        .unwrap_or_else(|| html_to_text(html))
 }
 
 fn truncate_chars(value: String, max_chars: usize) -> String {

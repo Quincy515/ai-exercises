@@ -1,4 +1,4 @@
-/// 获取页面的课时内容js代码
+/// 获取页面的可视内容js代码
 pub const GET_VISIBLE_CONTENT_FUNC: &str = r#"() => {
     // 1.定义变量存储所有可视元素+视口宽高
     const visibleElements = [];
