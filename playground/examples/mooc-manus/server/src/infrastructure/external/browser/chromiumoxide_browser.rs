@@ -466,8 +466,9 @@ impl Drop for BrowserSession {
 
 #[async_trait]
 impl Browser for ChromiumoxideBrowser {
+    /// 获取当前网页的内容(内容+可交互元素列表)
     async fn view_page(&self) -> Result<ToolResult<String>> {
-        // 获取当前网页的内容(内容+可交互元素列表)
+        // 1.确保页面存在
         let mut guard = self.ensure_page().await?;
         let session = guard.as_mut().ok_or_else(|| anyhow!("浏览器会话不存在"))?;
 
@@ -487,8 +488,9 @@ impl Browser for ChromiumoxideBrowser {
         ))
     }
 
+    /// 根据传递的url跳转到指定页面
     async fn navigate(&self, url: &str) -> Result<ToolResult<String>> {
-        // 根据传递的url跳转到指定页面
+        // 1.确保页面存在
         let mut guard = self.ensure_page().await?;
         let session = guard.as_mut().ok_or_else(|| anyhow!("浏览器会话不存在"))?;
 
