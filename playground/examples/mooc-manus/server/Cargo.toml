@@ -24,6 +24,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 tokio = { version = "1.45", default-features = false, features = [
     "rt-multi-thread",
+    "sync",
+    "time",
 ] }
 async-trait = { version = "0.1" }
 axum = { version = "0.8" }
@@ -47,6 +49,8 @@ async-openai = { version = "0.40", features = ["full"] }
 llm_json = "1"
 reqwest = { version = "0.13", features = ["rustls", "cookies", "gzip", "deflate"] }
 scraper = "0.27"
+chromiumoxide = "0.9"
+futures = "0.3"
 rmcp = { version = "1.7.0", default-features = false, features = [
     "client",
     "transport-child-process",

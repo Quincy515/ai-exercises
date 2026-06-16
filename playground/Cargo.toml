@@ -13,6 +13,7 @@ fasteval = "0.2.4"
 reqwest = { workspace = true }
 futures-util = { workspace = true, features = ["sink"] }
 base64 = "0.22"
+chromiumoxide = "0.9.1"
 thiserror = { workspace = true }
 async-openai = { workspace = true, features = [
     "chat-completion",
