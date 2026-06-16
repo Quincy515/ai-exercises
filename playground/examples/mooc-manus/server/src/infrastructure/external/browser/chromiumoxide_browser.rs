@@ -3,10 +3,13 @@
 
 use std::{sync::Arc, time::Duration};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use chromiumoxide::{
-    browser::Browser as ChromeBrowser, layout::Point, page::ScreenshotParams, Page,
+    browser::{Browser as ChromeBrowser, BrowserConfig},
+    layout::Point,
+    page::ScreenshotParams,
+    Page,
 };
 use futures::StreamExt;
 use scraper::Html;
@@ -24,22 +27,32 @@ const MAX_CONTENT_CHARS: usize = 50_000;
 const MAX_INIT_RETRIES: usize = 5;
 const PAGE_LOAD_TIMEOUT: Duration = Duration::from_secs(15);
 const PAGE_LOAD_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+const BLOCKED_ENV_VARS: &[&str] = &[
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "LLM_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "DATABASE_URL",
+    "REDIS_URL",
+];
 
 /// 基础 chromiumoxide 管理的浏览器扩展。
 /// Browser adapter managed by chromiumoxide.
 pub struct ChromiumoxideBrowser {
-    /// CDP 的连接地址。
-    /// CDP endpoint URL.
-    cdp_url: String,
     /// 当前浏览器会话。
     /// Current browser session.
     session: Arc<Mutex<Option<BrowserSession>>>,
 }
 
 struct BrowserSession {
-    _browser: ChromeBrowser,
+    browser: ChromeBrowser,
     page: Page,
-    handler: tokio::task::JoinHandle<()>,
+    handler: Option<tokio::task::JoinHandle<()>>,
+    _temp_dir: tempfile::TempDir,
     interactive_elements_cache: Vec<InteractiveElement>,
 }
 
@@ -55,10 +68,9 @@ struct InteractiveElement {
 impl ChromiumoxideBrowser {
     /// 构造函数，完成 chromiumoxide 浏览器适配器初始化。
     /// Create a chromiumoxide browser adapter.
-    pub fn new(cdp_url: impl Into<String>) -> Self {
+    pub fn new() -> Self {
         // 浏览器相关
         Self {
-            cdp_url: cdp_url.into(),
             session: Arc::new(Mutex::new(None)),
         }
     }
@@ -91,7 +103,7 @@ impl ChromiumoxideBrowser {
 
         // 2.循环开始资源构建
         for attempt in 0..MAX_INIT_RETRIES {
-            match BrowserSession::connect(&self.cdp_url).await {
+            match BrowserSession::launch().await {
                 Ok(session) => return Ok(session),
                 Err(error) => {
                     // 10.清除所有资源
@@ -116,8 +128,6 @@ impl ChromiumoxideBrowser {
         ))
     }
 
-    /// 清除 chromiumoxide 资源，包含当前 tab 页面和 handler。
-    /// Clean up the current page and event handler.
     async fn cleanup(&self) {
         let session = {
             let mut guard = self.session.lock().await;
@@ -361,44 +371,72 @@ impl ChromiumoxideBrowser {
     }
 }
 
+impl Default for ChromiumoxideBrowser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BrowserSession {
-    async fn connect(cdp_url: &str) -> Result<Self> {
-        // 3.创建 chromiumoxide 连接并连接到 cdp 浏览器
-        let (mut browser, mut handler) = ChromeBrowser::connect(cdp_url).await?;
+    async fn launch() -> Result<Self> {
+        // 3.创建隔离的浏览器用户目录，避免服务端工具污染用户本机 Chrome。
+        let temp_dir = tempfile::Builder::new()
+            .prefix("nexus-browser-")
+            .tempdir()
+            .context("创建浏览器临时用户目录失败")?;
+
+        // 4.使用 chromiumoxide 启动服务端自管理的 Chrome 实例。
+        let mut builder = BrowserConfig::builder()
+            .user_data_dir(temp_dir.path())
+            .new_headless_mode()
+            .arg("--disable-dev-shm-usage")
+            .arg("--disable-extensions")
+            .arg("--disable-background-networking");
+
+        // 5.清理传递给浏览器子进程的敏感环境变量。
+        for var in BLOCKED_ENV_VARS {
+            builder = builder.env(*var, "");
+        }
+
+        let config = builder
+            .build()
+            .map_err(|error| anyhow!("构建 chromiumoxide 浏览器配置失败: {error}"))?;
+        let (browser, mut handler) = ChromeBrowser::launch(config).await?;
         let handler = tokio::spawn(async move { while handler.next().await.is_some() {} });
 
-        // 4.获取浏览器的所有页面目标
-        let _ = browser.fetch_targets().await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let pages = browser.pages().await.unwrap_or_default();
-
-        // 5.如果当前只有一个空页面则复用，否则新建页面，避免污染已有页面
-        let page = if pages.len() == 1 && is_blank_page(&pages[0]).await {
-            pages[0].clone()
-        } else {
-            browser.new_page("about:blank").await?
-        };
+        // 6.创建工具专用空白页面。
+        let page = browser.new_page("about:blank").await?;
 
         Ok(Self {
-            _browser: browser,
+            browser,
             page,
-            handler,
+            handler: Some(handler),
+            _temp_dir: temp_dir,
             interactive_elements_cache: Vec::new(),
         })
     }
 
-    async fn shutdown(self) {
+    async fn shutdown(mut self) {
         // 6.判断当前页面是否关闭：chromiumoxide 没有同步 is_closed，这里执行最佳努力关闭
         let _ = self.page.clone().close().await;
 
-        // 8.停止 chromiumoxide handler
-        self.handler.abort();
+        // 7.关闭当前适配器拥有的 Chrome 子进程，并等待进程退出。
+        let _ = self.browser.close().await;
+        let _ = self.browser.wait().await;
+
+        // 8.停止 chromiumoxide handler；临时用户目录随 TempDir drop 自动回收。
+        if let Some(handler) = self.handler.take() {
+            handler.abort();
+            let _ = handler.await;
+        }
     }
 }
 
 impl Drop for BrowserSession {
     fn drop(&mut self) {
-        self.handler.abort();
+        if let Some(handler) = &self.handler {
+            handler.abort();
+        }
     }
 }
 
@@ -669,16 +707,6 @@ impl Browser for ChromiumoxideBrowser {
 
         Ok(success_data(json!({ "logs": logs }).to_string()))
     }
-}
-
-async fn is_blank_page(page: &Page) -> bool {
-    matches!(
-        page.url().await.ok().flatten().as_deref(),
-        None | Some("")
-            | Some("about:blank")
-            | Some("chrome://newtab/")
-            | Some("chrome://new-tab-page/")
-    )
 }
 
 fn indexed_selector(index: usize) -> String {
