@@ -513,19 +513,20 @@ impl Browser for ChromiumoxideBrowser {
         ))
     }
 
+    /// 重启并跳转到指定URL
     async fn restart(&self, url: &str) -> Result<ToolResult<String>> {
-        // 重启并跳转到指定URL
         self.cleanup().await;
         self.navigate(url).await
     }
 
+    /// 根据传递的索引位置+xy坐标实现点击
     async fn click(
         &self,
         index: Option<usize>,
         coordinate_x: Option<f32>,
         coordinate_y: Option<f32>,
     ) -> Result<ToolResult<String>> {
-        // 根据传递的索引位置+xy坐标实现点击
+        // 1.确保页面存在
         let mut guard = self.ensure_page().await?;
         let session = guard.as_mut().ok_or_else(|| anyhow!("浏览器会话不存在"))?;
 
@@ -551,6 +552,7 @@ impl Browser for ChromiumoxideBrowser {
         Ok(success_message("点击成功"))
     }
 
+    /// 根据传递的文本+换行标识+索引+xy位置实现输入框文本输入
     async fn input(
         &self,
         text: &str,
@@ -559,7 +561,7 @@ impl Browser for ChromiumoxideBrowser {
         coordinate_x: Option<f32>,
         coordinate_y: Option<f32>,
     ) -> Result<ToolResult<String>> {
-        // 根据传递的文本+换行标识+索引+xy位置实现输入框文本输入
+        // 1.确保页面存在
         let mut guard = self.ensure_page().await?;
         let session = guard.as_mut().ok_or_else(|| anyhow!("浏览器会话不存在"))?;
 
@@ -600,8 +602,9 @@ impl Browser for ChromiumoxideBrowser {
         Ok(success_message("输入文本成功"))
     }
 
+    /// 传递xy坐标移动鼠标
     async fn move_mouse(&self, coordinate_x: f32, coordinate_y: f32) -> Result<ToolResult<String>> {
-        // 传递xy坐标移动鼠标
+        // 1.确保页面存在
         let mut guard = self.ensure_page().await?;
         let session = guard.as_mut().ok_or_else(|| anyhow!("浏览器会话不存在"))?;
 
@@ -609,8 +612,8 @@ impl Browser for ChromiumoxideBrowser {
         Ok(success_message("移动鼠标成功"))
     }
 
+    /// 传递按键进行模拟
     async fn press_key(&self, key: &str) -> Result<ToolResult<String>> {
-        // 传递按键进行模拟
         let mut guard = self.ensure_page().await?;
         let session = guard.as_mut().ok_or_else(|| anyhow!("浏览器会话不存在"))?;
 
@@ -618,8 +621,9 @@ impl Browser for ChromiumoxideBrowser {
         Ok(success_message("按键成功"))
     }
 
+    /// 传递索引+下拉菜单选项选择指定的菜单信息
     async fn select_option(&self, index: usize, option: usize) -> Result<ToolResult<String>> {
-        // 传递索引+下拉菜单选项选择指定的菜单信息
+        // 1.确保页面存在
         let mut guard = self.ensure_page().await?;
         let session = guard.as_mut().ok_or_else(|| anyhow!("浏览器会话不存在"))?;
 
@@ -638,8 +642,9 @@ impl Browser for ChromiumoxideBrowser {
         }
     }
 
+    /// 向上滚动浏览器一个屏幕或者整个页面
     async fn scroll_up(&self, to_top: Option<bool>) -> Result<ToolResult<String>> {
-        // 向上滚动浏览器一个屏幕或者整个页面
+        // 1.确保页面存在
         let mut guard = self.ensure_page().await?;
         let session = guard.as_mut().ok_or_else(|| anyhow!("浏览器会话不存在"))?;
 
@@ -656,8 +661,9 @@ impl Browser for ChromiumoxideBrowser {
         Ok(success_message("向上滚动成功"))
     }
 
+    /// 向下滚动浏览器一个屏幕或者到最底部
     async fn scroll_down(&self, to_down: Option<bool>) -> Result<ToolResult<String>> {
-        // 向下滚动浏览器一个屏幕或者到最底部
+        // 1.确保页面存在
         let mut guard = self.ensure_page().await?;
         let session = guard.as_mut().ok_or_else(|| anyhow!("浏览器会话不存在"))?;
 
@@ -677,8 +683,9 @@ impl Browser for ChromiumoxideBrowser {
         Ok(success_message("向下滚动成功"))
     }
 
+    /// 传递full_page完成网页截图
     async fn screenshot(&self, full_page: Option<bool>) -> Result<Vec<u8>> {
-        // 传递full_page完成网页截图
+        // 1.确保页面存在
         let mut guard = self.ensure_page().await?;
         let session = guard.as_mut().ok_or_else(|| anyhow!("浏览器会话不存在"))?;
 
@@ -690,8 +697,9 @@ impl Browser for ChromiumoxideBrowser {
         Ok(session.page.screenshot(screenshot_options).await?)
     }
 
+    /// 传递js代码在当前页面控制台执行
     async fn console_exec(&self, javascript: &str) -> Result<ToolResult<String>> {
-        // 传递js代码在当前页面控制台执行
+        // 1.确保页面存在
         let mut guard = self.ensure_page().await?;
         let session = guard.as_mut().ok_or_else(|| anyhow!("浏览器会话不存在"))?;
 
@@ -705,8 +713,9 @@ impl Browser for ChromiumoxideBrowser {
         Ok(success_data(json!({ "result": value }).to_string()))
     }
 
+    /// 根据传递的行数查看控制台的日志
     async fn console_view(&self, max_lines: Option<usize>) -> Result<ToolResult<String>> {
-        // 根据传递的行数查看控制台的日志
+        // 1.确保页面存在
         let mut guard = self.ensure_page().await?;
         let session = guard.as_mut().ok_or_else(|| anyhow!("浏览器会话不存在"))?;
 
