@@ -12,15 +12,18 @@ const DEFAULT_NOT_FOUND_MSG: &str = "资源未找到，请核实后尝试";
 const DEFAULT_BAD_REQUEST_MSG: &str = "客户端请求错误，请检查后重试";
 const DEFAULT_SERVER_ERROR_MSG: &str = "服务器出现异常请稍后尝试";
 const DEFAULT_SUCCESS_MSG: &str = "success";
+const APP_ERROR_LOG_MSG: &str = "沙箱发生错误";
+const PANIC_LOG_MSG: &str = "沙箱服务发生未定义异常";
 
 /// 错误响应附加数据 / extra error response data.
 pub type ErrorData = BTreeMap<String, String>;
 
 /// 应用基础异常 / base application error.
 #[derive(Debug, Clone)]
-pub struct AppException {
+pub struct AppException<T = ErrorData> {
     pub msg: String,
     pub status_code: StatusCode,
+    pub data: Option<T>,
 }
 
 /// 统一 API 响应体 / unified API response body.
@@ -49,38 +52,53 @@ impl<T> ApiResponse<T> {
     {
         Self::success(data, DEFAULT_SUCCESS_MSG)
     }
-}
 
-impl ApiResponse<ErrorData> {
-    pub fn fail(code: StatusCode, msg: impl Into<String>) -> Self {
+    pub fn fail(code: StatusCode, msg: impl Into<String>, data: Option<T>) -> Self
+    where
+        T: Default,
+    {
         Self {
             code: code.as_u16(),
             msg: msg.into(),
-            data: ErrorData::default(),
+            data: data.unwrap_or_default(),
         }
     }
 }
 
-impl Default for AppException {
+impl<T> Default for AppException<T>
+where
+    T: Default,
+{
     fn default() -> Self {
-        Self::new(DEFAULT_APP_ERROR_MSG, StatusCode::INTERNAL_SERVER_ERROR)
+        Self::new(
+            DEFAULT_APP_ERROR_MSG,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            None,
+        )
     }
 }
 
-impl AppException {
-    pub fn new(msg: impl Into<String>, status_code: StatusCode) -> Self {
+impl<T> AppException<T> {
+    pub fn new(msg: impl Into<String>, status_code: StatusCode, data: Option<T>) -> Self {
         let msg = msg.into();
         tracing::error!(
             status_code = status_code.as_u16(),
             msg = %msg,
-            "沙箱发生错误"
+            "{}",
+            APP_ERROR_LOG_MSG
         );
 
-        Self { msg, status_code }
+        Self {
+            msg,
+            status_code,
+            data,
+        }
     }
+}
 
+impl AppException {
     pub fn internal(msg: impl Into<String>) -> Self {
-        Self::new(msg, StatusCode::INTERNAL_SERVER_ERROR)
+        Self::new(msg, StatusCode::INTERNAL_SERVER_ERROR, None)
     }
 
     pub fn internal_default() -> Self {
@@ -88,7 +106,7 @@ impl AppException {
     }
 
     pub fn not_found(msg: impl Into<String>) -> Self {
-        Self::new(msg, StatusCode::NOT_FOUND)
+        Self::new(msg, StatusCode::NOT_FOUND, None)
     }
 
     pub fn not_found_default() -> Self {
@@ -96,7 +114,7 @@ impl AppException {
     }
 
     pub fn bad_request(msg: impl Into<String>) -> Self {
-        Self::new(msg, StatusCode::BAD_REQUEST)
+        Self::new(msg, StatusCode::BAD_REQUEST, None)
     }
 
     pub fn bad_request_default() -> Self {
@@ -104,21 +122,27 @@ impl AppException {
     }
 }
 
-impl fmt::Display for AppException {
+impl<T> fmt::Display for AppException<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.msg)
     }
 }
 
-impl Error for AppException {}
+impl<T> Error for AppException<T> where T: fmt::Debug {}
 
-impl From<AppException> for ApiResponse<ErrorData> {
-    fn from(err: AppException) -> Self {
-        Self::fail(err.status_code, err.msg)
+impl<T> From<AppException<T>> for ApiResponse<T>
+where
+    T: Default,
+{
+    fn from(err: AppException<T>) -> Self {
+        Self::fail(err.status_code, err.msg, err.data)
     }
 }
 
-impl IntoResponse for AppException {
+impl<T> IntoResponse for AppException<T>
+where
+    T: Serialize + Default,
+{
     fn into_response(self) -> Response {
         let status_code = self.status_code;
         let body = ApiResponse::from(self);
@@ -133,11 +157,11 @@ pub async fn not_found() -> AppException {
 
 pub fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
     if let Some(msg) = err.downcast_ref::<String>() {
-        tracing::error!(panic = %msg, "沙箱服务发生未定义异常");
+        tracing::error!(panic = %msg, "{}", PANIC_LOG_MSG);
     } else if let Some(msg) = err.downcast_ref::<&str>() {
-        tracing::error!(panic = %msg, "沙箱服务发生未定义异常");
+        tracing::error!(panic = %msg, "{}", PANIC_LOG_MSG);
     } else {
-        tracing::error!("沙箱服务发生未定义异常");
+        tracing::error!("{}", PANIC_LOG_MSG);
     }
 
     AppException::internal_default().into_response()
@@ -153,6 +177,7 @@ mod tests {
 
         assert_eq!(err.status_code, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(err.msg, DEFAULT_APP_ERROR_MSG);
+        assert_eq!(err.data, None);
     }
 
     #[test]
@@ -162,17 +187,24 @@ mod tests {
 
         assert_eq!(not_found.status_code, StatusCode::NOT_FOUND);
         assert_eq!(not_found.msg, DEFAULT_NOT_FOUND_MSG);
+        assert_eq!(not_found.data, None);
         assert_eq!(bad_request.status_code, StatusCode::BAD_REQUEST);
         assert_eq!(bad_request.msg, DEFAULT_BAD_REQUEST_MSG);
+        assert_eq!(bad_request.data, None);
     }
 
     #[test]
-    fn app_exception_does_not_carry_response_data() {
-        let body = ApiResponse::from(AppException::bad_request("参数错误"));
+    fn app_exception_carries_optional_response_data() {
+        let data = ErrorData::from([("field".to_string(), "name".to_string())]);
+        let body = ApiResponse::from(AppException::new(
+            "参数错误",
+            StatusCode::BAD_REQUEST,
+            Some(data),
+        ));
 
         assert_eq!(body.code, StatusCode::BAD_REQUEST.as_u16());
         assert_eq!(body.msg, "参数错误");
-        assert!(body.data.is_empty());
+        assert_eq!(body.data.get("field").map(String::as_str), Some("name"));
     }
 
     #[test]
