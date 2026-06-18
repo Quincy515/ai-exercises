@@ -12,6 +12,6 @@ dotenvy = "0.15"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
-tower-http = { version = "0.7", features = ["cors"] }
+tower-http = { version = "0.7", features = ["catch-panic", "cors"] }
 utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }

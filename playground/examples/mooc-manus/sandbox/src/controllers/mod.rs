@@ -1,6 +1,7 @@
 use axum::Router;
 use utoipa::OpenApi;
 
+pub mod exceptions;
 pub mod file;
 pub mod service_dependencies;
 pub mod shell;
@@ -24,6 +25,7 @@ pub fn create_api_routes() -> Router {
         .nest("/file", file::FileController::routes())
         .nest("/shell", shell::ShellController::routes())
         .nest("/supervisor", supervisor::SupervisorController::routes())
+        .fallback(exceptions::not_found)
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@ pub mod models;
 pub mod services;
 
 use axum::Router;
-use tower_http::cors::CorsLayer;
+use tower_http::{catch_panic::CatchPanicLayer, cors::CorsLayer};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -17,5 +17,9 @@ pub fn create_app() -> Router {
             SwaggerUi::new("/swagger")
                 .url("/api-docs/openapi.json", controllers::ApiDoc::openapi()),
         )
+        .fallback(controllers::exceptions::not_found)
+        .layer(CatchPanicLayer::custom(
+            controllers::exceptions::handle_panic,
+        ))
         .layer(CorsLayer::permissive())
 }
