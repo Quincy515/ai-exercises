@@ -32,7 +32,7 @@ pub struct WaitForProcessRequest {
 
 /// 写入数据到子进程请求结构体 / request body for writing to shell process.
 #[derive(Debug, ToSchema, Deserialize)]
-pub struct ShellWriteRequest {
+pub struct WriteToProcessRequest {
     /// 目标 Shell 会话的唯一标识符
     pub session_id: String,
     /// 需要写入的内容文本

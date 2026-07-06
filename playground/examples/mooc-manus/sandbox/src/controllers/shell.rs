@@ -9,8 +9,8 @@ use crate::{
         ShellExecuteResult, ShellKillResult, ShellViewResult, ShellWaitResult, ShellWriteResult,
     },
     views::{
-        ShellExecuteRequest, ShellKillRequest, ShellWriteRequest, ViewShellRequest,
-        WaitForProcessRequest,
+        ShellExecuteRequest, ShellKillRequest, ViewShellRequest, WaitForProcessRequest,
+        WriteToProcessRequest,
     },
 };
 
@@ -135,18 +135,18 @@ async fn wait_for_process(
 #[utoipa::path(
     post,
     context_path = "/api",
-    path = "/shell/write-shell-input",
+    path = "/shell/write-to-process",
     tag = "Shell模块",
-    request_body = ShellWriteRequest,
+    request_body = WriteToProcessRequest,
     description = "根据传递的会话+写入内容+按下回车标识向指定子进程写入数据",
     responses(
         (status = 200, description = "成功", body = ApiResponse<ShellWriteResult>),
         (status = 400, description = "请求错误", body = ApiResponse),
     ),
 )]
-async fn write_shell_input(
+async fn write_to_process(
     State(state): State<AppState>,
-    Json(request): Json<ShellWriteRequest>,
+    Json(request): Json<WriteToProcessRequest>,
 ) -> Result<ApiResponse<ShellWriteResult>, AppException> {
     // 1.判断下 Shell 会话 id 是否存在
     let session_id = require_session_id(request.session_id)?;
@@ -154,7 +154,7 @@ async fn write_shell_input(
     // 2.调用服务向子进程写入数据
     let result = state
         .shell_service
-        .write_shell_input(session_id, request.input_text, request.press_enter)
+        .write_to_process(session_id, request.input_text, request.press_enter)
         .await?;
 
     Ok(ApiResponse::success(Some(result), "向进程写入数据成功"))
@@ -196,7 +196,7 @@ impl ShellController {
             .route("/exec-command", post(exec_command))
             .route("/view-shell", post(view_shell))
             .route("/wait-for-process", post(wait_for_process))
-            .route("/write-shell-input", post(write_shell_input))
+            .route("/write-to-process", post(write_to_process))
             .route("/kill-process", post(kill_process))
     }
 }

@@ -256,7 +256,7 @@ impl ShellService {
     }
 
     /// 根据传递的数据向指定子进程写入数据
-    pub async fn write_shell_input(
+    pub async fn write_to_process(
         &self,
         session_id: String,
         input_text: String,
@@ -842,6 +842,58 @@ mod tests {
         assert_eq!(records[0].output, "console");
     }
 
+    #[tokio::test]
+    async fn write_to_process_sends_input_and_records_output() {
+        let service = ShellService::new();
+        let session_id = service.create_session_id().unwrap();
+
+        start_test_session(
+            &service,
+            &session_id,
+            "read line; printf 'got:%s' \"$line\"",
+        )
+        .await;
+
+        let write_result = service
+            .write_to_process(session_id.clone(), "hello".to_string(), true)
+            .await
+            .expect("write input should succeed");
+        let wait_result = service
+            .wait_for_process(session_id.clone(), Some(2))
+            .await
+            .expect("process should finish after input");
+        let view_result = service
+            .view_shell(session_id, true)
+            .await
+            .expect("shell output should be viewable");
+
+        assert_eq!(write_result.status, "success");
+        assert_eq!(wait_result.returncode, 0);
+        assert!(view_result.output.contains("hello\n"));
+        assert!(view_result.output.contains("got:hello"));
+        assert_eq!(view_result.console_records.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn kill_process_terminates_running_process() {
+        let service = ShellService::new();
+        let session_id = service.create_session_id().unwrap();
+        let command = if cfg!(windows) {
+            "Start-Sleep -Seconds 30"
+        } else {
+            "sleep 30"
+        };
+
+        start_test_session(&service, &session_id, command).await;
+
+        let kill_result = service
+            .kill_process(session_id)
+            .await
+            .expect("kill process should succeed");
+
+        assert_eq!(kill_result.status, "terminated");
+    }
+
     #[test]
     fn utf8_output_decoder_keeps_split_multibyte_chars() {
         let mut decoder = Utf8OutputDecoder::default();
@@ -875,5 +927,28 @@ mod tests {
             ShellService::remove_ansi_escape_codes("a\x1b[31"),
             "a\x1b[31"
         );
+    }
+
+    async fn start_test_session(service: &ShellService, session_id: &str, command: &str) {
+        let exec_dir = default_work_dir();
+        let (process, stdout, stderr) = service
+            .create_process(session_id, &exec_dir, command)
+            .await
+            .expect("test process should start");
+        let shell =
+            Shell::new(process, exec_dir).with_record(ConsoleRecord::new("$", command.to_string()));
+
+        service
+            .active_shells
+            .lock()
+            .await
+            .insert(session_id.to_string(), shell);
+
+        let output_readers = service.start_output_reader(session_id, stdout, stderr);
+        let mut shells = service.active_shells.lock().await;
+        shells
+            .get_mut(session_id)
+            .expect("test shell should exist")
+            .output_readers = output_readers;
     }
 }
