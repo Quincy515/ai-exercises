@@ -81,9 +81,9 @@ pub struct ShellWaitResult {
     pub returncode: i32,
 }
 
-/// Shell 命令结果模型 / shell command read result model.
+/// Shell 命令结果模型 / shell command view result model.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
-pub struct ShellReadResult {
+pub struct ShellViewResult {
     /// Shell 会话 id
     pub session_id: String,
     /// Shell 会话输出内容

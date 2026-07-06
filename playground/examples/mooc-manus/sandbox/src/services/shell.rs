@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::{
     exceptions::{AppException, ErrorData},
     models::{
-        ConsoleRecord, Shell, ShellExecuteResult, ShellKillResult, ShellReadResult,
+        ConsoleRecord, Shell, ShellExecuteResult, ShellKillResult, ShellViewResult,
         ShellWaitResult, ShellWriteResult,
     },
 };
@@ -56,7 +56,7 @@ impl ShellService {
     }
 
     /// 传递会话 id+时间，等待子进程结束
-    pub async fn wait_process(
+    pub async fn wait_for_process(
         &self,
         session_id: String,
         seconds: Option<i64>,
@@ -70,7 +70,7 @@ impl ShellService {
 
         // 2.获取会话和子进程
         // 3.判断是否设置 seconds
-        match self.wait_for_process(&session_id, seconds).await? {
+        match self.poll_process_until_done(&session_id, seconds).await? {
             Some(returncode) => {
                 // 4.记录日志并返回等待结果
                 info!("进程已完成, 返回代码为: {}", returncode);
@@ -88,11 +88,11 @@ impl ShellService {
     }
 
     /// 根据传递的会话 id+是否输出控制台记录获取 Shell 命令结果
-    pub async fn read_shell_output(
+    pub async fn view_shell(
         &self,
         session_id: String,
         console: bool,
-    ) -> Result<ShellReadResult, AppException> {
+    ) -> Result<ShellViewResult, AppException> {
         // 1.判断下传递的会话是否存在
         debug!("查看 Shell 会话内容: {}", session_id);
         let shells = self.active_shells.lock().await;
@@ -111,7 +111,7 @@ impl ShellService {
             Vec::new()
         };
 
-        Ok(ShellReadResult {
+        Ok(ShellViewResult {
             session_id,
             output: clean_output,
             console_records,
@@ -211,12 +211,12 @@ impl ShellService {
 
         // 13.尝试等待子进程执行(最多等待 5s)
         debug!("正在等待会话中的进程完成: {}", session_id);
-        match self.wait_process(session_id.clone(), Some(5)).await {
+        match self.wait_for_process(session_id.clone(), Some(5)).await {
             Ok(wait_result) => {
                 // 14.判断返回代码是否非空(已结束)则同步返回执行结果
                 // 15.记录日志并查看结果
                 debug!("Shell 会话进程已结束, 代码: {}", wait_result.returncode);
-                let view_result = self.read_shell_output(session_id.clone(), false).await?;
+                let view_result = self.view_shell(session_id.clone(), false).await?;
 
                 Ok(ShellExecuteResult {
                     session_id,
@@ -534,7 +534,7 @@ impl ShellService {
         })
     }
 
-    async fn wait_for_process(
+    async fn poll_process_until_done(
         &self,
         session_id: &str,
         seconds: u64,

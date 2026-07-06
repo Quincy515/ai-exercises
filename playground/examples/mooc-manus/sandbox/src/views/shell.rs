@@ -12,9 +12,9 @@ pub struct ShellExecuteRequest {
     pub command: String,
 }
 
-/// 查看 Shell 执行内容请求结构体 / request body for reading shell output.
+/// 查看 Shell 执行内容请求结构体 / request body for viewing shell output.
 #[derive(Debug, ToSchema, Deserialize)]
-pub struct ShellReadRequest {
+pub struct ViewShellRequest {
     /// 目标 Shell 会话的唯一标识符
     pub session_id: String,
     /// 是否返回控制台记录列表
@@ -23,7 +23,7 @@ pub struct ShellReadRequest {
 
 /// 等待 Shell 命令执行请求结构体 / request body for waiting shell process.
 #[derive(Debug, ToSchema, Deserialize)]
-pub struct ShellWaitRequest {
+pub struct WaitForProcessRequest {
     /// 目标 Shell 会话的唯一标识符
     pub session_id: String,
     /// 等待时间，单位为秒

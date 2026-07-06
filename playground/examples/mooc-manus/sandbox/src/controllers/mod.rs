@@ -13,8 +13,8 @@ pub mod supervisor;
 #[openapi(
     paths(
         shell::exec_command,
-        shell::read_shell_output,
-        shell::wait_process,
+        shell::view_shell,
+        shell::wait_for_process,
         shell::write_shell_input,
         shell::kill_process,
     ),
@@ -64,8 +64,8 @@ mod tests {
             [
                 "/api/shell/exec-command",
                 "/api/shell/kill-process",
-                "/api/shell/read-shell-output",
-                "/api/shell/wait-process",
+                "/api/shell/view-shell",
+                "/api/shell/wait-for-process",
                 "/api/shell/write-shell-input"
             ]
         );

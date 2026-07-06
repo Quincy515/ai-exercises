@@ -6,11 +6,11 @@ use crate::{
     controllers::service_dependencies::AppState,
     exceptions::{ApiResponse, AppException},
     models::{
-        ShellExecuteResult, ShellKillResult, ShellReadResult, ShellWaitResult, ShellWriteResult,
+        ShellExecuteResult, ShellKillResult, ShellViewResult, ShellWaitResult, ShellWriteResult,
     },
     views::{
-        ShellExecuteRequest, ShellKillRequest, ShellReadRequest, ShellWaitRequest,
-        ShellWriteRequest,
+        ShellExecuteRequest, ShellKillRequest, ShellWriteRequest, ViewShellRequest,
+        WaitForProcessRequest,
     },
 };
 
@@ -76,26 +76,26 @@ async fn exec_command(
 #[utoipa::path(
     post,
     context_path = "/api",
-    path = "/shell/read-shell-output",
+    path = "/shell/view-shell",
     tag = "Shell模块",
-    request_body = ShellReadRequest,
+    request_body = ViewShellRequest,
     description = "根据传递的会话 id+是否返回控制台标识获取 Shell 命令执行结果",
     responses(
-        (status = 200, description = "成功", body = ApiResponse<ShellReadResult>),
+        (status = 200, description = "成功", body = ApiResponse<ShellViewResult>),
         (status = 400, description = "请求错误", body = ApiResponse),
     ),
 )]
-async fn read_shell_output(
+async fn view_shell(
     State(state): State<AppState>,
-    Json(request): Json<ShellReadRequest>,
-) -> Result<ApiResponse<ShellReadResult>, AppException> {
+    Json(request): Json<ViewShellRequest>,
+) -> Result<ApiResponse<ShellViewResult>, AppException> {
     // 1.判断下 Shell 会话 id 是否存在
     let session_id = require_session_id(request.session_id)?;
 
     // 2.调用服务获取命令执行结果
     let result = state
         .shell_service
-        .read_shell_output(session_id, request.console.unwrap_or(false))
+        .view_shell(session_id, request.console.unwrap_or(false))
         .await?;
 
     Ok(ApiResponse::success_default(Some(result)))
@@ -104,18 +104,18 @@ async fn read_shell_output(
 #[utoipa::path(
     post,
     context_path = "/api",
-    path = "/shell/wait-process",
+    path = "/shell/wait-for-process",
     tag = "Shell模块",
-    request_body = ShellWaitRequest,
+    request_body = WaitForProcessRequest,
     description = "传递会话 id+描述执行等待并获取等待结果",
     responses(
         (status = 200, description = "成功", body = ApiResponse<ShellWaitResult>),
         (status = 400, description = "请求错误", body = ApiResponse),
     ),
 )]
-async fn wait_process(
+async fn wait_for_process(
     State(state): State<AppState>,
-    Json(request): Json<ShellWaitRequest>,
+    Json(request): Json<WaitForProcessRequest>,
 ) -> Result<ApiResponse<ShellWaitResult>, AppException> {
     // 1.判断下 Shell 会话 id 是否存在
     let session_id = require_session_id(request.session_id)?;
@@ -123,7 +123,7 @@ async fn wait_process(
     // 2.调用服务等待子进程
     let result = state
         .shell_service
-        .wait_process(session_id, request.seconds)
+        .wait_for_process(session_id, request.seconds)
         .await?;
 
     Ok(ApiResponse::success(
@@ -194,8 +194,8 @@ impl ShellController {
     pub fn routes() -> Router<AppState> {
         Router::new()
             .route("/exec-command", post(exec_command))
-            .route("/read-shell-output", post(read_shell_output))
-            .route("/wait-process", post(wait_process))
+            .route("/view-shell", post(view_shell))
+            .route("/wait-for-process", post(wait_for_process))
             .route("/write-shell-input", post(write_shell_input))
             .route("/kill-process", post(kill_process))
     }
@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_shell_output_can_return_console_records() {
+    async fn view_shell_can_return_console_records() {
         let state = AppState::new();
         let session_id = state.shell_service.create_session_id().unwrap();
 
@@ -283,9 +283,9 @@ mod tests {
         .await
         .expect("exec command should succeed");
 
-        let response = read_shell_output(
+        let response = view_shell(
             State(state),
-            Json(ShellReadRequest {
+            Json(ViewShellRequest {
                 session_id,
                 console: Some(true),
             }),
