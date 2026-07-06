@@ -2,6 +2,7 @@ pub mod controllers;
 pub mod core;
 pub mod models;
 pub mod services;
+pub mod views;
 
 use axum::Router;
 use tower_http::{catch_panic::CatchPanicLayer, cors::CorsLayer};
@@ -11,8 +12,11 @@ use utoipa_swagger_ui::SwaggerUi;
 pub use controllers::*;
 
 pub fn create_app() -> Router {
+    let app_state = controllers::service_dependencies::AppState::new();
+    let api_routes = controllers::create_api_routes().with_state(app_state);
+
     Router::new()
-        .nest("/api", controllers::create_api_routes())
+        .nest("/api", api_routes)
         .merge(
             SwaggerUi::new("/swagger")
                 .url("/api-docs/openapi.json", controllers::ApiDoc::openapi()),

@@ -1,6 +1,8 @@
 use axum::Router;
 use utoipa::OpenApi;
 
+use service_dependencies::AppState;
+
 pub mod exceptions;
 pub mod file;
 pub mod service_dependencies;
@@ -20,7 +22,7 @@ pub mod supervisor;
 pub struct ApiDoc;
 
 /// 创建 API 路由，涵盖整个沙箱项目的所有 API
-pub fn create_api_routes() -> Router {
+pub fn create_api_routes() -> Router<AppState> {
     Router::new()
         .nest("/file", file::FileController::routes())
         .nest("/shell", shell::ShellController::routes())

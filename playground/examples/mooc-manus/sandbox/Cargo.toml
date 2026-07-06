@@ -15,3 +15,4 @@ axum = "0.8"
 tower-http = { version = "0.7", features = ["catch-panic", "cors"] }
 utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
+uuid = { version = "1", features = ["v4"] }

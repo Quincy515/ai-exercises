@@ -6,6 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 const DEFAULT_APP_ERROR_MSG: &str = "应用发生错误请稍后尝试";
 const DEFAULT_NOT_FOUND_MSG: &str = "资源未找到，请核实后尝试";
@@ -27,7 +28,7 @@ pub struct AppException<T = ErrorData> {
 }
 
 /// 统一 API 响应体 / unified API response body.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct ApiResponse<T = ErrorData> {
     pub code: u16,
     pub msg: String,
@@ -136,6 +137,15 @@ where
 {
     fn from(err: AppException<T>) -> Self {
         Self::fail(err.status_code, err.msg, err.data)
+    }
+}
+
+impl<T> IntoResponse for ApiResponse<T>
+where
+    T: Serialize,
+{
+    fn into_response(self) -> Response {
+        Json(self).into_response()
     }
 }
 
