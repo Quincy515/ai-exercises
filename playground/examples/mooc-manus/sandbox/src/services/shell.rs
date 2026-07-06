@@ -5,6 +5,7 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::{Child, ChildStderr, ChildStdout, Command},
     sync::Mutex,
+    task::JoinHandle,
     time::{Duration, Instant, sleep, timeout},
 };
 use tracing::{debug, error, info, warn};
@@ -156,6 +157,7 @@ impl ShellService {
                     debug!("正在终止会话中的上一个进程: {}", session_id);
                     self.stop_process(&mut shell.process, &session_id, 1).await;
                 }
+                wait_output_readers(std::mem::take(&mut shell.output_readers)).await;
 
                 // 10.关闭之后创建一个新的进程
                 let (process, stdout, stderr) = self
@@ -189,7 +191,13 @@ impl ShellService {
                 .insert(session_id.clone(), shell);
 
             // 5/12.创建后台任务来运行输出读取器
-            self.start_output_reader(&session_id, stdout, stderr);
+            let output_readers = self.start_output_reader(&session_id, stdout, stderr);
+            if !output_readers.is_empty() {
+                let mut shells = self.active_shells.lock().await;
+                if let Some(shell) = shells.get_mut(&session_id) {
+                    shell.output_readers = output_readers;
+                }
+            }
 
             Ok::<(), AppException>(())
         }
@@ -435,6 +443,7 @@ impl ShellService {
         }
 
         // 3.创建一个系统级的子进程用来执行 shell 命令
+        // Python 版本把 stderr 重定向到 stdout；Rust 版本保留两条管道，再把两条管道读到同一个会话输出中。
         command_builder
             .current_dir(exec_dir)
             .stdout(Stdio::piped())
@@ -454,13 +463,16 @@ impl ShellService {
         session_id: &str,
         stdout: Option<ChildStdout>,
         stderr: Option<ChildStderr>,
-    ) {
+    ) -> Vec<JoinHandle<()>> {
+        let mut output_readers = Vec::new();
         if let Some(stdout) = stdout {
-            self.spawn_output_reader(session_id.to_string(), stdout);
+            // 标准输出和标准错误都使用同一套读取逻辑，最终都会追加到 Shell::append_output。
+            output_readers.push(self.spawn_output_reader(session_id.to_string(), stdout));
         }
         if let Some(stderr) = stderr {
-            self.spawn_output_reader(session_id.to_string(), stderr);
+            output_readers.push(self.spawn_output_reader(session_id.to_string(), stderr));
         }
+        output_readers
     }
 
     async fn stop_process(&self, process: &mut Child, session_id: &str, seconds: u64) {
@@ -485,7 +497,7 @@ impl ShellService {
         }
     }
 
-    fn spawn_output_reader<R>(&self, session_id: String, mut reader: R)
+    fn spawn_output_reader<R>(&self, session_id: String, mut reader: R) -> JoinHandle<()>
     where
         R: AsyncRead + Unpin + Send + 'static,
     {
@@ -493,16 +505,17 @@ impl ShellService {
 
         tokio::spawn(async move {
             let mut buffer = [0_u8; 4096];
+            // 对应 Python 的 codecs 增量 decoder：跨 read 边界的 UTF-8 字符会留到下一块再解码。
+            // 当前服务保持 UTF-8 输出契约；Windows GB18030 码页输出需要独立编码转换层。
+            let mut decoder = Utf8OutputDecoder::default();
 
             loop {
                 match reader.read(&mut buffer).await {
                     Ok(0) => break,
                     Ok(size) => {
-                        let output = String::from_utf8_lossy(&buffer[..size]).into_owned();
-                        let mut shells = active_shells.lock().await;
-
-                        if let Some(shell) = shells.get_mut(&session_id) {
-                            shell.append_output(&output);
+                        let output = decoder.decode(&buffer[..size]);
+                        if !output.is_empty() {
+                            append_shell_output(&active_shells, &session_id, &output).await;
                         }
                     }
                     Err(err) => {
@@ -512,8 +525,13 @@ impl ShellService {
                 }
             }
 
+            let output = decoder.finish();
+            if !output.is_empty() {
+                append_shell_output(&active_shells, &session_id, &output).await;
+            }
+
             debug!("会话 {} 的输出读取器已完成", session_id);
-        });
+        })
     }
 
     async fn wait_for_process(
@@ -524,20 +542,26 @@ impl ShellService {
         let deadline = Instant::now() + Duration::from_secs(seconds);
 
         loop {
-            let status = {
+            let (status, output_readers) = {
                 let mut shells = self.active_shells.lock().await;
                 let shell = shells
                     .get_mut(session_id)
                     .ok_or_else(|| self.session_not_found(session_id))?;
 
-                shell
+                let status = shell
                     .process
                     .try_wait()
-                    .map_err(|err| self.command_error(session_id, "", err))?
+                    .map_err(|err| self.command_error(session_id, "", err))?;
+                let output_readers = if status.is_some() {
+                    std::mem::take(&mut shell.output_readers)
+                } else {
+                    Vec::new()
+                };
+                (status, output_readers)
             };
 
             if let Some(status) = status {
-                sleep(Duration::from_millis(20)).await;
+                wait_output_readers(output_readers).await;
                 return Ok(Some(exit_code(status)));
             }
 
@@ -563,23 +587,25 @@ impl ShellService {
             .collect()
     }
 
+    /// 从文本中删除 ANSI 转义字符
     fn remove_ansi_escape_codes(text: &str) -> String {
         let mut cleaned = String::with_capacity(text.len());
-        let mut chars = text.chars().peekable();
+        let chars = text.chars().collect::<Vec<_>>();
+        let mut index = 0;
 
-        while let Some(ch) = chars.next() {
+        while index < chars.len() {
+            let ch = chars[index];
             if ch != '\u{1b}' {
                 cleaned.push(ch);
+                index += 1;
                 continue;
             }
 
-            if matches!(chars.peek(), Some('[')) {
-                chars.next();
-                for next in chars.by_ref() {
-                    if ('@'..='~').contains(&next) {
-                        break;
-                    }
-                }
+            if let Some(sequence_len) = ansi_escape_sequence_len(&chars[index + 1..]) {
+                index += sequence_len + 1;
+            } else {
+                cleaned.push(ch);
+                index += 1;
             }
         }
 
@@ -615,6 +641,100 @@ impl Default for ShellService {
 
 fn exit_code(status: std::process::ExitStatus) -> i32 {
     status.code().unwrap_or(-1)
+}
+
+async fn append_shell_output(
+    active_shells: &Arc<Mutex<HashMap<String, Shell>>>,
+    session_id: &str,
+    output: &str,
+) {
+    let mut shells = active_shells.lock().await;
+
+    if let Some(shell) = shells.get_mut(session_id) {
+        shell.append_output(output);
+    }
+}
+
+async fn wait_output_readers(output_readers: Vec<JoinHandle<()>>) {
+    for output_reader in output_readers {
+        match timeout(Duration::from_secs(1), output_reader).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => warn!("输出读取任务结束异常: {}", err),
+            Err(_) => warn!("等待输出读取任务完成超时"),
+        }
+    }
+}
+
+fn ansi_escape_sequence_len(chars: &[char]) -> Option<usize> {
+    let first = *chars.first()?;
+    if matches!(first, '@'..='Z' | '\\'..='_') {
+        return Some(1);
+    }
+
+    if first != '[' {
+        return None;
+    }
+
+    let mut index = 1;
+    while chars.get(index).is_some_and(|ch| matches!(ch, '0'..='?')) {
+        index += 1;
+    }
+    while chars.get(index).is_some_and(|ch| matches!(ch, ' '..='/')) {
+        index += 1;
+    }
+
+    chars
+        .get(index)
+        .filter(|ch| matches!(ch, '@'..='~'))
+        .map(|_| index + 1)
+}
+
+#[derive(Default)]
+struct Utf8OutputDecoder {
+    pending: Vec<u8>,
+}
+
+impl Utf8OutputDecoder {
+    fn decode(&mut self, bytes: &[u8]) -> String {
+        self.pending.extend_from_slice(bytes);
+        let mut output = String::new();
+
+        loop {
+            match std::str::from_utf8(&self.pending) {
+                Ok(valid) => {
+                    output.push_str(valid);
+                    self.pending.clear();
+                    break;
+                }
+                Err(err) => {
+                    let valid_up_to = err.valid_up_to();
+                    if valid_up_to > 0 {
+                        let valid = std::str::from_utf8(&self.pending[..valid_up_to])
+                            .expect("valid_up_to always points to a valid UTF-8 prefix");
+                        output.push_str(valid);
+                        self.pending.drain(..valid_up_to);
+                        continue;
+                    }
+
+                    if let Some(error_len) = err.error_len() {
+                        output.push('\u{fffd}');
+                        self.pending.drain(..error_len);
+                        continue;
+                    }
+
+                    break;
+                }
+            }
+        }
+
+        output
+    }
+
+    fn finish(&mut self) -> String {
+        let output = String::from_utf8_lossy(&self.pending).into_owned();
+        self.pending.clear();
+        output
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -700,5 +820,60 @@ mod tests {
     #[test]
     fn default_work_dir_returns_non_empty_path() {
         assert!(!default_work_dir().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_console_records_returns_cleaned_copies() {
+        let service = ShellService::new();
+        let session_id = service.create_session_id().unwrap();
+        let command = "printf '\\033[31mconsole\\033[0m'".to_string();
+
+        service
+            .exec_command(session_id.clone(), "/tmp".to_string(), command.clone())
+            .await
+            .expect("exec command should succeed");
+        let records = service
+            .get_console_records(&session_id)
+            .await
+            .expect("console records should exist");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].command, command);
+        assert_eq!(records[0].output, "console");
+    }
+
+    #[test]
+    fn utf8_output_decoder_keeps_split_multibyte_chars() {
+        let mut decoder = Utf8OutputDecoder::default();
+
+        assert_eq!(decoder.decode(&[0xe4, 0xbd]), "");
+        assert_eq!(decoder.decode(&[0xa0]), "你");
+        assert_eq!(decoder.decode("好".as_bytes()), "好");
+        assert_eq!(decoder.finish(), "");
+    }
+
+    #[test]
+    fn utf8_output_decoder_replaces_invalid_bytes() {
+        let mut decoder = Utf8OutputDecoder::default();
+
+        assert_eq!(decoder.decode(&[0xff, b'a']), "\u{fffd}a");
+        assert_eq!(decoder.finish(), "");
+    }
+
+    #[test]
+    fn remove_ansi_escape_codes_matches_course_regex() {
+        assert_eq!(
+            ShellService::remove_ansi_escape_codes("a\x1b[31mred\x1b[0m"),
+            "ared"
+        );
+        assert_eq!(
+            ShellService::remove_ansi_escape_codes("a\x1b]0;title\x07b"),
+            "a0;title\x07b"
+        );
+        assert_eq!(ShellService::remove_ansi_escape_codes("a\x1bc"), "a\x1bc");
+        assert_eq!(
+            ShellService::remove_ansi_escape_codes("a\x1b[31"),
+            "a\x1b[31"
+        );
     }
 }

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tokio::process::Child;
+use tokio::{process::Child, task::JoinHandle};
 use utoipa::ToSchema;
 
 /// Shell 命令行控制台记录
@@ -45,6 +45,8 @@ pub struct Shell {
     pub output: String,
     /// Shell 会话中控制台记录列表
     pub console_records: Vec<ConsoleRecord>,
+    /// 输出读取任务
+    pub output_readers: Vec<JoinHandle<()>>,
 }
 
 impl Shell {
@@ -54,6 +56,7 @@ impl Shell {
             exec_dir: exec_dir.into(),
             output: String::new(),
             console_records: Vec::new(),
+            output_readers: Vec::new(),
         }
     }
 

@@ -38,6 +38,7 @@ fn require_session_id(session_id: String) -> Result<String, AppException> {
 
 #[utoipa::path(
     post,
+    context_path = "/api",
     path = "/shell/exec-command",
     tag = "Shell模块",
     request_body = ShellExecuteRequest,
@@ -74,6 +75,7 @@ async fn exec_command(
 
 #[utoipa::path(
     post,
+    context_path = "/api",
     path = "/shell/read-shell-output",
     tag = "Shell模块",
     request_body = ShellReadRequest,
@@ -101,6 +103,7 @@ async fn read_shell_output(
 
 #[utoipa::path(
     post,
+    context_path = "/api",
     path = "/shell/wait-process",
     tag = "Shell模块",
     request_body = ShellWaitRequest,
@@ -131,6 +134,7 @@ async fn wait_process(
 
 #[utoipa::path(
     post,
+    context_path = "/api",
     path = "/shell/write-shell-input",
     tag = "Shell模块",
     request_body = ShellWriteRequest,
@@ -158,6 +162,7 @@ async fn write_shell_input(
 
 #[utoipa::path(
     post,
+    context_path = "/api",
     path = "/shell/kill-process",
     tag = "Shell模块",
     request_body = ShellKillRequest,
@@ -243,6 +248,23 @@ mod tests {
         assert_eq!(response.data.command, "printf preserved");
         assert_eq!(response.data.status, "completed");
         assert_eq!(response.data.output.as_deref(), Some("preserved"));
+    }
+
+    #[tokio::test]
+    async fn exec_command_returns_drained_output_when_completed() {
+        let response = exec_command(
+            State(AppState::new()),
+            Json(ShellExecuteRequest {
+                session_id: Some("session-large-output".to_string()),
+                exec_dir: Some("/tmp".to_string()),
+                command: "printf '%*s' 12000 ''".to_string(),
+            }),
+        )
+        .await
+        .expect("exec command should succeed");
+
+        assert_eq!(response.data.status, "completed");
+        assert_eq!(response.data.output.as_deref().map(str::len), Some(12000));
     }
 
     #[tokio::test]
