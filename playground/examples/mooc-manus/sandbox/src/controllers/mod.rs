@@ -12,6 +12,7 @@ pub mod supervisor;
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        file::read_file,
         shell::exec_command,
         shell::view_shell,
         shell::wait_for_process,
@@ -62,6 +63,7 @@ mod tests {
         assert_eq!(
             path_names,
             [
+                "/api/file/read-file",
                 "/api/shell/exec-command",
                 "/api/shell/kill-process",
                 "/api/shell/view-shell",
