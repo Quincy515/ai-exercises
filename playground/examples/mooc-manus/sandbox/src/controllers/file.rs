@@ -30,7 +30,7 @@ async fn read_file(
     let result = state
         .file_service
         .read_file(
-            &request.filepath,
+            &request.file_path,
             request.start_line,
             request.end_line,
             request.sudo,
@@ -84,7 +84,7 @@ mod tests {
         let response = read_file(
             State(AppState::new()),
             Json(ReadFileRequest {
-                filepath: file.as_str().to_string(),
+                file_path: file.as_str().to_string(),
                 start_line: None,
                 end_line: None,
                 sudo: Some(false),
@@ -96,7 +96,7 @@ mod tests {
 
         assert_eq!(response.code, 200);
         assert_eq!(response.msg, "文件内容读取成功");
-        assert_eq!(response.data.filepath, file.as_str());
+        assert_eq!(response.data.file_path, file.as_str());
         assert_eq!(response.data.content, "Agent读取文件");
     }
 }

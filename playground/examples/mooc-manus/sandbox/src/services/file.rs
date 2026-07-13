@@ -4,6 +4,7 @@ use tracing::error;
 use crate::{exceptions::AppException, models::FileReadResult};
 
 const TRUNCATED_MARKER: &str = "(truncated)";
+// 沙箱文本统一使用 UTF-8；若要支持 Windows 本地代码页，应在文件 I/O 边界单独引入编码转换。
 
 /// 文件沙箱服务
 #[derive(Debug, Default)]
@@ -17,7 +18,7 @@ impl FileService {
     /// 根据传递的文件路径+起始行号+权限+最大长度读取文件内容
     pub async fn read_file(
         &self,
-        filepath: &str,
+        file_path: &str,
         start_line: Option<usize>,
         end_line: Option<usize>,
         sudo: Option<bool>,
@@ -26,8 +27,8 @@ impl FileService {
         let sudo = sudo.unwrap_or(false);
 
         // 1.检测在当前权限下能否获取该文件
-        if !sudo && !fs::try_exists(filepath).await.unwrap_or(false) {
-            let message = format!("要读取的文件不存在或无权限: {filepath}");
+        if !sudo && !fs::try_exists(file_path).await.unwrap_or(false) {
+            let message = format!("要读取的文件不存在或无权限: {file_path}");
             error!("{message}");
             return Err(AppException::not_found(message));
         }
@@ -38,12 +39,12 @@ impl FileService {
             let output = Command::new("sudo")
                 .arg("cat")
                 .arg("--")
-                .arg(filepath)
+                .arg(file_path)
                 .output()
                 .await
                 .map_err(|err| AppException::bad_request(format!("读取文件失败: {err}")))?;
 
-            // 4.判断子进程的状态是否正常结束并读取输出内容
+            // 4.判断子进程的状态是否正常结束，并按UTF-8读取输出内容
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(AppException::bad_request(format!("读取文件失败: {stderr}")));
@@ -51,8 +52,8 @@ impl FileService {
 
             String::from_utf8_lossy(&output.stdout).into_owned()
         } else {
-            // 5.使用Tokio的阻塞线程池读取文件，避免阻塞异步运行时
-            fs::read_to_string(filepath)
+            // 5.使用Tokio的阻塞线程池按UTF-8读取文件，避免阻塞异步运行时
+            fs::read_to_string(file_path)
                 .await
                 .map_err(|err| AppException::internal(format!("读取文件失败: {err}")))?
         };
@@ -78,7 +79,7 @@ impl FileService {
         }
 
         Ok(FileReadResult {
-            filepath: filepath.to_string(),
+            file_path: file_path.to_string(),
             content,
         })
     }
@@ -124,7 +125,7 @@ mod tests {
             .await
             .expect("file range should be readable");
 
-        assert_eq!(result.filepath, file.as_str());
+        assert_eq!(result.file_path, file.as_str());
         assert_eq!(result.content, "第二行\n第三行");
     }
 

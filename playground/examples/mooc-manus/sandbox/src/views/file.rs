@@ -5,7 +5,7 @@ use utoipa::ToSchema;
 #[derive(Debug, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct ReadFileRequest {
     /// 要读取文件的绝对路径
-    pub filepath: String,
+    pub file_path: String,
     /// (可选)读取的起始行, 索引从0开始
     pub start_line: Option<usize>,
     /// (可选)结束行号, 不包含该行
@@ -33,13 +33,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn request_defaults_match_api_contract() {
+    fn request_uses_rust_field_name_and_defaults() {
         let request = ReadFileRequest::deserialize(MapDeserializer::<_, Error>::new(
-            [("filepath", "/tmp/agent.txt")].into_iter(),
+            [("file_path", "/tmp/agent.txt")].into_iter(),
         ))
         .expect("minimal request should be deserializable");
 
-        assert_eq!(request.filepath, "/tmp/agent.txt");
+        assert_eq!(request.file_path, "/tmp/agent.txt");
         assert_eq!(request.start_line, None);
         assert_eq!(request.end_line, None);
         assert_eq!(request.sudo, Some(false));
