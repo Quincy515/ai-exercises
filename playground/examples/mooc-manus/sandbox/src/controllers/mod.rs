@@ -13,6 +13,7 @@ pub mod supervisor;
 #[openapi(
     paths(
         file::read_file,
+        file::write_file,
         shell::exec_command,
         shell::view_shell,
         shell::wait_for_process,
@@ -64,6 +65,7 @@ mod tests {
             path_names,
             [
                 "/api/file/read-file",
+                "/api/file/write-file",
                 "/api/shell/exec-command",
                 "/api/shell/kill-process",
                 "/api/shell/view-shell",

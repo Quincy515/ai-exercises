@@ -2,8 +2,8 @@ use axum::{Json, Router, extract::State, routing::post};
 
 use crate::{
     exceptions::{ApiResponse, AppException},
-    models::FileReadResult,
-    views::ReadFileRequest,
+    models::{FileReadResult, FileWriteResult},
+    views::{ReadFileRequest, WriteFileRequest},
 };
 
 use super::service_dependencies::AppState;
@@ -41,9 +41,43 @@ async fn read_file(
     Ok(ApiResponse::success(Some(result), "文件内容读取成功"))
 }
 
+#[utoipa::path(
+    post,
+    context_path = "/api",
+    path = "/file/write-file",
+    tag = "文件模块",
+    description = "根据传递的数据向指定文件写入内容",
+    request_body = WriteFileRequest,
+    responses(
+        (status = 200, description = "成功", body = ApiResponse<FileWriteResult>),
+        (status = 400, description = "请求错误", body = ApiResponse),
+        (status = 500, description = "文件写入失败", body = ApiResponse),
+    ),
+)]
+async fn write_file(
+    State(state): State<AppState>,
+    Json(request): Json<WriteFileRequest>,
+) -> Result<ApiResponse<FileWriteResult>, AppException> {
+    let result = state
+        .file_service
+        .write_file(
+            &request.file_path,
+            request.content,
+            request.append,
+            request.leading_newline,
+            request.trailing_newline,
+            request.sudo,
+        )
+        .await?;
+
+    Ok(ApiResponse::success(Some(result), "文件内容写入成功"))
+}
+
 impl FileController {
     pub fn routes() -> Router<AppState> {
-        Router::new().route("/read-file", post(read_file))
+        Router::new()
+            .route("/read-file", post(read_file))
+            .route("/write-file", post(write_file))
     }
 }
 
@@ -98,5 +132,31 @@ mod tests {
         assert_eq!(response.msg, "文件内容读取成功");
         assert_eq!(response.data.file_path, file.as_str());
         assert_eq!(response.data.content, "Agent读取文件");
+    }
+
+    #[tokio::test]
+    async fn writes_file_content_and_returns_a_unified_response() {
+        let file = TestFile::create("旧内容").await;
+
+        let response = write_file(
+            State(AppState::new()),
+            Json(WriteFileRequest {
+                file_path: file.as_str().to_string(),
+                content: "Agent写入文件".to_string(),
+                append: Some(false),
+                leading_newline: Some(false),
+                trailing_newline: Some(true),
+                sudo: Some(false),
+            }),
+        )
+        .await
+        .expect("controller should write file content");
+
+        let expected = "Agent写入文件\n";
+        assert_eq!(response.code, 200);
+        assert_eq!(response.msg, "文件内容写入成功");
+        assert_eq!(response.data.file_path, file.as_str());
+        assert_eq!(response.data.bytes_written, Some(expected.len()));
+        assert_eq!(tokio::fs::read_to_string(&file.0).await.unwrap(), expected);
     }
 }
