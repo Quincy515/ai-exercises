@@ -8,6 +8,8 @@ use crate::domain::{
     services::tools::{tool, BaseTool, ToolArguments, ToolDefinition},
 };
 
+use super::arguments::{optional_usize, required_bool, required_non_empty_str};
+
 /// Shell 工具箱，提供 Shell 交互相关功能。
 /// Shell toolbox for executing and interacting with sandbox shell sessions.
 pub struct ShellTool {
@@ -199,29 +201,29 @@ impl BaseTool for ShellTool {
     async fn call_tool(&self, tool_name: &str, kwargs: ToolArguments) -> Result<ToolResult<Value>> {
         let result = match tool_name {
             "shell_execute" => {
-                let session_id = required_str(&kwargs, "session_id")?;
-                let exec_dir = required_str(&kwargs, "exec_dir")?;
-                let command = required_str(&kwargs, "command")?;
+                let session_id = required_non_empty_str(&kwargs, "session_id")?;
+                let exec_dir = required_non_empty_str(&kwargs, "exec_dir")?;
+                let command = required_non_empty_str(&kwargs, "command")?;
                 self.shell_execute(session_id, exec_dir, command).await?
             }
             "shell_view" => {
-                let session_id = required_str(&kwargs, "session_id")?;
+                let session_id = required_non_empty_str(&kwargs, "session_id")?;
                 self.shell_view(session_id).await?
             }
             "shell_wait" => {
-                let session_id = required_str(&kwargs, "session_id")?;
+                let session_id = required_non_empty_str(&kwargs, "session_id")?;
                 let seconds = optional_usize(&kwargs, "seconds")?;
                 self.shell_wait(session_id, seconds).await?
             }
             "shell_write_to_process" => {
-                let session_id = required_str(&kwargs, "session_id")?;
-                let input_text = required_str(&kwargs, "input_text")?;
+                let session_id = required_non_empty_str(&kwargs, "session_id")?;
+                let input_text = required_non_empty_str(&kwargs, "input_text")?;
                 let press_enter = required_bool(&kwargs, "press_enter")?;
                 self.shell_write_to_process(session_id, input_text, press_enter)
                     .await?
             }
             "shell_kill_process" => {
-                let session_id = required_str(&kwargs, "session_id")?;
+                let session_id = required_non_empty_str(&kwargs, "session_id")?;
                 self.shell_kill_process(session_id).await?
             }
             _ => return Err(anyhow!("工具[{tool_name}]未找到")),
@@ -232,32 +234,6 @@ impl BaseTool for ShellTool {
             message: result.message,
             data: result.data.map(Value::String),
         })
-    }
-}
-
-fn required_str<'a>(kwargs: &'a ToolArguments, name: &str) -> Result<&'a str> {
-    kwargs
-        .get(name)
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow!("工具参数[{name}]缺失"))
-}
-
-fn required_bool(kwargs: &ToolArguments, name: &str) -> Result<bool> {
-    kwargs
-        .get(name)
-        .and_then(Value::as_bool)
-        .ok_or_else(|| anyhow!("工具参数[{name}]缺失"))
-}
-
-fn optional_usize(kwargs: &ToolArguments, name: &str) -> Result<Option<usize>> {
-    match kwargs.get(name) {
-        Some(Value::Null) | None => Ok(None),
-        Some(value) => value
-            .as_u64()
-            .and_then(|value| usize::try_from(value).ok())
-            .map(Some)
-            .ok_or_else(|| anyhow!("工具参数[{name}]必须是非负整数")),
     }
 }
 
@@ -401,6 +377,7 @@ mod tests {
             _start_line: Option<usize>,
             _end_line: Option<usize>,
             _sudo: Option<bool>,
+            _max_length: Option<usize>,
         ) -> Result<ToolResult<String>> {
             bail!("file_read should not be called by ShellTool")
         }

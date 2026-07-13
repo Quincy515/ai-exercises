@@ -57,14 +57,15 @@ pub trait Sandbox: Send + Sync {
         sudo: Option<bool>,
     ) -> Result<ToolResult<String>>;
 
-    /// 根据传递的文件路径+起点终点行数+超级权限读取对应的文件内容
-    /// Read a sandbox file, optionally restricted to a line range.
+    /// 根据传递的文件路径+起止行号+超级权限+最大长度读取对应的文件内容
+    /// Read a sandbox file with optional line range, sudo access, and maximum output length.
     async fn file_read(
         &self,
         file_path: &str,
         start_line: Option<usize>,
         end_line: Option<usize>,
         sudo: Option<bool>,
+        max_length: Option<usize>,
     ) -> Result<ToolResult<String>>;
 
     /// 根据传递的文件路径判断文件是否存在

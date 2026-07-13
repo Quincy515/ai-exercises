@@ -8,6 +8,11 @@ use crate::domain::{
     services::tools::{tool, BaseTool, ToolArguments, ToolDefinition},
 };
 
+use super::arguments::{
+    optional_bool, optional_f32, optional_usize, required_bool, required_f32, required_str,
+    required_usize,
+};
+
 /// 浏览器工具
 pub struct BrowserTool {
     name: String,
@@ -386,60 +391,6 @@ impl BaseTool for BrowserTool {
             message: result.message,
             data: result.data.map(Value::String),
         })
-    }
-}
-
-fn required_str<'a>(kwargs: &'a ToolArguments, name: &str) -> Result<&'a str> {
-    kwargs
-        .get(name)
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("工具参数[{name}]缺失"))
-}
-
-fn required_bool(kwargs: &ToolArguments, name: &str) -> Result<bool> {
-    kwargs
-        .get(name)
-        .and_then(Value::as_bool)
-        .ok_or_else(|| anyhow!("工具参数[{name}]缺失"))
-}
-
-fn required_f32(kwargs: &ToolArguments, name: &str) -> Result<f32> {
-    optional_f32(kwargs, name)?.ok_or_else(|| anyhow!("工具参数[{name}]缺失"))
-}
-
-fn required_usize(kwargs: &ToolArguments, name: &str) -> Result<usize> {
-    optional_usize(kwargs, name)?.ok_or_else(|| anyhow!("工具参数[{name}]缺失"))
-}
-
-fn optional_bool(kwargs: &ToolArguments, name: &str) -> Result<Option<bool>> {
-    match kwargs.get(name) {
-        Some(Value::Null) | None => Ok(None),
-        Some(value) => value
-            .as_bool()
-            .map(Some)
-            .ok_or_else(|| anyhow!("工具参数[{name}]必须是布尔值")),
-    }
-}
-
-fn optional_f32(kwargs: &ToolArguments, name: &str) -> Result<Option<f32>> {
-    match kwargs.get(name) {
-        Some(Value::Null) | None => Ok(None),
-        Some(value) => value
-            .as_f64()
-            .map(|value| value as f32)
-            .map(Some)
-            .ok_or_else(|| anyhow!("工具参数[{name}]必须是数字")),
-    }
-}
-
-fn optional_usize(kwargs: &ToolArguments, name: &str) -> Result<Option<usize>> {
-    match kwargs.get(name) {
-        Some(Value::Null) | None => Ok(None),
-        Some(value) => value
-            .as_u64()
-            .and_then(|value| usize::try_from(value).ok())
-            .map(Some)
-            .ok_or_else(|| anyhow!("工具参数[{name}]必须是非负整数")),
     }
 }
 
