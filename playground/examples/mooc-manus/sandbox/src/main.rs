@@ -13,7 +13,7 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!("MoocManus沙箱正在初始化");
 
-    let listener = TcpListener::bind("127.0.0.1:3000").await?;
+    let listener = TcpListener::bind((settings.server_host.as_str(), settings.server_port)).await?;
     tracing::info!("MoocManus沙箱监听地址: {}", listener.local_addr()?);
     axum::serve(listener, create_app()).await?;
 

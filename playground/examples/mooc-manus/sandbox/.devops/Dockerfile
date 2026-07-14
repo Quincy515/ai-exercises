@@ -1,35 +1,69 @@
-# 1.使用ubuntu基础镜像来源
-FROM ubuntu:22.04
+# syntax=docker/dockerfile:1.7
 
-# 2.安装过程避免交互式提示并设置主机名、uv环境目录、uv连接模式
-ENV DEBIAN_FRONTEND=noninteractive
-ENV HOSTNAME=sandbox
-ENV UV_PROJECT_ENVIRONMENT="/venv"
-ENV UV_LINK_MODE=copy
+# Rust 版本和开发用户 ID 可以在 Compose 中覆盖，方便其他项目复用。
+ARG RUST_VERSION=1.97
+FROM rust:${RUST_VERSION}-bookworm
 
-# 3.安装基础工具+OpenSSH Server以实现SSH远程环境
-# mkdir /var/run/sshd是SSH服务启动必须的目录
-RUN apt-get update && apt-get install -y \
-    ca-certificates git curl openssh-server\
+ARG DEV_UID=1000
+ARG DEV_GID=1000
+
+# 源码由 Compose 挂载，编译产物和 Cargo 下载缓存存入独立卷。
+ENV DEBIAN_FRONTEND=noninteractive \
+    HOME=/home/sandbox \
+    SSH_PASSWORD=sandbox \
+    CARGO_TARGET_DIR=/cargo-target
+
+# 安装 Rust 项目常用工具和 OpenSSH Server。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        gosu \
+        libssl-dev \
+        openssh-server \
+        pkg-config \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir /var/run/sshd
+    && mkdir -p \
+        /run/sshd \
+        /workspace \
+        /cargo-target \
+        /usr/local/cargo/git \
+        /usr/local/cargo/registry
 
-# 4.配置SSH的账户密码(开发环境设置root账号密码为root)
-RUN echo 'root:root' | chpasswd && \
-    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+# 让 Compose 命令和 SSH 登录 Shell 都能找到 Cargo。
+RUN printf '%s\n' \
+        'export CARGO_HOME=/usr/local/cargo' \
+        'export RUSTUP_HOME=/usr/local/rustup' \
+        'export CARGO_TARGET_DIR=/cargo-target' \
+        'export PATH="$CARGO_HOME/bin:$PATH"' \
+        > /etc/profile.d/rust.sh
 
-# 5.安装uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# 开发环境使用普通用户；密码由 Compose 在启动时注入。
+RUN groupadd --gid "${DEV_GID}" sandbox \
+    && useradd \
+        --uid "${DEV_UID}" \
+        --gid "${DEV_GID}" \
+        --create-home \
+        --shell /bin/bash \
+        sandbox \
+    && printf '%s\n' \
+        'PasswordAuthentication yes' \
+        'PermitRootLogin no' \
+        'AllowUsers sandbox' \
+        > /etc/ssh/sshd_config.d/sandbox.conf \
+    && rm -f /etc/ssh/ssh_host_* \
+    && chown -R sandbox:sandbox \
+        /workspace \
+        /cargo-target \
+        /usr/local/cargo
 
-# 6.设置下工作环境
 WORKDIR /workspace
 
-# 7.同步uv环境
-COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen
+EXPOSE 22 3000
 
-# 8.开放SSH端口(22)和应用端口(8080)
-EXPOSE 22 8080
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+    CMD bash -c '</dev/tcp/127.0.0.1/22'
 
-# 9.启动SSH服务(必须使用-D让它在前台运行，否则容器会退出)
-CMD ["/usr/sbin/sshd", "-D"]
+# 单独运行开发镜像时启动 SSH；Compose 会同时启动 SSH 和 Axum API。
+CMD ["bash", "-lc", "echo \"sandbox:${SSH_PASSWORD}\" | chpasswd && ssh-keygen -A && exec /usr/sbin/sshd -D -e"]

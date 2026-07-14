@@ -1,0 +1,13 @@
+target/
+.git/
+.env
+.DS_Store
+.vscode/
+.idea/
+.omx/
+.claude/
+claudedocs/
+docs/
+.devops/
+*.log
+*.db
