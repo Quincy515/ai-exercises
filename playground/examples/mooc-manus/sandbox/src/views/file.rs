@@ -3,7 +3,7 @@ use utoipa::ToSchema;
 
 /// 读取文件请求结构体
 #[derive(Debug, Deserialize, ToSchema, PartialEq, Eq)]
-pub struct ReadFileRequest {
+pub struct FileReadRequest {
     /// 要读取文件的绝对路径
     pub file_path: String,
     /// (可选)读取的起始行, 索引从0开始
@@ -28,7 +28,7 @@ const fn default_max_length() -> Option<usize> {
 
 /// 写入文件请求结构体
 #[derive(Debug, Deserialize, ToSchema, PartialEq, Eq)]
-pub struct WriteFileRequest {
+pub struct FileWriteRequest {
     /// 要写入文件的绝对路径
     pub file_path: String,
     /// 要写入的文本内容
@@ -55,7 +55,7 @@ mod tests {
 
     #[test]
     fn request_uses_rust_field_name_and_defaults() {
-        let request = ReadFileRequest::deserialize(MapDeserializer::<_, Error>::new(
+        let request = FileReadRequest::deserialize(MapDeserializer::<_, Error>::new(
             [("file_path", "/tmp/agent.txt")].into_iter(),
         ))
         .expect("minimal request should be deserializable");
@@ -69,7 +69,7 @@ mod tests {
 
     #[test]
     fn write_request_defaults_to_overwrite_without_extra_newlines() {
-        let request = WriteFileRequest::deserialize(MapDeserializer::<_, Error>::new(
+        let request = FileWriteRequest::deserialize(MapDeserializer::<_, Error>::new(
             [
                 ("file_path", "/tmp/agent.txt"),
                 ("content", "Agent写入文件"),

@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::{
     exceptions::{AppException, ErrorData},
     models::{
-        ConsoleRecord, Shell, ShellExecuteResult, ShellKillResult, ShellViewResult,
+        ConsoleRecord, Shell, ShellExecuteResult, ShellKillResult, ShellReadResult,
         ShellWaitResult, ShellWriteResult,
     },
 };
@@ -56,7 +56,7 @@ impl ShellService {
     }
 
     /// 传递会话 id+时间，等待子进程结束
-    pub async fn wait_for_process(
+    pub async fn wait_process(
         &self,
         session_id: String,
         seconds: Option<i64>,
@@ -88,11 +88,11 @@ impl ShellService {
     }
 
     /// 根据传递的会话 id+是否输出控制台记录获取 Shell 命令结果
-    pub async fn view_shell(
+    pub async fn read_shell_output(
         &self,
         session_id: String,
         console: bool,
-    ) -> Result<ShellViewResult, AppException> {
+    ) -> Result<ShellReadResult, AppException> {
         // 1.判断下传递的会话是否存在
         debug!("查看 Shell 会话内容: {}", session_id);
         let shells = self.active_shells.lock().await;
@@ -111,7 +111,7 @@ impl ShellService {
             Vec::new()
         };
 
-        Ok(ShellViewResult {
+        Ok(ShellReadResult {
             session_id,
             output: clean_output,
             console_records,
@@ -211,12 +211,12 @@ impl ShellService {
 
         // 13.尝试等待子进程执行(最多等待 5s)
         debug!("正在等待会话中的进程完成: {}", session_id);
-        match self.wait_for_process(session_id.clone(), Some(5)).await {
+        match self.wait_process(session_id.clone(), Some(5)).await {
             Ok(wait_result) => {
                 // 14.判断返回代码是否非空(已结束)则同步返回执行结果
                 // 15.记录日志并查看结果
                 debug!("Shell 会话进程已结束, 代码: {}", wait_result.returncode);
-                let view_result = self.view_shell(session_id.clone(), false).await?;
+                let view_result = self.read_shell_output(session_id.clone(), false).await?;
 
                 Ok(ShellExecuteResult {
                     session_id,
@@ -256,7 +256,7 @@ impl ShellService {
     }
 
     /// 根据传递的数据向指定子进程写入数据
-    pub async fn write_to_process(
+    pub async fn write_shell_input(
         &self,
         session_id: String,
         input_text: String,
@@ -843,7 +843,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_to_process_sends_input_and_records_output() {
+    async fn write_shell_input_sends_input_and_records_output() {
         let service = ShellService::new();
         let session_id = service.create_session_id().unwrap();
 
@@ -855,15 +855,15 @@ mod tests {
         .await;
 
         let write_result = service
-            .write_to_process(session_id.clone(), "hello".to_string(), true)
+            .write_shell_input(session_id.clone(), "hello".to_string(), true)
             .await
             .expect("write input should succeed");
         let wait_result = service
-            .wait_for_process(session_id.clone(), Some(2))
+            .wait_process(session_id.clone(), Some(2))
             .await
             .expect("process should finish after input");
         let view_result = service
-            .view_shell(session_id, true)
+            .read_shell_output(session_id, true)
             .await
             .expect("shell output should be viewable");
 

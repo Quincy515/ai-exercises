@@ -83,7 +83,7 @@ pub struct ShellWaitResult {
 
 /// Shell 命令结果模型 / shell command view result model.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
-pub struct ShellViewResult {
+pub struct ShellReadResult {
     /// Shell 会话 id
     pub session_id: String,
     /// Shell 会话输出内容

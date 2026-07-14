@@ -3,6 +3,5 @@ pub mod shell;
 
 pub use file::*;
 pub use shell::{
-    ShellExecuteRequest, ShellKillRequest, ViewShellRequest, WaitForProcessRequest,
-    WriteToProcessRequest,
+    ShellExecuteRequest, ShellKillRequest, ShellReadRequest, ShellWaitRequest, ShellWriteRequest,
 };

@@ -3,7 +3,7 @@ use axum::{Json, Router, extract::State, routing::post};
 use crate::{
     exceptions::{ApiResponse, AppException},
     models::{FileReadResult, FileWriteResult},
-    views::{ReadFileRequest, WriteFileRequest},
+    views::{FileReadRequest, FileWriteRequest},
 };
 
 use super::service_dependencies::AppState;
@@ -16,7 +16,7 @@ pub struct FileController;
     path = "/file/read-file",
     tag = "文件模块",
     description = "根据传递的数据读取沙箱中的文件内容",
-    request_body = ReadFileRequest,
+    request_body = FileReadRequest,
     responses(
         (status = 200, description = "成功", body = ApiResponse<FileReadResult>),
         (status = 400, description = "请求错误", body = ApiResponse),
@@ -25,7 +25,7 @@ pub struct FileController;
 )]
 async fn read_file(
     State(state): State<AppState>,
-    Json(request): Json<ReadFileRequest>,
+    Json(request): Json<FileReadRequest>,
 ) -> Result<ApiResponse<FileReadResult>, AppException> {
     let result = state
         .file_service
@@ -47,7 +47,7 @@ async fn read_file(
     path = "/file/write-file",
     tag = "文件模块",
     description = "根据传递的数据向指定文件写入内容",
-    request_body = WriteFileRequest,
+    request_body = FileWriteRequest,
     responses(
         (status = 200, description = "成功", body = ApiResponse<FileWriteResult>),
         (status = 400, description = "请求错误", body = ApiResponse),
@@ -56,7 +56,7 @@ async fn read_file(
 )]
 async fn write_file(
     State(state): State<AppState>,
-    Json(request): Json<WriteFileRequest>,
+    Json(request): Json<FileWriteRequest>,
 ) -> Result<ApiResponse<FileWriteResult>, AppException> {
     let result = state
         .file_service
@@ -117,7 +117,7 @@ mod tests {
 
         let response = read_file(
             State(AppState::new()),
-            Json(ReadFileRequest {
+            Json(FileReadRequest {
                 file_path: file.as_str().to_string(),
                 start_line: None,
                 end_line: None,
@@ -140,7 +140,7 @@ mod tests {
 
         let response = write_file(
             State(AppState::new()),
-            Json(WriteFileRequest {
+            Json(FileWriteRequest {
                 file_path: file.as_str().to_string(),
                 content: "Agent写入文件".to_string(),
                 append: Some(false),

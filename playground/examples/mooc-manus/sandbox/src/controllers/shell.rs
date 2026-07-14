@@ -6,11 +6,11 @@ use crate::{
     controllers::service_dependencies::AppState,
     exceptions::{ApiResponse, AppException},
     models::{
-        ShellExecuteResult, ShellKillResult, ShellViewResult, ShellWaitResult, ShellWriteResult,
+        ShellExecuteResult, ShellKillResult, ShellReadResult, ShellWaitResult, ShellWriteResult,
     },
     views::{
-        ShellExecuteRequest, ShellKillRequest, ViewShellRequest, WaitForProcessRequest,
-        WriteToProcessRequest,
+        ShellExecuteRequest, ShellKillRequest, ShellReadRequest, ShellWaitRequest,
+        ShellWriteRequest,
     },
 };
 
@@ -76,26 +76,26 @@ async fn exec_command(
 #[utoipa::path(
     post,
     context_path = "/api",
-    path = "/shell/view-shell",
+    path = "/shell/read-shell-output",
     tag = "Shell模块",
-    request_body = ViewShellRequest,
+    request_body = ShellReadRequest,
     description = "根据传递的会话 id+是否返回控制台标识获取 Shell 命令执行结果",
     responses(
-        (status = 200, description = "成功", body = ApiResponse<ShellViewResult>),
+        (status = 200, description = "成功", body = ApiResponse<ShellReadResult>),
         (status = 400, description = "请求错误", body = ApiResponse),
     ),
 )]
-async fn view_shell(
+async fn read_shell_output(
     State(state): State<AppState>,
-    Json(request): Json<ViewShellRequest>,
-) -> Result<ApiResponse<ShellViewResult>, AppException> {
+    Json(request): Json<ShellReadRequest>,
+) -> Result<ApiResponse<ShellReadResult>, AppException> {
     // 1.判断下 Shell 会话 id 是否存在
     let session_id = require_session_id(request.session_id)?;
 
     // 2.调用服务获取命令执行结果
     let result = state
         .shell_service
-        .view_shell(session_id, request.console.unwrap_or(false))
+        .read_shell_output(session_id, request.console.unwrap_or(false))
         .await?;
 
     Ok(ApiResponse::success_default(Some(result)))
@@ -104,18 +104,18 @@ async fn view_shell(
 #[utoipa::path(
     post,
     context_path = "/api",
-    path = "/shell/wait-for-process",
+    path = "/shell/wait-process",
     tag = "Shell模块",
-    request_body = WaitForProcessRequest,
+    request_body = ShellWaitRequest,
     description = "传递会话 id+描述执行等待并获取等待结果",
     responses(
         (status = 200, description = "成功", body = ApiResponse<ShellWaitResult>),
         (status = 400, description = "请求错误", body = ApiResponse),
     ),
 )]
-async fn wait_for_process(
+async fn wait_process(
     State(state): State<AppState>,
-    Json(request): Json<WaitForProcessRequest>,
+    Json(request): Json<ShellWaitRequest>,
 ) -> Result<ApiResponse<ShellWaitResult>, AppException> {
     // 1.判断下 Shell 会话 id 是否存在
     let session_id = require_session_id(request.session_id)?;
@@ -123,7 +123,7 @@ async fn wait_for_process(
     // 2.调用服务等待子进程
     let result = state
         .shell_service
-        .wait_for_process(session_id, request.seconds)
+        .wait_process(session_id, request.seconds)
         .await?;
 
     Ok(ApiResponse::success(
@@ -135,18 +135,18 @@ async fn wait_for_process(
 #[utoipa::path(
     post,
     context_path = "/api",
-    path = "/shell/write-to-process",
+    path = "/shell/write-shell-input",
     tag = "Shell模块",
-    request_body = WriteToProcessRequest,
+    request_body = ShellWriteRequest,
     description = "根据传递的会话+写入内容+按下回车标识向指定子进程写入数据",
     responses(
         (status = 200, description = "成功", body = ApiResponse<ShellWriteResult>),
         (status = 400, description = "请求错误", body = ApiResponse),
     ),
 )]
-async fn write_to_process(
+async fn write_shell_input(
     State(state): State<AppState>,
-    Json(request): Json<WriteToProcessRequest>,
+    Json(request): Json<ShellWriteRequest>,
 ) -> Result<ApiResponse<ShellWriteResult>, AppException> {
     // 1.判断下 Shell 会话 id 是否存在
     let session_id = require_session_id(request.session_id)?;
@@ -154,7 +154,7 @@ async fn write_to_process(
     // 2.调用服务向子进程写入数据
     let result = state
         .shell_service
-        .write_to_process(session_id, request.input_text, request.press_enter)
+        .write_shell_input(session_id, request.input_text, request.press_enter)
         .await?;
 
     Ok(ApiResponse::success(Some(result), "向进程写入数据成功"))
@@ -194,9 +194,9 @@ impl ShellController {
     pub fn routes() -> Router<AppState> {
         Router::new()
             .route("/exec-command", post(exec_command))
-            .route("/view-shell", post(view_shell))
-            .route("/wait-for-process", post(wait_for_process))
-            .route("/write-to-process", post(write_to_process))
+            .route("/read-shell-output", post(read_shell_output))
+            .route("/wait-process", post(wait_process))
+            .route("/write-shell-input", post(write_shell_input))
             .route("/kill-process", post(kill_process))
     }
 }
@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn view_shell_can_return_console_records() {
+    async fn read_shell_output_can_return_console_records() {
         let state = AppState::new();
         let session_id = state.shell_service.create_session_id().unwrap();
 
@@ -283,9 +283,9 @@ mod tests {
         .await
         .expect("exec command should succeed");
 
-        let response = view_shell(
+        let response = read_shell_output(
             State(state),
-            Json(ViewShellRequest {
+            Json(ShellReadRequest {
                 session_id,
                 console: Some(true),
             }),

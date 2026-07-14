@@ -15,9 +15,9 @@ pub mod supervisor;
         file::read_file,
         file::write_file,
         shell::exec_command,
-        shell::view_shell,
-        shell::wait_for_process,
-        shell::write_to_process,
+        shell::read_shell_output,
+        shell::wait_process,
+        shell::write_shell_input,
         shell::kill_process,
     ),
     info(
@@ -68,9 +68,9 @@ mod tests {
                 "/api/file/write-file",
                 "/api/shell/exec-command",
                 "/api/shell/kill-process",
-                "/api/shell/view-shell",
-                "/api/shell/wait-for-process",
-                "/api/shell/write-to-process"
+                "/api/shell/read-shell-output",
+                "/api/shell/wait-process",
+                "/api/shell/write-shell-input"
             ]
         );
     }
