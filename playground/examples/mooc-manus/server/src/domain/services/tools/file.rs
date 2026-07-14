@@ -27,7 +27,7 @@ impl FileTool {
             sandbox,
             definitions: vec![
                 tool(
-                    "file_read",
+                    "read_file",
                     "读取文件内容。用于检查文件内容、分析日志或读取配置文件。",
                     ToolArguments::from_iter([
                         (
@@ -69,7 +69,7 @@ impl FileTool {
                     vec!["filepath".to_string()],
                 ),
                 tool(
-                    "file_write",
+                    "write_file",
                     "对文件进行覆盖或追加写入。用于创建新文件、追加内容或修改现有文件。",
                     ToolArguments::from_iter([
                         (
@@ -118,7 +118,7 @@ impl FileTool {
                     vec!["filepath".to_string(), "content".to_string()],
                 ),
                 tool(
-                    "file_str_replace",
+                    "replace_in_file",
                     "在文件中替换指定的字符串。用于更新文件中的特定内容或修复代码中的错误。",
                     ToolArguments::from_iter([
                         (
@@ -157,7 +157,7 @@ impl FileTool {
                     ],
                 ),
                 tool(
-                    "file_find_in_content",
+                    "search_in_file",
                     "在文件内容中搜索匹配的文本。用于查找文件中的特定内容或模式。",
                     ToolArguments::from_iter([
                         (
@@ -185,7 +185,7 @@ impl FileTool {
                     vec!["filepath".to_string(), "regex".to_string()],
                 ),
                 tool(
-                    "file_find_by_name",
+                    "find_files",
                     "在指定目录中根据名称模式查找文件。用于定位具有特定命名模式的文件。",
                     ToolArguments::from_iter([
                         (
@@ -206,7 +206,7 @@ impl FileTool {
                     vec!["dir_path".to_string(), "glob_pattern".to_string()],
                 ),
                 tool(
-                    "file_list",
+                    "list_files",
                     "列出指定目录下的文件列表信息。",
                     ToolArguments::from_iter([(
                         "dir_path".to_string(),
@@ -221,7 +221,7 @@ impl FileTool {
         }
     }
 
-    async fn file_read(
+    async fn read_file(
         &self,
         file_path: &str,
         start_line: Option<usize>,
@@ -230,11 +230,11 @@ impl FileTool {
         max_length: Option<usize>,
     ) -> Result<ToolResult<String>> {
         self.sandbox
-            .file_read(file_path, start_line, end_line, sudo, max_length)
+            .read_file(file_path, start_line, end_line, sudo, max_length)
             .await
     }
 
-    async fn file_write(
+    async fn write_file(
         &self,
         file_path: &str,
         content: &str,
@@ -244,7 +244,7 @@ impl FileTool {
         sudo: Option<bool>,
     ) -> Result<ToolResult<String>> {
         self.sandbox
-            .file_write(
+            .write_file(
                 file_path,
                 content,
                 append,
@@ -255,7 +255,7 @@ impl FileTool {
             .await
     }
 
-    async fn file_str_replace(
+    async fn replace_in_file(
         &self,
         file_path: &str,
         old_str: &str,
@@ -263,29 +263,29 @@ impl FileTool {
         sudo: Option<bool>,
     ) -> Result<ToolResult<String>> {
         self.sandbox
-            .file_replace(file_path, old_str, new_str, sudo)
+            .replace_in_file(file_path, old_str, new_str, sudo)
             .await
     }
 
-    async fn file_find_in_content(
+    async fn search_in_file(
         &self,
         file_path: &str,
         regex: &str,
         sudo: Option<bool>,
     ) -> Result<ToolResult<Vec<String>>> {
-        self.sandbox.file_search(file_path, regex, sudo).await
+        self.sandbox.search_in_file(file_path, regex, sudo).await
     }
 
-    async fn file_find_by_name(
+    async fn find_files(
         &self,
         dir_path: &str,
         glob_pattern: &str,
     ) -> Result<ToolResult<Vec<String>>> {
-        self.sandbox.file_find(dir_path, glob_pattern).await
+        self.sandbox.find_files(dir_path, glob_pattern).await
     }
 
-    async fn file_list(&self, dir_path: &str) -> Result<ToolResult<Vec<String>>> {
-        self.sandbox.file_list(dir_path).await
+    async fn list_files(&self, dir_path: &str) -> Result<ToolResult<Vec<String>>> {
+        self.sandbox.list_files(dir_path).await
     }
 }
 
@@ -301,7 +301,7 @@ impl BaseTool for FileTool {
 
     async fn call_tool(&self, tool_name: &str, kwargs: ToolArguments) -> Result<ToolResult<Value>> {
         match tool_name {
-            "file_read" => {
+            "read_file" => {
                 let file_path = required_non_empty_str(&kwargs, "filepath")?;
                 let start_line = optional_usize(&kwargs, "start_line")?;
                 let end_line = optional_usize(&kwargs, "end_line")?;
@@ -310,11 +310,11 @@ impl BaseTool for FileTool {
                     optional_usize(&kwargs, "max_length")?.or(Some(DEFAULT_MAX_LENGTH));
 
                 into_value_result(
-                    self.file_read(file_path, start_line, end_line, sudo, max_length)
+                    self.read_file(file_path, start_line, end_line, sudo, max_length)
                         .await?,
                 )
             }
-            "file_write" => {
+            "write_file" => {
                 let file_path = required_non_empty_str(&kwargs, "filepath")?;
                 let content = required_str(&kwargs, "content")?;
                 let append = optional_bool(&kwargs, "append")?.or(Some(false));
@@ -323,7 +323,7 @@ impl BaseTool for FileTool {
                 let sudo = optional_bool(&kwargs, "sudo")?.or(Some(false));
 
                 into_value_result(
-                    self.file_write(
+                    self.write_file(
                         file_path,
                         content,
                         append,
@@ -334,34 +334,34 @@ impl BaseTool for FileTool {
                     .await?,
                 )
             }
-            "file_str_replace" => {
+            "replace_in_file" => {
                 let file_path = required_non_empty_str(&kwargs, "filepath")?;
                 let old_str = required_non_empty_str(&kwargs, "old_str")?;
                 let new_str = required_str(&kwargs, "new_str")?;
                 let sudo = optional_bool(&kwargs, "sudo")?.or(Some(false));
 
                 into_value_result(
-                    self.file_str_replace(file_path, old_str, new_str, sudo)
+                    self.replace_in_file(file_path, old_str, new_str, sudo)
                         .await?,
                 )
             }
-            "file_find_in_content" => {
+            "search_in_file" => {
                 let file_path = required_non_empty_str(&kwargs, "filepath")?;
                 let regex = required_non_empty_str(&kwargs, "regex")?;
                 let sudo = optional_bool(&kwargs, "sudo")?.or(Some(false));
 
-                into_value_result(self.file_find_in_content(file_path, regex, sudo).await?)
+                into_value_result(self.search_in_file(file_path, regex, sudo).await?)
             }
-            "file_find_by_name" => {
+            "find_files" => {
                 let dir_path = required_non_empty_str(&kwargs, "dir_path")?;
                 let glob_pattern = required_non_empty_str(&kwargs, "glob_pattern")?;
 
-                into_value_result(self.file_find_by_name(dir_path, glob_pattern).await?)
+                into_value_result(self.find_files(dir_path, glob_pattern).await?)
             }
-            "file_list" => {
+            "list_files" => {
                 let dir_path = required_non_empty_str(&kwargs, "dir_path")?;
 
-                into_value_result(self.file_list(dir_path).await?)
+                into_value_result(self.list_files(dir_path).await?)
             }
             _ => Err(anyhow!("工具[{tool_name}]未找到")),
         }
@@ -462,36 +462,36 @@ mod tests {
             bail!("exec_command should not be called by FileTool")
         }
 
-        async fn view_shell(
+        async fn read_shell_output(
             &self,
             _session_id: &str,
             _console: Option<bool>,
         ) -> Result<ToolResult<String>> {
-            bail!("view_shell should not be called by FileTool")
+            bail!("read_shell_output should not be called by FileTool")
         }
 
-        async fn wait_for_process(
+        async fn wait_process(
             &self,
             _session_id: &str,
             _seconds: Option<usize>,
         ) -> Result<ToolResult<String>> {
-            bail!("wait_for_process should not be called by FileTool")
+            bail!("wait_process should not be called by FileTool")
         }
 
-        async fn write_to_process(
+        async fn write_shell_input(
             &self,
             _session_id: &str,
             _input_text: &str,
             _press_enter: Option<bool>,
         ) -> Result<ToolResult<String>> {
-            bail!("write_to_process should not be called by FileTool")
+            bail!("write_shell_input should not be called by FileTool")
         }
 
         async fn kill_process(&self, _session_id: &str) -> Result<ToolResult<String>> {
             bail!("kill_process should not be called by FileTool")
         }
 
-        async fn file_write(
+        async fn write_file(
             &self,
             file_path: &str,
             content: &str,
@@ -513,7 +513,7 @@ mod tests {
             ))
         }
 
-        async fn file_read(
+        async fn read_file(
             &self,
             file_path: &str,
             start_line: Option<usize>,
@@ -537,15 +537,15 @@ mod tests {
             ))
         }
 
-        async fn file_exists(&self, _file_path: &str) -> Result<ToolResult<bool>> {
-            bail!("file_exists should not be called by FileTool")
+        async fn check_file_exists(&self, _file_path: &str) -> Result<ToolResult<bool>> {
+            bail!("check_file_exists should not be called by FileTool")
         }
 
-        async fn file_delete(&self, _file_path: &str) -> Result<ToolResult<String>> {
-            bail!("file_delete should not be called by FileTool")
+        async fn delete_file(&self, _file_path: &str) -> Result<ToolResult<String>> {
+            bail!("delete_file should not be called by FileTool")
         }
 
-        async fn file_list(&self, dir_path: &str) -> Result<ToolResult<Vec<String>>> {
+        async fn list_files(&self, dir_path: &str) -> Result<ToolResult<Vec<String>>> {
             let call = FileCall::List {
                 dir_path: dir_path.to_string(),
             };
@@ -561,7 +561,7 @@ mod tests {
             Ok(self.list_result(call, "list"))
         }
 
-        async fn file_replace(
+        async fn replace_in_file(
             &self,
             file_path: &str,
             old_str: &str,
@@ -579,7 +579,7 @@ mod tests {
             ))
         }
 
-        async fn file_search(
+        async fn search_in_file(
             &self,
             file_path: &str,
             regex: &str,
@@ -595,7 +595,7 @@ mod tests {
             ))
         }
 
-        async fn file_find(
+        async fn find_files(
             &self,
             dir_path: &str,
             glob_pattern: &str,
@@ -609,17 +609,17 @@ mod tests {
             ))
         }
 
-        async fn file_upload(
+        async fn upload_file(
             &self,
             _file_data: Vec<u8>,
             _file_path: &str,
             _file_name: Option<&str>,
         ) -> Result<ToolResult<String>> {
-            bail!("file_upload should not be called by FileTool")
+            bail!("upload_file should not be called by FileTool")
         }
 
-        async fn file_download(&self, _file_path: &str) -> Result<Vec<u8>> {
-            bail!("file_download should not be called by FileTool")
+        async fn download_file(&self, _file_path: &str) -> Result<Vec<u8>> {
+            bail!("download_file should not be called by FileTool")
         }
 
         async fn ensure_sandbox(&self) -> Result<bool> {
@@ -669,15 +669,20 @@ mod tests {
         assert_eq!(
             tool_names,
             vec![
-                "file_read",
-                "file_write",
-                "file_str_replace",
-                "file_find_in_content",
-                "file_find_by_name",
-                "file_list",
+                "read_file",
+                "write_file",
+                "replace_in_file",
+                "search_in_file",
+                "find_files",
+                "list_files",
             ]
         );
-        for unavailable in ["file_exists", "file_delete", "file_upload", "file_download"] {
+        for unavailable in [
+            "check_file_exists",
+            "delete_file",
+            "upload_file",
+            "download_file",
+        ] {
             assert!(!tool.has_tool(unavailable));
         }
         assert_eq!(
@@ -704,7 +709,7 @@ mod tests {
 
         let read = tool
             .invoke(
-                "file_read",
+                "read_file",
                 Map::from_iter([
                     ("filepath".to_string(), json!("/workspace/app.log")),
                     ("start_line".to_string(), json!(2)),
@@ -718,7 +723,7 @@ mod tests {
             .unwrap();
         let write = tool
             .invoke(
-                "file_write",
+                "write_file",
                 Map::from_iter([
                     ("filepath".to_string(), json!("/workspace/app.txt")),
                     ("content".to_string(), json!("hello")),
@@ -732,7 +737,7 @@ mod tests {
             .unwrap();
         let replace = tool
             .invoke(
-                "file_str_replace",
+                "replace_in_file",
                 Map::from_iter([
                     ("filepath".to_string(), json!("/workspace/app.txt")),
                     ("old_str".to_string(), json!("hello")),
@@ -744,7 +749,7 @@ mod tests {
             .unwrap();
         let search = tool
             .invoke(
-                "file_find_in_content",
+                "search_in_file",
                 Map::from_iter([
                     ("filepath".to_string(), json!("/workspace/app.txt")),
                     ("regex".to_string(), json!("w.rld")),
@@ -755,7 +760,7 @@ mod tests {
             .unwrap();
         let find = tool
             .invoke(
-                "file_find_by_name",
+                "find_files",
                 Map::from_iter([
                     ("dir_path".to_string(), json!("/workspace")),
                     ("glob_pattern".to_string(), json!("**/*.rs")),
@@ -765,7 +770,7 @@ mod tests {
             .unwrap();
         let list = tool
             .invoke(
-                "file_list",
+                "list_files",
                 Map::from_iter([("dir_path".to_string(), json!("/workspace"))]),
             )
             .await
@@ -822,13 +827,13 @@ mod tests {
         let (tool, calls) = file_tool();
 
         tool.invoke(
-            "file_read",
+            "read_file",
             Map::from_iter([("filepath".to_string(), json!("/workspace/read.txt"))]),
         )
         .await
         .unwrap();
         tool.invoke(
-            "file_write",
+            "write_file",
             Map::from_iter([
                 ("filepath".to_string(), json!("/workspace/write.txt")),
                 ("content".to_string(), json!("")),
@@ -837,7 +842,7 @@ mod tests {
         .await
         .unwrap();
         tool.invoke(
-            "file_str_replace",
+            "replace_in_file",
             Map::from_iter([
                 ("filepath".to_string(), json!("/workspace/replace.txt")),
                 ("old_str".to_string(), json!("remove me")),
@@ -847,7 +852,7 @@ mod tests {
         .await
         .unwrap();
         tool.invoke(
-            "file_find_in_content",
+            "search_in_file",
             Map::from_iter([
                 ("filepath".to_string(), json!("/workspace/search.txt")),
                 ("regex".to_string(), json!("TODO")),
@@ -895,7 +900,7 @@ mod tests {
 
         let error = tool
             .invoke(
-                "file_find_by_name",
+                "find_files",
                 Map::from_iter([("dir_path".to_string(), json!("/workspace"))]),
             )
             .await
@@ -904,7 +909,7 @@ mod tests {
 
         let error = tool
             .invoke(
-                "file_read",
+                "read_file",
                 Map::from_iter([
                     ("filepath".to_string(), json!("/workspace/app.txt")),
                     ("max_length".to_string(), json!(-1)),
@@ -916,7 +921,7 @@ mod tests {
 
         let error = tool
             .invoke(
-                "file_write",
+                "write_file",
                 Map::from_iter([
                     ("filepath".to_string(), json!("/workspace/app.txt")),
                     ("content".to_string(), json!("hello")),
@@ -929,7 +934,7 @@ mod tests {
 
         let error = tool
             .invoke(
-                "file_list",
+                "list_files",
                 Map::from_iter([("dir_path".to_string(), json!("   "))]),
             )
             .await
@@ -943,7 +948,7 @@ mod tests {
 
         let failure = tool
             .invoke(
-                "file_list",
+                "list_files",
                 Map::from_iter([("dir_path".to_string(), json!("/failure"))]),
             )
             .await
@@ -954,14 +959,14 @@ mod tests {
 
         let error = tool
             .invoke(
-                "file_read",
+                "read_file",
                 Map::from_iter([("filepath".to_string(), json!("/backend-error"))]),
             )
             .await
             .unwrap_err();
         assert_eq!(error.to_string(), "sandbox read failed");
 
-        let error = tool.invoke("file_delete", Map::new()).await.unwrap_err();
-        assert_eq!(error.to_string(), "工具[file_delete]未找到");
+        let error = tool.invoke("delete_file", Map::new()).await.unwrap_err();
+        assert_eq!(error.to_string(), "工具[delete_file]未找到");
     }
 }

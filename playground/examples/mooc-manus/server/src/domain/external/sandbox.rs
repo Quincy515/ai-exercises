@@ -18,7 +18,7 @@ pub trait Sandbox: Send + Sync {
 
     /// 根据传递的会话 id+是否返回控制台记录获取 shell 结果
     /// Read shell output for a session, optionally including console history.
-    async fn view_shell(
+    async fn read_shell_output(
         &self,
         session_id: &str,
         console: Option<bool>,
@@ -26,7 +26,7 @@ pub trait Sandbox: Send + Sync {
 
     /// 根据传递的会话 id+秒数等待程序执行
     /// Wait for the session process, optionally bounded by seconds.
-    async fn wait_for_process(
+    async fn wait_process(
         &self,
         session_id: &str,
         seconds: Option<usize>,
@@ -34,7 +34,7 @@ pub trait Sandbox: Send + Sync {
 
     /// 根据传递会话 id+文本内容+是否回车键写入内容到进程中
     /// Write text to the running process, optionally pressing enter afterward.
-    async fn write_to_process(
+    async fn write_shell_input(
         &self,
         session_id: &str,
         input_text: &str,
@@ -47,7 +47,7 @@ pub trait Sandbox: Send + Sync {
 
     /// 根据传递的文件路径+写入内容+追加模式+前后内容新行+超级权限写入对应的文件
     /// Write content to a sandbox file with append/newline/sudo options.
-    async fn file_write(
+    async fn write_file(
         &self,
         file_path: &str,
         content: &str,
@@ -59,7 +59,7 @@ pub trait Sandbox: Send + Sync {
 
     /// 根据传递的文件路径+起止行号+超级权限+最大长度读取对应的文件内容
     /// Read a sandbox file with optional line range, sudo access, and maximum output length.
-    async fn file_read(
+    async fn read_file(
         &self,
         file_path: &str,
         start_line: Option<usize>,
@@ -70,19 +70,19 @@ pub trait Sandbox: Send + Sync {
 
     /// 根据传递的文件路径判断文件是否存在
     /// Check whether a sandbox file exists.
-    async fn file_exists(&self, file_path: &str) -> Result<ToolResult<bool>>;
+    async fn check_file_exists(&self, file_path: &str) -> Result<ToolResult<bool>>;
 
     /// 根据传递的文件路径删除指定文件
     /// Delete the specified sandbox file.
-    async fn file_delete(&self, file_path: &str) -> Result<ToolResult<String>>;
+    async fn delete_file(&self, file_path: &str) -> Result<ToolResult<String>>;
 
     /// 根据传递的文件夹路径列出该路径下的所有文件
     /// List files under the specified sandbox directory.
-    async fn file_list(&self, dir_path: &str) -> Result<ToolResult<Vec<String>>>;
+    async fn list_files(&self, dir_path: &str) -> Result<ToolResult<Vec<String>>>;
 
     /// 根据传递文件路径+新旧内容+超级权限完成文件内容替换
     /// Replace matching content in a sandbox file.
-    async fn file_replace(
+    async fn replace_in_file(
         &self,
         file_path: &str,
         old_str: &str,
@@ -92,7 +92,7 @@ pub trait Sandbox: Send + Sync {
 
     /// 根据传递的文件路径+正则+超级权限完成文件内容检索
     /// Search a sandbox file with a regex.
-    async fn file_search(
+    async fn search_in_file(
         &self,
         file_path: &str,
         regex: &str,
@@ -101,7 +101,7 @@ pub trait Sandbox: Send + Sync {
 
     /// 根据传递的文件夹路径+匹配规则查找文件
     /// Find files under a sandbox directory by glob pattern.
-    async fn file_find(
+    async fn find_files(
         &self,
         dir_path: &str,
         glob_pattern: &str,
@@ -109,7 +109,7 @@ pub trait Sandbox: Send + Sync {
 
     /// 根据文件源数据+路径+文件名将文件上传到沙箱中
     /// Upload binary data into the sandbox.
-    async fn file_upload(
+    async fn upload_file(
         &self,
         file_data: Vec<u8>,
         file_path: &str,
@@ -118,7 +118,7 @@ pub trait Sandbox: Send + Sync {
 
     /// 根据传递的文件路径下载沙箱中的文件
     /// Download a sandbox file as binary data.
-    async fn file_download(&self, file_path: &str) -> Result<Vec<u8>>;
+    async fn download_file(&self, file_path: &str) -> Result<Vec<u8>>;
 
     /// 确保当前沙箱存在，如果不存在会创建
     /// Ensure the sandbox exists, creating it when necessary.
