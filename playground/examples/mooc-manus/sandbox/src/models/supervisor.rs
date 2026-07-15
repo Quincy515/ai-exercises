@@ -34,9 +34,115 @@ pub struct ProcessInfo {
     pub pid: i64,
 }
 
+/// Supervisor批量启动或停止单个进程的结果
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+pub struct SupervisorProcessAction {
+    /// 进程名字
+    pub name: String,
+    /// 进程分组
+    pub group: String,
+    /// 操作后的状态代码
+    pub status: i32,
+    /// 操作结果描述
+    pub description: String,
+}
+
+/// Supervisor动作/执行结果
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+pub struct SupervisorActionResult {
+    /// 执行状态
+    pub status: String,
+    /// 执行结果
+    pub result: Option<Vec<SupervisorProcessAction>>,
+    /// 停止结果
+    pub stop_result: Option<Vec<SupervisorProcessAction>>,
+    /// 开始结果
+    pub start_result: Option<Vec<SupervisorProcessAction>>,
+    /// 关闭结果
+    pub shutdown_result: Option<bool>,
+}
+
+impl SupervisorActionResult {
+    /// 构造停止全部子进程的结果。
+    pub fn stopped(result: Vec<SupervisorProcessAction>) -> Self {
+        Self {
+            status: "stopped".to_string(),
+            result: Some(result),
+            ..Self::default()
+        }
+    }
+
+    /// 构造关闭 supervisord 主进程的结果。
+    pub fn shutdown(shutdown_result: bool) -> Self {
+        Self {
+            status: "shutdown".to_string(),
+            shutdown_result: Some(shutdown_result),
+            ..Self::default()
+        }
+    }
+
+    /// 构造已交给独立辅助进程执行的重启结果。
+    pub fn restart_scheduled() -> Self {
+        Self {
+            status: "restart_scheduled".to_string(),
+            ..Self::default()
+        }
+    }
+
+    /// 构造先停止、再启动全部子进程的重启结果。
+    pub fn restarted(
+        stop_result: Vec<SupervisorProcessAction>,
+        start_result: Vec<SupervisorProcessAction>,
+    ) -> Self {
+        Self {
+            status: "restarted".to_string(),
+            stop_result: Some(stop_result),
+            start_result: Some(start_result),
+            ..Self::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supervisor_action_result_builders_match_course_response_shapes() {
+        let stop_result = vec![SupervisorProcessAction {
+            name: "app".to_string(),
+            group: "services".to_string(),
+            status: 80,
+            description: "Stopped".to_string(),
+        }];
+        let start_result = vec![SupervisorProcessAction {
+            name: "app".to_string(),
+            group: "services".to_string(),
+            status: 80,
+            description: "Started".to_string(),
+        }];
+
+        let stopped = SupervisorActionResult::stopped(stop_result.clone());
+        assert_eq!(stopped.status, "stopped");
+        assert_eq!(stopped.result, Some(stop_result.clone()));
+        assert_eq!(stopped.stop_result, None);
+
+        let shutdown = SupervisorActionResult::shutdown(true);
+        assert_eq!(shutdown.status, "shutdown");
+        assert_eq!(shutdown.shutdown_result, Some(true));
+
+        let scheduled = SupervisorActionResult::restart_scheduled();
+        assert_eq!(scheduled.status, "restart_scheduled");
+        assert_eq!(scheduled.stop_result, None);
+        assert_eq!(scheduled.start_result, None);
+
+        let restarted =
+            SupervisorActionResult::restarted(stop_result.clone(), start_result.clone());
+        assert_eq!(restarted.status, "restarted");
+        assert_eq!(restarted.stop_result, Some(stop_result));
+        assert_eq!(restarted.start_result, Some(start_result));
+        assert_eq!(restarted.result, None);
+    }
 
     #[test]
     fn process_info_supports_unix_timestamps_beyond_i32() {

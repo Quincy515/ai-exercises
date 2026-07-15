@@ -27,6 +27,9 @@ pub mod supervisor;
         shell::write_shell_input,
         shell::kill_process,
         supervisor::get_status,
+        supervisor::stop_all_processes,
+        supervisor::shutdown,
+        supervisor::restart,
     ),
     info(
         title = "MoocManus沙箱系统",
@@ -86,7 +89,10 @@ mod tests {
                 "/api/shell/read-shell-output",
                 "/api/shell/wait-process",
                 "/api/shell/write-shell-input",
+                "/api/supervisor/restart",
+                "/api/supervisor/shutdown",
                 "/api/supervisor/status",
+                "/api/supervisor/stop-all-processes",
             ]
         );
     }

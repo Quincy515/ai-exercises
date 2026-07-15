@@ -54,6 +54,18 @@ impl<T> ApiResponse<T> {
         Self::success(data, DEFAULT_SUCCESS_MSG)
     }
 
+    /// 构造已接受并开始异步处理的响应。
+    pub fn accepted(data: Option<T>, msg: impl Into<String>) -> Self
+    where
+        T: Default,
+    {
+        Self {
+            code: StatusCode::ACCEPTED.as_u16(),
+            msg: msg.into(),
+            data: data.unwrap_or_default(),
+        }
+    }
+
     pub fn fail(code: StatusCode, msg: impl Into<String>, data: Option<T>) -> Self
     where
         T: Default,
@@ -223,6 +235,15 @@ mod tests {
 
         assert_eq!(body.code, StatusCode::OK.as_u16());
         assert_eq!(body.msg, DEFAULT_SUCCESS_MSG);
+        assert!(body.data.is_empty());
+    }
+
+    #[test]
+    fn api_response_accepted_marks_asynchronous_work_as_202() {
+        let body = ApiResponse::<ErrorData>::accepted(None, "Supervisor重启任务已提交");
+
+        assert_eq!(body.code, StatusCode::ACCEPTED.as_u16());
+        assert_eq!(body.msg, "Supervisor重启任务已提交");
         assert!(body.data.is_empty());
     }
 
