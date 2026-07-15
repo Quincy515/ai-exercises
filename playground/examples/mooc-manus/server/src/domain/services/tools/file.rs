@@ -20,7 +20,7 @@ pub struct FileTool {
 }
 
 impl FileTool {
-    /// 创建文件工具箱，并注册允许 Agent 使用的六个文件工具。
+    /// 创建文件工具箱，并注册允许 Agent 使用的五个文件工具。
     pub fn new(sandbox: Box<dyn Sandbox>) -> Self {
         Self {
             name: "file".to_string(),
@@ -205,18 +205,6 @@ impl FileTool {
                     ]),
                     vec!["dir_path".to_string(), "glob_pattern".to_string()],
                 ),
-                tool(
-                    "list_files",
-                    "列出指定目录下的文件列表信息。",
-                    ToolArguments::from_iter([(
-                        "dir_path".to_string(),
-                        json!({
-                            "type": "string",
-                            "description": "要列出文件列表的目录绝对路径"
-                        }),
-                    )]),
-                    vec!["dir_path".to_string()],
-                ),
             ],
         }
     }
@@ -282,10 +270,6 @@ impl FileTool {
         glob_pattern: &str,
     ) -> Result<ToolResult<Vec<String>>> {
         self.sandbox.find_files(dir_path, glob_pattern).await
-    }
-
-    async fn list_files(&self, dir_path: &str) -> Result<ToolResult<Vec<String>>> {
-        self.sandbox.list_files(dir_path).await
     }
 }
 
@@ -358,11 +342,6 @@ impl BaseTool for FileTool {
 
                 into_value_result(self.find_files(dir_path, glob_pattern).await?)
             }
-            "list_files" => {
-                let dir_path = required_non_empty_str(&kwargs, "dir_path")?;
-
-                into_value_result(self.list_files(dir_path).await?)
-            }
             _ => Err(anyhow!("工具[{tool_name}]未找到")),
         }
     }
@@ -419,9 +398,6 @@ mod tests {
         Find {
             dir_path: String,
             glob_pattern: String,
-        },
-        List {
-            dir_path: String,
         },
     }
 
@@ -545,22 +521,6 @@ mod tests {
             bail!("delete_file should not be called by FileTool")
         }
 
-        async fn list_files(&self, dir_path: &str) -> Result<ToolResult<Vec<String>>> {
-            let call = FileCall::List {
-                dir_path: dir_path.to_string(),
-            };
-            if dir_path == "/failure" {
-                self.push(call);
-                return Ok(ToolResult {
-                    success: false,
-                    message: Some("list failed".to_string()),
-                    data: Some(vec!["partial".to_string()]),
-                });
-            }
-
-            Ok(self.list_result(call, "list"))
-        }
-
         async fn replace_in_file(
             &self,
             file_path: &str,
@@ -600,13 +560,20 @@ mod tests {
             dir_path: &str,
             glob_pattern: &str,
         ) -> Result<ToolResult<Vec<String>>> {
-            Ok(self.list_result(
-                FileCall::Find {
-                    dir_path: dir_path.to_string(),
-                    glob_pattern: glob_pattern.to_string(),
-                },
-                "find",
-            ))
+            let call = FileCall::Find {
+                dir_path: dir_path.to_string(),
+                glob_pattern: glob_pattern.to_string(),
+            };
+            if dir_path == "/failure" {
+                self.push(call);
+                return Ok(ToolResult {
+                    success: false,
+                    message: Some("find failed".to_string()),
+                    data: Some(vec!["partial".to_string()]),
+                });
+            }
+
+            Ok(self.list_result(call, "find"))
         }
 
         async fn upload_file(
@@ -674,7 +641,6 @@ mod tests {
                 "replace_in_file",
                 "search_in_file",
                 "find_files",
-                "list_files",
             ]
         );
         for unavailable in [
@@ -768,20 +734,11 @@ mod tests {
             )
             .await
             .unwrap();
-        let list = tool
-            .invoke(
-                "list_files",
-                Map::from_iter([("dir_path".to_string(), json!("/workspace"))]),
-            )
-            .await
-            .unwrap();
-
         assert_eq!(read.data, Some(json!("read")));
         assert_eq!(write.data, Some(json!("write")));
         assert_eq!(replace.data, Some(json!("replace")));
         assert_eq!(search.data, Some(json!(["search"])));
         assert_eq!(find.data, Some(json!(["find"])));
-        assert_eq!(list.data, Some(json!(["list"])));
         assert_eq!(
             *calls.lock().unwrap(),
             vec![
@@ -814,9 +771,6 @@ mod tests {
                 FileCall::Find {
                     dir_path: "/workspace".to_string(),
                     glob_pattern: "**/*.rs".to_string(),
-                },
-                FileCall::List {
-                    dir_path: "/workspace".to_string(),
                 },
             ]
         );
@@ -934,8 +888,11 @@ mod tests {
 
         let error = tool
             .invoke(
-                "list_files",
-                Map::from_iter([("dir_path".to_string(), json!("   "))]),
+                "find_files",
+                Map::from_iter([
+                    ("dir_path".to_string(), json!("   ")),
+                    ("glob_pattern".to_string(), json!("*")),
+                ]),
             )
             .await
             .unwrap_err();
@@ -948,13 +905,16 @@ mod tests {
 
         let failure = tool
             .invoke(
-                "list_files",
-                Map::from_iter([("dir_path".to_string(), json!("/failure"))]),
+                "find_files",
+                Map::from_iter([
+                    ("dir_path".to_string(), json!("/failure")),
+                    ("glob_pattern".to_string(), json!("*")),
+                ]),
             )
             .await
             .unwrap();
         assert!(!failure.success);
-        assert_eq!(failure.message.as_deref(), Some("list failed"));
+        assert_eq!(failure.message.as_deref(), Some("find failed"));
         assert_eq!(failure.data, Some(json!(["partial"])));
 
         let error = tool

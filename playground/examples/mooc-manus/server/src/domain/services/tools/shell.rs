@@ -392,10 +392,6 @@ mod tests {
             bail!("delete_file should not be called by ShellTool")
         }
 
-        async fn list_files(&self, _dir_path: &str) -> Result<ToolResult<Vec<String>>> {
-            bail!("list_files should not be called by ShellTool")
-        }
-
         async fn replace_in_file(
             &self,
             _file_path: &str,

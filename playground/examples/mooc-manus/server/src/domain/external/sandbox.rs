@@ -76,10 +76,6 @@ pub trait Sandbox: Send + Sync {
     /// Delete the specified sandbox file.
     async fn delete_file(&self, file_path: &str) -> Result<ToolResult<String>>;
 
-    /// 根据传递的文件夹路径列出该路径下的所有文件
-    /// List files under the specified sandbox directory.
-    async fn list_files(&self, dir_path: &str) -> Result<ToolResult<Vec<String>>>;
-
     /// 根据传递文件路径+新旧内容+超级权限完成文件内容替换
     /// Replace matching content in a sandbox file.
     async fn replace_in_file(
