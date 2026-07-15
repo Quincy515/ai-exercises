@@ -1,6 +1,4 @@
-use std::fmt;
-
-use serde::{Deserialize, Deserializer, Serialize, de::Visitor};
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 /// 进程信息模型
@@ -33,52 +31,7 @@ pub struct ProcessInfo {
     /// 标准错误日志文件
     pub stderr_logfile: String,
     /// 进程id(Process ID)
-    #[serde(deserialize_with = "deserialize_pid")]
-    pub pid: String,
-}
-
-fn deserialize_pid<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    struct PidVisitor;
-
-    impl Visitor<'_> for PidVisitor {
-        type Value = String;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("Supervisor PID integer or string")
-        }
-
-        fn visit_i32<E>(self, value: i32) -> Result<Self::Value, E> {
-            Ok(value.to_string())
-        }
-
-        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
-            Ok(value.to_string())
-        }
-
-        fn visit_u32<E>(self, value: u32) -> Result<Self::Value, E> {
-            Ok(value.to_string())
-        }
-
-        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
-            Ok(value.to_string())
-        }
-
-        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(value.to_string())
-        }
-
-        fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-            Ok(value)
-        }
-    }
-
-    deserializer.deserialize_any(PidVisitor)
+    pub pid: i64,
 }
 
 #[cfg(test)]
@@ -101,12 +54,12 @@ mod tests {
             logfile: "/tmp/app.log".to_string(),
             stdout_logfile: "/dev/stdout".to_string(),
             stderr_logfile: "/dev/stderr".to_string(),
-            pid: "42".to_string(),
+            pid: 42,
         };
 
         assert_eq!(process.start, 2_200_000_000);
         assert_eq!(process.now, 2_200_000_010);
-        assert_eq!(process.pid, "42");
+        assert_eq!(process.pid, 42);
     }
 
     #[test]
@@ -134,6 +87,6 @@ mod tests {
 
         assert_eq!(processes.len(), 1);
         assert_eq!(processes[0].name, "app");
-        assert_eq!(processes[0].pid, "42");
+        assert_eq!(processes[0].pid, 42);
     }
 }

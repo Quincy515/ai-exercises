@@ -5,16 +5,21 @@ ARG RUST_VERSION=1.97
 FROM rust:${RUST_VERSION}-bullseye AS builder
 
 ARG APP_NAME=sandbox
+ARG RUST_VERSION
+ARG TARGETARCH
+
+# 按项目、Rust 基础镜像和目标架构隔离编译产物，避免复用到 GLIBC 不兼容的 build-script。
+ENV CARGO_TARGET_DIR=/build/target/${RUST_VERSION}-bullseye-${TARGETARCH}
 
 WORKDIR /build
 COPY . .
 
 # 使用 BuildKit 缓存 Cargo 依赖和编译产物，最终只输出一个可执行文件。
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
+RUN --mount=type=cache,id=mooc-manus-sandbox-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=mooc-manus-sandbox-cargo-target,target=/build/target,sharing=locked \
     cargo build --release --locked --bin "${APP_NAME}" \
     && mkdir -p /out \
-    && cp "/build/target/release/${APP_NAME}" /out/sandbox
+    && cp "${CARGO_TARGET_DIR}/release/${APP_NAME}" /out/sandbox
 
 # 1.使用 Ubuntu 基础镜像作为完整沙箱运行环境
 FROM ubuntu:22.04 AS runtime
@@ -56,14 +61,13 @@ RUN useradd -m -d /home/ubuntu -s /bin/bash ubuntu \
     && chown -R ubuntu:ubuntu /sandbox /tmp/chromium-profile /var/log/supervisor
 
 # 6.Ubuntu 22.04 默认提供 Python 3.10，无需额外 PPA
-RUN add-apt-repository ppa:deadsnakes/ppa && \
-    apt-get update \
+RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        python3.12 \
-        python3.12-dev \
-        python3.12-venv \
+        python3.10 \
+        python3.10-dev \
+        python3.10-venv \
         python3-pip \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

@@ -156,7 +156,6 @@ fn decode_process_strings(process: &mut ProcessInfo) -> Result<(), String> {
         &mut process.logfile,
         &mut process.stdout_logfile,
         &mut process.stderr_logfile,
-        &mut process.pid,
     ] {
         *value = decode_xml_entities(value)?;
     }
@@ -338,7 +337,7 @@ mod tests {
         assert_eq!(processes.len(), 2);
         assert_eq!(processes[0].name, "xvfb");
         assert_eq!(processes[0].start, 1_750_000_000);
-        assert_eq!(processes[0].pid, "10");
+        assert_eq!(processes[0].pid, 10);
         assert_eq!(processes[1].name, "chrome");
         assert_eq!(processes[1].description, "ready & listening");
         assert_eq!(processes[1].stdout_logfile, "/dev/stdout");
