@@ -14,6 +14,13 @@ pub mod supervisor;
     paths(
         file::read_file,
         file::write_file,
+        file::replace_in_file,
+        file::search_in_file,
+        file::find_files,
+        file::upload_file,
+        file::download_file,
+        file::check_file_exists,
+        file::delete_file,
         shell::exec_command,
         shell::read_shell_output,
         shell::wait_process,
@@ -64,7 +71,14 @@ mod tests {
         assert_eq!(
             path_names,
             [
+                "/api/file/check-file-exists",
+                "/api/file/delete-file",
+                "/api/file/download-file",
+                "/api/file/find-files",
                 "/api/file/read-file",
+                "/api/file/replace-in-file",
+                "/api/file/search-in-file",
+                "/api/file/upload-file",
                 "/api/file/write-file",
                 "/api/shell/exec-command",
                 "/api/shell/kill-process",
@@ -78,5 +92,17 @@ mod tests {
     #[test]
     fn module_routes_are_composable() {
         let _router = create_api_routes();
+    }
+
+    #[test]
+    fn upload_schema_exposes_a_binary_file_picker() {
+        let json = ApiDoc::openapi()
+            .to_json()
+            .expect("OpenAPI document should serialize");
+
+        assert!(
+            json.contains(r#""file":{"type":"string","format":"binary""#),
+            "upload file schema should use string/binary: {json}"
+        );
     }
 }

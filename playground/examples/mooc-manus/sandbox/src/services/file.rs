@@ -1,11 +1,16 @@
 use std::{path::Path, process::Stdio};
 
+use glob::glob;
+use regex::Regex;
 use tokio::{fs, io::AsyncWriteExt, process::Command};
 use tracing::error;
 
 use crate::{
     exceptions::AppException,
-    models::{FileReadResult, FileWriteResult},
+    models::{
+        FileCheckResult, FileDeleteResult, FileFindResult, FileReadResult, FileReplaceResult,
+        FileSearchResult, FileUploadResult, FileWriteResult,
+    },
 };
 
 const TRUNCATED_MARKER: &str = "(truncated)";
@@ -192,6 +197,199 @@ impl FileService {
             bytes_written: Some(bytes_written),
         })
     }
+
+    /// 根据传递的数据替换文件内指定的内容
+    pub async fn replace_in_file(
+        &self,
+        file_path: &str,
+        old_str: &str,
+        new_str: &str,
+        sudo: Option<bool>,
+    ) -> Result<FileReplaceResult, AppException> {
+        // 1.调用服务获取对应的文件内容
+        let content = self
+            .read_file(file_path, None, None, sudo, None)
+            .await?
+            .content;
+
+        // 2.计算old_str出现的次数，只有出现次数>0才需要替换
+        let replaced_count = content.matches(old_str).count();
+
+        // 4.将替换后的新内容写入到文件中
+        if replaced_count > 0 {
+            self.write_file(
+                file_path,
+                content.replace(old_str, new_str), // 3.替换旧内容
+                Some(false),
+                Some(false),
+                Some(false),
+                sudo,
+            )
+            .await?;
+        }
+
+        Ok(FileReplaceResult {
+            file_path: file_path.to_string(),
+            replaced_count,
+        })
+    }
+
+    /// 根据传递的文件路径和正则表达式查询文件内符合的内容
+    pub async fn search_in_file(
+        &self,
+        file_path: &str,
+        regex: &str,
+        sudo: Option<bool>,
+    ) -> Result<FileSearchResult, AppException> {
+        // 1.调用服务获取对应的文件内容
+        let content = self
+            .read_file(file_path, None, None, sudo, None)
+            .await?
+            .content;
+        // 2.将外部传递的regex转换为正则
+        let pattern = Regex::new(regex).map_err(|err| {
+            AppException::bad_request(format!("传递正则表达式[{regex}]出错: {err}"))
+        })?;
+
+        // 4.创建一个异步函数，使用子线程方式执行避免长时间io阻塞
+        let (matches, line_numbers) = tokio::task::spawn_blocking(move || {
+            // 3.将读取的内容拆分成每一行
+            content
+                .lines()
+                .enumerate()
+                .filter_map(|(line_number, line)| {
+                    pattern
+                        .find(line)
+                        .filter(|matched| matched.start() == 0)
+                        .map(|_| (line.to_string(), line_number))
+                })
+                .unzip()
+        })
+        .await
+        .map_err(|err| AppException::internal(format!("搜索文件内容失败: {err}")))?;
+
+        Ok(FileSearchResult {
+            file_path: file_path.to_string(),
+            matches,
+            line_numbers,
+        })
+    }
+
+    /// 根据传递的文件夹路径和glob规则查询文件列表
+    pub async fn find_files(
+        &self,
+        dir_path: &str,
+        glob_pattern: &str,
+    ) -> Result<FileFindResult, AppException> {
+        // 1.检测下传递进来的目录是否存在
+        if !fs::try_exists(dir_path).await.unwrap_or(false) {
+            return Err(AppException::not_found(format!(
+                "当前文件夹不存在: {dir_path}"
+            )));
+        }
+
+        // 2.将外部传递的glob_pattern转换为搜索模式
+        let search_pattern = Path::new(dir_path)
+            .join(glob_pattern)
+            .to_string_lossy()
+            .into_owned();
+
+        // 3.创建一个异步函数，使用子线程方式执行避免长时间io阻塞
+        let mut files = tokio::task::spawn_blocking(move || {
+            let entries = glob(&search_pattern)
+                .map_err(|err| AppException::bad_request(format!("glob文件规则无效: {err}")))?;
+
+            entries
+                .map(|entry| {
+                    entry
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .map_err(|err| AppException::internal(format!("查找文件失败: {err}")))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .await
+        .map_err(|err| AppException::internal(format!("查找文件失败: {err}")))??;
+        files.sort();
+
+        Ok(FileFindResult {
+            dir_path: dir_path.to_string(),
+            files,
+        })
+    }
+
+    /// 将分块接收完成的临时文件上传至目标路径
+    pub async fn upload_file(
+        &self,
+        source_path: &Path,
+        file_path: &str,
+    ) -> Result<FileUploadResult, AppException> {
+        if let Some(parent) = Path::new(file_path)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|err| AppException::internal(format!("上传文件到沙箱出错: {err}")))?;
+        }
+
+        let file_size = fs::copy(source_path, file_path)
+            .await
+            .map_err(|err| AppException::internal(format!("上传文件到沙箱出错: {err}")))?;
+        fs::remove_file(source_path)
+            .await
+            .map_err(|err| AppException::internal(format!("清理上传临时文件失败: {err}")))?;
+
+        Ok(FileUploadResult {
+            file_path: file_path.to_string(),
+            file_size,
+            success: true,
+        })
+    }
+
+    /// 传递 filepath 用于确保当前文件存在
+    pub async fn ensure_file(&self, file_path: &str) -> Result<(), AppException> {
+        let metadata = fs::metadata(file_path)
+            .await
+            .map_err(|_| AppException::not_found(format!("该文件不存在: {file_path}")))?;
+
+        if !metadata.is_file() {
+            return Err(AppException::not_found(format!(
+                "该文件不存在: {file_path}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// 根据传递的路径判断文件是否存在
+    pub async fn check_file_exists(
+        &self,
+        file_path: &str,
+    ) -> Result<FileCheckResult, AppException> {
+        let exists = fs::try_exists(file_path)
+            .await
+            .map_err(|err| AppException::internal(format!("检查文件是否存在失败: {err}")))?;
+
+        Ok(FileCheckResult {
+            file_path: file_path.to_string(),
+            exists,
+        })
+    }
+
+    /// 根据传递的路径删除指定文件
+    pub async fn delete_file(&self, file_path: &str) -> Result<FileDeleteResult, AppException> {
+        // 1.判断文件是否存在
+        self.ensure_file(file_path).await?;
+        // 2.调用命令删除文件
+        fs::remove_file(file_path)
+            .await
+            .map_err(|err| AppException::internal(format!("删除文件{file_path}失败: {err}")))?;
+
+        Ok(FileDeleteResult {
+            file_path: file_path.to_string(),
+            deleted: true,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -329,5 +527,132 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&file.0).await.unwrap(), "第一行\n第二行");
         assert_eq!(result.bytes_written, Some("\n第二行".len()));
+    }
+
+    #[tokio::test]
+    async fn replaces_every_non_overlapping_occurrence_in_the_complete_file() {
+        let file = TestFile::create("Agent开发\nAgent工具\n").await;
+
+        let result = FileService::new()
+            .replace_in_file(file.as_str(), "Agent", "Manus", Some(false))
+            .await
+            .expect("matching content should be replaceable");
+
+        assert_eq!(result.file_path, file.as_str());
+        assert_eq!(result.replaced_count, 2);
+        assert_eq!(
+            fs::read_to_string(&file.0).await.unwrap(),
+            "Manus开发\nManus工具\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_matches_from_the_start_of_each_line_and_returns_zero_based_indexes() {
+        let file = TestFile::create("LLM产品\nAgent开发\n前缀LLM\nLLM应用开发\n").await;
+
+        let result = FileService::new()
+            .search_in_file(file.as_str(), "LLM", Some(false))
+            .await
+            .expect("valid regular expression should be searchable");
+
+        assert_eq!(result.matches, ["LLM产品", "LLM应用开发"]);
+        assert_eq!(result.line_numbers, [0, 3]);
+    }
+
+    #[tokio::test]
+    async fn search_rejects_an_invalid_regular_expression() {
+        let file = TestFile::create("Agent开发").await;
+
+        let error = FileService::new()
+            .search_in_file(file.as_str(), "[", Some(false))
+            .await
+            .expect_err("invalid regular expression should be rejected");
+
+        assert_eq!(error.status_code, StatusCode::BAD_REQUEST);
+        assert!(error.msg.contains("传递正则表达式[["));
+    }
+
+    #[tokio::test]
+    async fn finds_files_with_recursive_glob_rules() {
+        let directory = TestDirectory::new();
+        let root_file = directory.file_path("main.rs");
+        let nested_file = directory.file_path("src/lib.rs");
+        fs::create_dir_all(nested_file.parent().unwrap())
+            .await
+            .unwrap();
+        fs::write(&root_file, "fn main() {}").await.unwrap();
+        fs::write(&nested_file, "pub fn run() {}").await.unwrap();
+        fs::write(directory.file_path("src/readme.md"), "docs")
+            .await
+            .unwrap();
+
+        let result = FileService::new()
+            .find_files(directory.0.to_str().unwrap(), "**/*.rs")
+            .await
+            .expect("recursive glob should find matching files");
+
+        assert_eq!(result.dir_path, directory.0.to_str().unwrap());
+        assert_eq!(result.files.len(), 2);
+        assert!(
+            result
+                .files
+                .contains(&root_file.to_string_lossy().into_owned())
+        );
+        assert!(
+            result
+                .files
+                .contains(&nested_file.to_string_lossy().into_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn finalizes_a_chunked_upload_into_the_requested_directory() {
+        let directory = TestDirectory::new();
+        let source = directory.file_path("upload.tmp");
+        let target = directory.file_path("nested/demo.bin");
+        fs::create_dir_all(&directory.0).await.unwrap();
+        fs::write(&source, b"chunk-onechunk-two").await.unwrap();
+
+        let result = FileService::new()
+            .upload_file(&source, target.to_str().unwrap())
+            .await
+            .expect("uploaded file should be finalized");
+
+        assert_eq!(result.file_path, target.to_str().unwrap());
+        assert_eq!(result.file_size, 18);
+        assert!(result.success);
+        assert_eq!(fs::read(&target).await.unwrap(), b"chunk-onechunk-two");
+        assert!(!fs::try_exists(&source).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn checks_and_deletes_an_existing_file() {
+        let file = TestFile::create("待删除").await;
+
+        let checked = FileService::new()
+            .check_file_exists(file.as_str())
+            .await
+            .expect("file existence should be checkable");
+        let deleted = FileService::new()
+            .delete_file(file.as_str())
+            .await
+            .expect("existing file should be deletable");
+
+        assert!(checked.exists);
+        assert!(deleted.deleted);
+        assert!(!fs::try_exists(&file.0).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn ensure_file_reports_a_missing_path() {
+        let path = std::env::temp_dir().join(format!("sandbox-missing-{}", Uuid::new_v4()));
+
+        let error = FileService::new()
+            .ensure_file(path.to_str().unwrap())
+            .await
+            .expect_err("missing file should be rejected");
+
+        assert_eq!(error.status_code, StatusCode::NOT_FOUND);
+        assert!(error.msg.contains("该文件不存在"));
     }
 }
