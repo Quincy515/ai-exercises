@@ -22,11 +22,11 @@ RUN apt-get update \
         gosu \
         libssl-dev \
         openssh-server \
-        pkg-config \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p \
         /run/sshd \
-        /workspace \
+        /sandbox \
         /cargo-target \
         /usr/local/cargo/git \
         /usr/local/cargo/registry
@@ -54,11 +54,11 @@ RUN groupadd --gid "${DEV_GID}" sandbox \
         > /etc/ssh/sshd_config.d/sandbox.conf \
     && rm -f /etc/ssh/ssh_host_* \
     && chown -R sandbox:sandbox \
-        /workspace \
+        /sandbox \
         /cargo-target \
         /usr/local/cargo
 
-WORKDIR /workspace
+WORKDIR /sandbox
 
 EXPOSE 22 3000
 

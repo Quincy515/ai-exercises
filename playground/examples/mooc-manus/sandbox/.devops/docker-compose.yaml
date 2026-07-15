@@ -29,7 +29,7 @@ services:
 
     # 挂载源码，并持久化 Cargo 下载和编译缓存。
     volumes:
-      - ..:/workspace
+      - ..:/sandbox
       - cargo_registry:/usr/local/cargo/registry
       - cargo_git:/usr/local/cargo/git
       - cargo_target:/cargo-target
