@@ -14,6 +14,8 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["multipart"] }
 glob = "0.3"
 regex = "1"
+reqwest = { version = "0.13.4", default-features = false }
+serde_xmlrpc = "0.3.0-alpha.2"
 tower-http = { version = "0.7", features = ["catch-panic", "cors"] }
 tokio-util = { version = "0.7", features = ["io"] }
 utoipa = { version = "5", features = ["axum_extras"] }
