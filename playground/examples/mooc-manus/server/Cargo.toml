@@ -54,6 +54,8 @@ reqwest = { version = "0.13", features = [
     "cookies",
     "gzip",
     "deflate",
+    "json",
+    "multipart",
 ] }
 scraper = "0.27"
 html-to-markdown-rs = "3.6"

@@ -6,20 +6,28 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
 use bollard::{
     errors::Error as BollardError,
     models::{ContainerCreateBody, ContainerInspectResponse, EndpointSettings, HostConfig},
     query_parameters::{CreateContainerOptionsBuilder, RemoveContainerOptionsBuilder},
     Docker,
 };
-use reqwest::Client;
-use serde::Deserialize;
+use reqwest::{
+    multipart::{Form, Part},
+    Client, RequestBuilder,
+};
+use serde::{de::DeserializeOwned, Deserialize};
+use serde_json::{json, Value};
 use tokio::net::lookup_host;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
-    domain::{external::Browser, models::ToolResult},
+    domain::{
+        external::{Browser, Sandbox},
+        models::ToolResult,
+    },
     infrastructure::{external::browser::ChromiumoxideBrowser, settings::SandboxSettings},
 };
 
@@ -439,6 +447,40 @@ impl DockerSandbox {
         ))
     }
 
+    async fn post_tool_request(&self, endpoint: &str, body: Value) -> Result<ToolResult<Value>> {
+        let url = self.api_url(endpoint);
+        self.send_tool_request(&url, self.client.post(&url).json(&body))
+            .await
+    }
+
+    async fn send_tool_request(
+        &self,
+        url: &str,
+        request: RequestBuilder,
+    ) -> Result<ToolResult<Value>> {
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("请求 Sandbox API {url} 失败"))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .with_context(|| format!("读取 Sandbox API {url} 响应失败"))?;
+        let response: SandboxApiResponse<Value> = serde_json::from_str(&body)
+            .with_context(|| format!("解析 Sandbox API {url} 响应失败，HTTP 状态码 {status}"))?;
+
+        Ok(ToolResult::from_sandbox(
+            response.code,
+            response.msg,
+            response.data,
+        ))
+    }
+
+    fn api_url(&self, endpoint: &str) -> String {
+        format!("{}/api/{endpoint}", self.base_url)
+    }
+
     async fn remove_failed_container(docker: &Docker, container_id: &str, container_name: &str) {
         let options = RemoveContainerOptionsBuilder::default().force(true).build();
         if let Err(err) = docker.remove_container(container_id, Some(options)).await {
@@ -449,6 +491,302 @@ impl DockerSandbox {
                 "清理初始化失败的 Docker 沙箱容器失败"
             );
         }
+    }
+}
+
+#[async_trait]
+impl Sandbox for DockerSandbox {
+    /// 在沙箱中执行命令。
+    async fn exec_command(
+        &self,
+        session_id: &str,
+        exec_dir: &str,
+        command: &str,
+    ) -> Result<ToolResult<String>> {
+        let result = self
+            .post_tool_request(
+                "shell/exec-command",
+                json!({
+                    "session_id": session_id,
+                    "exec_dir": exec_dir,
+                    "command": command,
+                }),
+            )
+            .await?;
+        map_tool_data(result, json_value_to_string)
+    }
+
+    /// 读取沙箱中 Shell 的输出。
+    async fn read_shell_output(
+        &self,
+        session_id: &str,
+        console: Option<bool>,
+    ) -> Result<ToolResult<String>> {
+        let result = self
+            .post_tool_request(
+                "shell/read-shell-output",
+                json!({
+                    "session_id": session_id,
+                    "console": console.unwrap_or(false),
+                }),
+            )
+            .await?;
+        map_tool_data(result, json_value_to_string)
+    }
+
+    /// 等待沙箱中进程的执行。
+    async fn wait_process(
+        &self,
+        session_id: &str,
+        seconds: Option<usize>,
+    ) -> Result<ToolResult<String>> {
+        let seconds = seconds
+            .map(i64::try_from)
+            .transpose()
+            .context("等待秒数超出 Sandbox API 支持范围")?;
+        let result = self
+            .post_tool_request(
+                "shell/wait-process",
+                json!({
+                    "session_id": session_id,
+                    "seconds": seconds,
+                }),
+            )
+            .await?;
+        map_tool_data(result, json_value_to_string)
+    }
+
+    /// 向沙箱的 Shell 进程写入数据。
+    async fn write_shell_input(
+        &self,
+        session_id: &str,
+        input_text: &str,
+        press_enter: Option<bool>,
+    ) -> Result<ToolResult<String>> {
+        let result = self
+            .post_tool_request(
+                "shell/write-shell-input",
+                json!({
+                    "session_id": session_id,
+                    "input_text": input_text,
+                    "press_enter": press_enter.unwrap_or(true),
+                }),
+            )
+            .await?;
+        map_tool_data(result, json_value_to_string)
+    }
+
+    /// 杀死沙箱中的指定进程。
+    async fn kill_process(&self, session_id: &str) -> Result<ToolResult<String>> {
+        let result = self
+            .post_tool_request("shell/kill-process", json!({ "session_id": session_id }))
+            .await?;
+        map_tool_data(result, json_value_to_string)
+    }
+
+    /// 向沙箱中的指定文件写入内容。
+    async fn write_file(
+        &self,
+        file_path: &str,
+        content: &str,
+        append: Option<bool>,
+        leading_newline: Option<bool>,
+        trailing_newline: Option<bool>,
+        sudo: Option<bool>,
+    ) -> Result<ToolResult<String>> {
+        let result = self
+            .post_tool_request(
+                "file/write-file",
+                json!({
+                    "file_path": file_path,
+                    "content": content,
+                    "append": append.unwrap_or(false),
+                    "leading_newline": leading_newline.unwrap_or(false),
+                    "trailing_newline": trailing_newline.unwrap_or(false),
+                    "sudo": sudo.unwrap_or(false),
+                }),
+            )
+            .await?;
+        map_tool_data(result, json_value_to_string)
+    }
+
+    /// 读取沙箱中指定路径的文件内容。
+    async fn read_file(
+        &self,
+        file_path: &str,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+        sudo: Option<bool>,
+        max_length: Option<usize>,
+    ) -> Result<ToolResult<String>> {
+        let result = self
+            .post_tool_request(
+                "file/read-file",
+                json!({
+                    "file_path": file_path,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "sudo": sudo.unwrap_or(false),
+                    "max_length": max_length.unwrap_or(10_000),
+                }),
+            )
+            .await?;
+        map_tool_data(result, |value| {
+            decode_tool_data::<FileReadData>(value, "读取文件").map(|data| data.content)
+        })
+    }
+
+    /// 传递指定路径检查沙箱中的文件是否存在。
+    async fn check_file_exists(&self, file_path: &str) -> Result<ToolResult<bool>> {
+        let result = self
+            .post_tool_request("file/check-file-exists", json!({ "file_path": file_path }))
+            .await?;
+        map_tool_data(result, |value| {
+            decode_tool_data::<FileCheckData>(value, "检查文件").map(|data| data.exists)
+        })
+    }
+
+    /// 删除沙箱中的指定文件。
+    async fn delete_file(&self, file_path: &str) -> Result<ToolResult<String>> {
+        let result = self
+            .post_tool_request("file/delete-file", json!({ "file_path": file_path }))
+            .await?;
+        map_tool_data(result, json_value_to_string)
+    }
+
+    /// 替换沙箱中文件的旧内容为指定内容。
+    async fn replace_in_file(
+        &self,
+        file_path: &str,
+        old_str: &str,
+        new_str: &str,
+        sudo: Option<bool>,
+    ) -> Result<ToolResult<String>> {
+        let result = self
+            .post_tool_request(
+                "file/replace-in-file",
+                json!({
+                    "file_path": file_path,
+                    "old_str": old_str,
+                    "new_str": new_str,
+                    "sudo": sudo.unwrap_or(false),
+                }),
+            )
+            .await?;
+        map_tool_data(result, json_value_to_string)
+    }
+
+    /// 搜索沙箱中指定文件的内容。
+    async fn search_in_file(
+        &self,
+        file_path: &str,
+        regex: &str,
+        sudo: Option<bool>,
+    ) -> Result<ToolResult<Vec<String>>> {
+        let result = self
+            .post_tool_request(
+                "file/search-in-file",
+                json!({
+                    "file_path": file_path,
+                    "regex": regex,
+                    "sudo": sudo.unwrap_or(false),
+                }),
+            )
+            .await?;
+        map_tool_data(result, |value| {
+            decode_tool_data::<FileSearchData>(value, "搜索文件").map(|data| data.matches)
+        })
+    }
+
+    /// 查找沙箱中指定目录的文件列表。
+    async fn find_files(
+        &self,
+        dir_path: &str,
+        glob_pattern: &str,
+    ) -> Result<ToolResult<Vec<String>>> {
+        let result = self
+            .post_tool_request(
+                "file/find-files",
+                json!({
+                    "dir_path": dir_path,
+                    "glob_pattern": glob_pattern,
+                }),
+            )
+            .await?;
+        map_tool_data(result, |value| {
+            decode_tool_data::<FileFindData>(value, "查找文件").map(|data| data.files)
+        })
+    }
+
+    /// 将文件源上传至沙箱指定位置。
+    async fn upload_file(
+        &self,
+        file_data: Vec<u8>,
+        file_path: &str,
+        file_name: Option<&str>,
+    ) -> Result<ToolResult<String>> {
+        // 1.预配置上传数据
+        let file_name = file_name
+            .filter(|name| !name.is_empty())
+            .unwrap_or("upload");
+        let part = Part::bytes(file_data)
+            .file_name(file_name.to_string())
+            .mime_str("application/octet-stream")
+            .context("构建 Sandbox 文件上传表单失败")?;
+        let form = Form::new()
+            .part("file", part)
+            .text("file_path", file_path.to_string());
+
+        // 2.发起请求上传数据并获取响应
+        let url = self.api_url("file/upload-file");
+        let result = self
+            .send_tool_request(&url, self.client.post(&url).multipart(form))
+            .await?;
+        map_tool_data(result, json_value_to_string)
+    }
+
+    /// 从沙箱中下载文件。
+    async fn download_file(&self, file_path: &str) -> Result<Vec<u8>> {
+        let url = self.api_url("file/download-file");
+        let response = self
+            .client
+            .get(&url)
+            .query(&[("file_path", file_path)])
+            .send()
+            .await
+            .with_context(|| format!("请求 Sandbox 文件下载接口 {url} 失败"))?
+            .error_for_status()
+            .with_context(|| format!("Sandbox 文件下载接口 {url} 返回 HTTP 错误"))?;
+
+        Ok(response
+            .bytes()
+            .await
+            .with_context(|| format!("读取 Sandbox 下载文件 {url} 失败"))?
+            .to_vec())
+    }
+
+    async fn ensure_sandbox(&self) -> Result<bool> {
+        DockerSandbox::ensure_sandbox(self).await
+    }
+
+    async fn destroy(&self) -> Result<bool> {
+        DockerSandbox::destroy(self).await
+    }
+
+    async fn get_browser(&self) -> Result<Box<dyn Browser>> {
+        DockerSandbox::get_browser(self).await
+    }
+
+    fn id(&self) -> &str {
+        DockerSandbox::id(self)
+    }
+
+    fn cdp_url(&self) -> &str {
+        DockerSandbox::cdp_url(self)
+    }
+
+    fn vnc_url(&self) -> &str {
+        DockerSandbox::vnc_url(self)
     }
 }
 
@@ -463,6 +801,26 @@ struct SandboxApiResponse<T> {
 struct SupervisorProcess {
     name: String,
     statename: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileReadData {
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileSearchData {
+    matches: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileFindData {
+    files: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileCheckData {
+    exists: bool,
 }
 
 #[derive(Debug, Default)]
@@ -619,6 +977,39 @@ fn endpoint_ipv4(endpoint: &EndpointSettings) -> Option<Ipv4Addr> {
     endpoint.ip_address.as_deref()?.parse().ok()
 }
 
+fn map_tool_data<T>(
+    result: ToolResult<Value>,
+    mapper: impl FnOnce(Value) -> Result<T>,
+) -> Result<ToolResult<T>> {
+    let ToolResult {
+        success,
+        message,
+        data,
+    } = result;
+    let data = if success {
+        data.map(mapper).transpose()?
+    } else {
+        None
+    };
+
+    Ok(ToolResult {
+        success,
+        message,
+        data,
+    })
+}
+
+fn decode_tool_data<T: DeserializeOwned>(value: Value, operation: &str) -> Result<T> {
+    serde_json::from_value(value).with_context(|| format!("解析 Sandbox {operation}响应数据失败"))
+}
+
+fn json_value_to_string(value: Value) -> Result<String> {
+    match value {
+        Value::String(value) => Ok(value),
+        value => serde_json::to_string(&value).context("序列化 Sandbox 响应数据失败"),
+    }
+}
+
 fn is_container_not_found(error: &BollardError) -> bool {
     matches!(
         error,
@@ -631,9 +1022,22 @@ fn is_container_not_found(error: &BollardError) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, future::pending, net::Ipv4Addr, time::Duration};
+    use std::{
+        collections::HashMap,
+        future::pending,
+        net::Ipv4Addr,
+        sync::{Arc, Mutex as StdMutex},
+        time::Duration,
+    };
 
-    use axum::{routing::get, Json, Router};
+    use axum::{
+        body::{to_bytes, Body},
+        extract::State,
+        http::{Method, Request, StatusCode},
+        response::{IntoResponse, Response},
+        routing::get,
+        Json, Router,
+    };
     use bollard::{
         models::{ContainerInspectResponse, EndpointSettings, NetworkSettings},
         Docker,
@@ -646,7 +1050,86 @@ mod tests {
         validate_managed_container_id, BollardError, DockerSandbox, HostnameCache,
         HOSTNAME_CACHE_CAPACITY,
     };
-    use crate::infrastructure::settings::SandboxSettings;
+    use crate::{domain::external::Sandbox, infrastructure::settings::SandboxSettings};
+
+    #[derive(Debug, Clone)]
+    struct RecordedRequest {
+        method: Method,
+        path: String,
+        query: Option<String>,
+        body: Vec<u8>,
+    }
+
+    type RecordedRequests = Arc<StdMutex<Vec<RecordedRequest>>>;
+
+    async fn record_sandbox_request(
+        State(requests): State<RecordedRequests>,
+        request: Request<Body>,
+    ) -> Response {
+        let method = request.method().clone();
+        let path = request.uri().path().to_string();
+        let query = request.uri().query().map(str::to_string);
+        let body = to_bytes(request.into_body(), 1_000_000)
+            .await
+            .unwrap()
+            .to_vec();
+        requests.lock().unwrap().push(RecordedRequest {
+            method,
+            path: path.clone(),
+            query,
+            body,
+        });
+
+        if path == "/api/file/download-file" {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from("download-data"))
+                .unwrap();
+        }
+
+        let (status, code, message, data) = match path.as_str() {
+            "/api/file/read-file" => (
+                StatusCode::OK,
+                200,
+                "read ok",
+                json!({ "file_path": "/tmp/agent.txt", "content": "file contents" }),
+            ),
+            "/api/file/search-in-file" => (
+                StatusCode::OK,
+                200,
+                "search ok",
+                json!({
+                    "file_path": "/tmp/agent.txt",
+                    "matches": ["Agent"],
+                    "line_numbers": [0]
+                }),
+            ),
+            "/api/file/find-files" => (
+                StatusCode::OK,
+                200,
+                "find ok",
+                json!({ "dir_path": "/tmp", "files": ["/tmp/agent.txt"] }),
+            ),
+            "/api/file/check-file-exists" => (
+                StatusCode::OK,
+                200,
+                "check ok",
+                json!({ "file_path": "/tmp/agent.txt", "exists": true }),
+            ),
+            "/api/file/delete-file" => (StatusCode::BAD_REQUEST, 400, "delete denied", json!({})),
+            _ => (StatusCode::OK, 200, "success", json!({ "endpoint": path })),
+        };
+
+        (
+            status,
+            Json(json!({
+                "code": code,
+                "msg": message,
+                "data": data,
+            })),
+        )
+            .into_response()
+    }
 
     #[test]
     fn builds_urls_and_uses_container_name_as_id() {
@@ -875,6 +1358,133 @@ mod tests {
             host_config.network_mode.as_deref(),
             Some("mooc-manus-network")
         );
+    }
+
+    #[tokio::test]
+    async fn implements_file_and_shell_api_contracts() {
+        let requests = RecordedRequests::default();
+        let app = Router::new()
+            .fallback(record_sandbox_request)
+            .with_state(Arc::clone(&requests));
+        let (sandbox, server) = sandbox_with_router(app).await;
+
+        let read = Sandbox::read_file(&sandbox, "/tmp/agent.txt", None, None, None, None)
+            .await
+            .unwrap();
+        let write =
+            Sandbox::write_file(&sandbox, "/tmp/agent.txt", "Agent", None, None, None, None)
+                .await
+                .unwrap();
+        let replace = Sandbox::replace_in_file(&sandbox, "/tmp/agent.txt", "Agent", "Manus", None)
+            .await
+            .unwrap();
+        let search = Sandbox::search_in_file(&sandbox, "/tmp/agent.txt", "Agent", None)
+            .await
+            .unwrap();
+        let found = Sandbox::find_files(&sandbox, "/tmp", "*.txt")
+            .await
+            .unwrap();
+        let exists = Sandbox::check_file_exists(&sandbox, "/tmp/agent.txt")
+            .await
+            .unwrap();
+        let deleted = Sandbox::delete_file(&sandbox, "/tmp/agent.txt")
+            .await
+            .unwrap();
+        let uploaded = Sandbox::upload_file(
+            &sandbox,
+            b"upload-data".to_vec(),
+            "/tmp/uploaded.bin",
+            Some("agent.bin"),
+        )
+        .await
+        .unwrap();
+        let downloaded = Sandbox::download_file(&sandbox, "/tmp/download.txt")
+            .await
+            .unwrap();
+        let executed = Sandbox::exec_command(&sandbox, "session-1", "/tmp", "pwd")
+            .await
+            .unwrap();
+        let shell_output = Sandbox::read_shell_output(&sandbox, "session-1", None)
+            .await
+            .unwrap();
+        let shell_input = Sandbox::write_shell_input(&sandbox, "session-1", "yes", None)
+            .await
+            .unwrap();
+        let waited = Sandbox::wait_process(&sandbox, "session-1", None)
+            .await
+            .unwrap();
+        let killed = Sandbox::kill_process(&sandbox, "session-1").await.unwrap();
+        server.abort();
+
+        assert_eq!(read.data.as_deref(), Some("file contents"));
+        assert_eq!(search.data, Some(vec!["Agent".to_string()]));
+        assert_eq!(found.data, Some(vec!["/tmp/agent.txt".to_string()]));
+        assert_eq!(exists.data, Some(true));
+        assert!(!deleted.success);
+        assert_eq!(deleted.message.as_deref(), Some("delete denied"));
+        assert_eq!(deleted.data, None);
+        assert_eq!(downloaded, b"download-data");
+        for result in [
+            write,
+            replace,
+            uploaded,
+            executed,
+            shell_output,
+            shell_input,
+            waited,
+            killed,
+        ] {
+            let data = result.data.expect("successful result should contain data");
+            assert!(serde_json::from_str::<Value>(&data).unwrap().is_object());
+        }
+
+        let requests = requests.lock().unwrap();
+        let paths = requests
+            .iter()
+            .map(|request| request.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![
+                "/api/file/read-file",
+                "/api/file/write-file",
+                "/api/file/replace-in-file",
+                "/api/file/search-in-file",
+                "/api/file/find-files",
+                "/api/file/check-file-exists",
+                "/api/file/delete-file",
+                "/api/file/upload-file",
+                "/api/file/download-file",
+                "/api/shell/exec-command",
+                "/api/shell/read-shell-output",
+                "/api/shell/write-shell-input",
+                "/api/shell/wait-process",
+                "/api/shell/kill-process",
+            ]
+        );
+        assert!(requests.iter().all(|request| {
+            request.method == Method::POST || request.path == "/api/file/download-file"
+        }));
+        assert_eq!(requests[8].method, Method::GET);
+
+        let read_body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(read_body["file_path"], "/tmp/agent.txt");
+        assert_eq!(read_body["sudo"], false);
+        assert_eq!(read_body["max_length"], 10_000);
+        let upload_body = String::from_utf8_lossy(&requests[7].body);
+        assert!(upload_body.contains("name=\"file\""));
+        assert!(upload_body.contains("filename=\"agent.bin\""));
+        assert!(upload_body.contains("name=\"file_path\""));
+        assert!(upload_body.contains("/tmp/uploaded.bin"));
+        assert!(upload_body.contains("upload-data"));
+        assert!(requests[8]
+            .query
+            .as_deref()
+            .is_some_and(|query| query.contains("file_path=")));
+        let shell_input_body: Value = serde_json::from_slice(&requests[11].body).unwrap();
+        assert_eq!(shell_input_body["press_enter"], true);
+        let wait_body: Value = serde_json::from_slice(&requests[12].body).unwrap();
+        assert!(wait_body["seconds"].is_null());
     }
 
     #[tokio::test]
