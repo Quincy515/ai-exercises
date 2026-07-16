@@ -1,4 +1,10 @@
-use std::time::Duration;
+use std::{
+    sync::{
+        Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 #[cfg(unix)]
 use std::{
@@ -7,18 +13,17 @@ use std::{
     os::unix::process::CommandExt,
     path::Path,
     process::{Child, Command, Stdio},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
 };
 
 #[cfg(unix)]
 use reqwest::{Client, header::CONTENT_TYPE};
 use serde::de::DeserializeOwned;
+use tokio::sync::oneshot;
 use tracing::error;
 
 use crate::{
+    core::Settings,
     exceptions::AppException,
     models::{ProcessInfo, SupervisorActionResult, SupervisorProcessAction},
 };
@@ -59,7 +64,30 @@ static RESTART_SCHEDULED: AtomicBool = AtomicBool::new(false);
 /// Supervisor 服务
 #[derive(Debug)]
 pub struct SupervisorService {
+    /// Supervisor 用于 XML-RPC 通信的 Unix Socket 文件路径。
     rpc_url: String,
+    /// 当前自动销毁定时器。
+    ///
+    /// `None` 表示没有激活超时销毁；`Some` 同时保存计划销毁时间和取消句柄，
+    /// 避免“状态显示已激活，实际任务却不存在”这一类状态不一致问题。
+    shutdown_timer: Mutex<Option<ShutdownTimer>>,
+    /// 是否开启自动保活。
+    ///
+    /// 本节先保存开关；后续请求中间件可以在每次调用接口时读取它，
+    /// 决定是否重新设置定时器并延长沙箱存活时间。服务会通过 `Arc` 被多个
+    /// Axum 请求共享，因此使用 `AtomicBool` 完成无锁的并发读写。
+    expand_enabled: AtomicBool,
+}
+
+/// 一次正在执行的沙箱自动销毁计划。
+#[derive(Debug)]
+struct ShutdownTimer {
+    /// 计划关闭 supervisord 的单调时钟时间点。
+    ///
+    /// `Instant` 不受系统时间校准影响，比日历时间更适合计算进程内倒计时。
+    shutdown_time: Instant,
+    /// 定时任务取消句柄，对应课程实现中 `shutdown_task.cancel()` 的职责。
+    cancel: oneshot::Sender<()>,
 }
 
 impl Default for SupervisorService {
@@ -69,17 +97,110 @@ impl Default for SupervisorService {
 }
 
 impl SupervisorService {
-    /// 构造函数，保存 Supervisor Unix Socket 路径。
+    /// 构造函数，保存 Supervisor Unix Socket 路径并启动超时销毁定时器。
     ///
     /// 这里对应客户端初始化阶段；实际连接会在 `call_rpc()` 调用
     /// `send().await` 时异步建立。
     pub fn new() -> Self {
-        Self::with_rpc_url(SUPERVISOR_SOCKET_PATH)
+        // 1. 连接 Supervisor 配置：`with_shutdown_timeout()` 会保存 Unix Socket 路径。
+        // 2. Supervisor 超时配置：读取 SERVER_TIMEOUT_MINUTES，默认值为 60 分钟。
+        let settings = Settings::load();
+        let timeout =
+            Duration::from_secs(settings.server_timeout_minutes as u64).saturating_mul(60);
+
+        // 3. 检测自动销毁配置：当前 Rust Settings 始终提供分钟数，因此启动定时器。
+        // 4. 设置销毁时间并创建定时任务，到期后关闭 supervisord 主进程。
+        Self::with_shutdown_timeout(SUPERVISOR_SOCKET_PATH, timeout)
     }
 
+    /// 创建只负责 RPC 调用的服务实例，不启动自动销毁定时器。
+    ///
+    /// 超时任务到期后会通过这个构造函数复用 `shutdown()`；这样不会在执行关闭时
+    /// 再创建一个新的关闭定时器。重启辅助进程和测试 RPC 客户端也使用这条路径。
     pub(crate) fn with_rpc_url(rpc_url: impl Into<String>) -> Self {
         Self {
             rpc_url: rpc_url.into(),
+            shutdown_timer: Mutex::new(None),
+            expand_enabled: AtomicBool::new(true),
+        }
+    }
+
+    /// 创建带有超时销毁能力的 Supervisor 服务。
+    ///
+    /// 先完成 RPC 客户端状态初始化，再调用 `setup_timer()` 保存销毁时间并启动任务。
+    fn with_shutdown_timeout(rpc_url: impl Into<String>, shutdown_timeout: Duration) -> Self {
+        let service = Self::with_rpc_url(rpc_url);
+        service.setup_timer(shutdown_timeout);
+        service
+    }
+
+    /// 获取定时器状态锁；即使其他线程持锁时发生 panic，也尽量取回内部状态完成清理。
+    fn lock_shutdown_timer(&self) -> MutexGuard<'_, Option<ShutdownTimer>> {
+        self.shutdown_timer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// 返回是否配置了沙箱超时销毁，即当前是否存在有效定时器。
+    pub fn timeout_active(&self) -> bool {
+        self.shutdown_time().is_some()
+    }
+
+    /// 返回当前计划关闭 Supervisor 的时间点；未激活时返回 `None`。
+    pub fn shutdown_time(&self) -> Option<Instant> {
+        self.lock_shutdown_timer()
+            .as_ref()
+            .map(|timer| timer.shutdown_time)
+    }
+
+    /// 只读获取是否开启自动保活。
+    pub fn expand_enabled(&self) -> bool {
+        self.expand_enabled.load(Ordering::Acquire)
+    }
+
+    /// 开启自动保活。
+    ///
+    /// 这里只修改开关；后续中间件收到下一次 API 请求时才会重新设置销毁时间。
+    pub fn enable_expand(&self) {
+        self.expand_enabled.store(true, Ordering::Release);
+    }
+
+    /// 关闭自动保活。
+    ///
+    /// 已创建的定时器继续倒计时，后续 API 请求不会再自动延长它。
+    pub fn disable_expand(&self) {
+        self.expand_enabled.store(false, Ordering::Release);
+    }
+
+    /// 传递超时时长并创建定时器，在时间结束后关闭 supervisord 主进程。
+    fn setup_timer(&self, timeout: Duration) {
+        // 1. 计算销毁时间。极端配置发生时间溢出时不创建无效任务。
+        let Some(shutdown_time) = Instant::now().checked_add(timeout) else {
+            error!("Supervisor 超时配置超出系统可表示范围");
+            return;
+        };
+
+        // 2. 创建一次性取消通道：Sender 由服务保存，Receiver 交给异步定时任务。
+        let (cancel, cancel_rx) = oneshot::channel();
+        let previous_timer = self.lock_shutdown_timer().replace(ShutdownTimer {
+            shutdown_time,
+            cancel,
+        });
+
+        // 3. 检测当前是否存在销毁任务；存在时先取消，再使用新的销毁时间。
+        // 取消失败表示旧任务已经结束，不影响新任务继续执行。
+        if let Some(previous_timer) = previous_timer {
+            let _ = previous_timer.cancel.send(());
+        }
+
+        // 4. 获取 Tokio 事件循环并添加任务；运行时不可用时由后台线程兜底。
+        // 两种启动方式都失败时清空定时器，确保 `timeout_active()` 返回真实状态。
+        if let Err(err) = spawn_shutdown_timer(self.rpc_url.clone(), timeout, cancel_rx) {
+            let timer = self.lock_shutdown_timer().take();
+            if let Some(timer) = timer {
+                let _ = timer.cancel.send(());
+            }
+            error!(error = %err, "创建 Supervisor 超时销毁定时器失败");
         }
     }
 
@@ -330,6 +451,71 @@ impl SupervisorService {
         let msg = format!("重启Supervisor进程服务失败: {err}");
         error!(error = %msg, "重启 Supervisor 进程服务失败");
         AppException::internal(msg)
+    }
+}
+
+impl Drop for SupervisorService {
+    fn drop(&mut self) {
+        // 服务状态释放时取消尚未到期的任务，避免后台任务继续关闭已结束的沙箱实例。
+        let timer = self
+            .shutdown_timer
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(timer) = timer {
+            let _ = timer.cancel.send(());
+        }
+    }
+}
+
+/// 创建 Supervisor 关闭定时任务。
+///
+/// 1. 优先获取当前 Tokio 运行时并添加异步任务，不阻塞 Axum 请求线程。
+/// 2. 同步上下文没有 Tokio 运行时时，创建单线程运行时作为兜底。
+/// 3. 兜底运行时放入命名后台线程，承担课程实现中 `threading.Timer` 的职责。
+fn spawn_shutdown_timer(
+    rpc_url: String,
+    timeout: Duration,
+    cancel: oneshot::Receiver<()>,
+) -> Result<(), String> {
+    // 对应“获取事件循环并添加任务”。Axum 正常启动时会进入这条路径。
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(shutdown_after_timeout(rpc_url, timeout, cancel));
+        return Ok(());
+    }
+
+    // 对应“事件循环失败则创建新线程执行定时器”。先构建运行时，保证错误可以返回。
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("创建后台定时器运行时失败: {err}"))?;
+
+    // 后台线程只负责驱动一个定时任务；线程启动失败时由调用者清理已保存的状态。
+    std::thread::Builder::new()
+        .name("supervisor-shutdown-timer".to_string())
+        .spawn(move || runtime.block_on(shutdown_after_timeout(rpc_url, timeout, cancel)))
+        .map(|_| ())
+        .map_err(|err| format!("创建后台定时器线程失败: {err}"))
+}
+
+/// 异步等待超时并关闭 Supervisor。
+async fn shutdown_after_timeout(rpc_url: String, timeout: Duration, cancel: oneshot::Receiver<()>) {
+    // 等待“取消信号”和“倒计时结束”中的任意一个事件。
+    // `biased` 让两个事件同时就绪时优先处理取消，避免服务释放瞬间误触发关闭。
+    tokio::select! {
+        biased;
+        _ = cancel => return,
+        _ = tokio::time::sleep(timeout) => {}
+    }
+
+    // 睡眠指定时间后调用已有 shutdown()，通过 XML-RPC 关闭 supervisord 主进程。
+    // supervisord 作为容器 PID 1 退出后，容器运行时会结束该沙箱容器。
+    tracing::info!(
+        timeout_seconds = timeout.as_secs(),
+        "沙箱超过空闲时间，正在关闭 Supervisor"
+    );
+    if let Err(err) = SupervisorService::with_rpc_url(rpc_url).shutdown().await {
+        error!(error = %err, "沙箱超时后关闭 Supervisor 失败");
     }
 }
 
@@ -694,6 +880,16 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn service_without_runtime(rpc_url: String, timeout: Duration) -> SupervisorService {
+        std::thread::spawn(move || {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            SupervisorService::with_shutdown_timeout(rpc_url, timeout)
+        })
+        .join()
+        .expect("service constructor thread should finish")
+    }
+
+    #[cfg(unix)]
     async fn call_mock_supervisor(response: String) -> Result<Vec<ProcessInfo>, AppException> {
         use tokio::{io::AsyncWriteExt, net::UnixListener};
 
@@ -767,6 +963,133 @@ mod tests {
     #[test]
     fn default_service_uses_supervisor_socket() {
         assert_eq!(SupervisorService::default().rpc_url, "/tmp/supervisor.sock");
+    }
+
+    #[test]
+    fn automatic_keepalive_can_be_enabled_and_disabled() {
+        let service = SupervisorService::with_rpc_url("/tmp/test-supervisor.sock");
+
+        assert!(service.expand_enabled());
+        service.disable_expand();
+        assert!(!service.expand_enabled());
+        service.enable_expand();
+        assert!(service.expand_enabled());
+    }
+
+    #[tokio::test]
+    async fn configured_timeout_records_an_automatic_shutdown_deadline() {
+        let before = std::time::Instant::now();
+        let service = SupervisorService::with_shutdown_timeout(
+            "/tmp/test-supervisor.sock",
+            Duration::from_secs(60),
+        );
+
+        assert!(service.timeout_active());
+        let shutdown_time = service
+            .shutdown_time()
+            .expect("configured timeout should record a deadline");
+        assert!(shutdown_time >= before + Duration::from_secs(60));
+    }
+
+    #[test]
+    fn overflowing_timeout_is_not_reported_as_active() {
+        let service =
+            SupervisorService::with_shutdown_timeout("/tmp/test-supervisor.sock", Duration::MAX);
+
+        assert!(!service.timeout_active());
+        assert!(service.shutdown_time().is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn context_without_runtime_uses_background_shutdown_timer() {
+        use tokio::{io::AsyncWriteExt, net::UnixListener};
+
+        let socket_path = PathBuf::from(format!(
+            "/tmp/sandbox-supervisor-sync-timeout-test-{}.sock",
+            uuid::Uuid::new_v4()
+        ));
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("client should connect");
+            let request = read_xmlrpc_request(&mut stream).await;
+            stream
+                .write_all(http_response(&success_xml("<boolean>1</boolean>")).as_bytes())
+                .await
+                .expect("response should write");
+            request
+        });
+
+        let _service =
+            service_without_runtime(socket_path.display().to_string(), Duration::from_millis(20));
+
+        let request = tokio::time::timeout(Duration::from_millis(500), server)
+            .await
+            .expect("background timer should call Supervisor")
+            .expect("mock server should finish");
+        assert!(
+            request.contains(SHUTDOWN_METHOD),
+            "unexpected request: {request}"
+        );
+        std::fs::remove_file(socket_path).expect("test socket should be removed");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_service_cancels_background_shutdown_timer() {
+        use tokio::net::UnixListener;
+
+        let socket_path = PathBuf::from(format!(
+            "/tmp/sandbox-supervisor-sync-timeout-cancel-test-{}.sock",
+            uuid::Uuid::new_v4()
+        ));
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let service =
+            service_without_runtime(socket_path.display().to_string(), Duration::from_secs(1));
+
+        drop(service);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "a dropped service must cancel its background shutdown"
+        );
+        std::fs::remove_file(socket_path).expect("test socket should be removed");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn configured_timeout_shuts_down_supervisor_after_the_deadline() {
+        use tokio::{io::AsyncWriteExt, net::UnixListener};
+
+        let socket_path = PathBuf::from(format!(
+            "/tmp/sandbox-supervisor-timeout-test-{}.sock",
+            uuid::Uuid::new_v4()
+        ));
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("client should connect");
+            let request = read_xmlrpc_request(&mut stream).await;
+            assert!(
+                request.contains(SHUTDOWN_METHOD),
+                "unexpected request: {request}"
+            );
+            stream
+                .write_all(http_response(&success_xml("<boolean>1</boolean>")).as_bytes())
+                .await
+                .expect("response should write");
+        });
+
+        let _service = SupervisorService::with_shutdown_timeout(
+            socket_path.display().to_string(),
+            Duration::from_millis(10),
+        );
+
+        tokio::time::timeout(Duration::from_millis(500), server)
+            .await
+            .expect("shutdown timer should call Supervisor")
+            .expect("mock server should finish");
+        std::fs::remove_file(socket_path).expect("test socket should be removed");
     }
 
     #[test]
