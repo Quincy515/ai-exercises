@@ -1,5 +1,5 @@
 use axum::{
-    Router,
+    Json, Router,
     extract::State,
     http::StatusCode,
     routing::{get, post},
@@ -7,7 +7,9 @@ use axum::{
 
 use crate::{
     exceptions::{ApiResponse, AppException},
-    models::{ProcessInfo, SupervisorActionResult},
+    models::{ProcessInfo, SupervisorActionResult, SupervisorTimeout},
+    services::DEFAULT_TIMEOUT_EXTENSION_MINUTES,
+    views::TimeoutRequest,
 };
 
 use super::service_dependencies::AppState;
@@ -97,6 +99,99 @@ async fn restart(
     ))
 }
 
+#[utoipa::path(
+    post,
+    context_path = "/api",
+    path = "/supervisor/activate-timeout",
+    tag = "Supervisor模块",
+    request_body = TimeoutRequest,
+    description = "传递分钟激活超时沙箱销毁设置，并关闭自动保活配置",
+    responses(
+        (status = 200, description = "超时销毁已设置", body = ApiResponse<SupervisorTimeout>),
+        (status = 400, description = "超时时间无效", body = ApiResponse),
+        (status = 500, description = "设置超时销毁失败", body = ApiResponse),
+    ),
+)]
+async fn activate_timeout(
+    State(state): State<AppState>,
+    Json(request): Json<TimeoutRequest>,
+) -> Result<ApiResponse<SupervisorTimeout>, AppException> {
+    let result = state.supervisor_service.activate_timeout(request.minutes)?;
+
+    let timeout_minutes = result.timeout_minutes.unwrap_or_default();
+    let message = format!("超时销毁已设置, 所有服务与沙箱将在{timeout_minutes}分钟后销毁");
+    Ok(ApiResponse::success(Some(result), message))
+}
+
+#[utoipa::path(
+    post,
+    context_path = "/api",
+    path = "/supervisor/extend-timeout",
+    tag = "Supervisor模块",
+    request_body = TimeoutRequest,
+    description = "传递指定的分钟延长超时时间并关闭自动保活",
+    responses(
+        (status = 200, description = "超时销毁时间已延长", body = ApiResponse<SupervisorTimeout>),
+        (status = 400, description = "超时销毁未激活或分钟数无效", body = ApiResponse),
+        (status = 500, description = "延长超时销毁失败", body = ApiResponse),
+    ),
+)]
+async fn extend_timeout(
+    State(state): State<AppState>,
+    Json(request): Json<TimeoutRequest>,
+) -> Result<ApiResponse<SupervisorTimeout>, AppException> {
+    let extension_minutes = request.minutes.unwrap_or(DEFAULT_TIMEOUT_EXTENSION_MINUTES);
+    let result = state.supervisor_service.extend_timeout(request.minutes)?;
+    let timeout_minutes = result.timeout_minutes.unwrap_or_default();
+    let message = format!(
+        "超时销毁时间已延长{extension_minutes}分钟, 所有服务与沙箱将在{timeout_minutes}分钟后销毁"
+    );
+    Ok(ApiResponse::success(Some(result), message))
+}
+
+#[utoipa::path(
+    post,
+    context_path = "/api",
+    path = "/supervisor/cancel-timeout",
+    tag = "Supervisor模块",
+    description = "取消超时销毁配置",
+    responses(
+        (status = 200, description = "超时销毁已取消或尚未激活", body = ApiResponse<SupervisorTimeout>),
+    ),
+)]
+async fn cancel_timeout(State(state): State<AppState>) -> ApiResponse<SupervisorTimeout> {
+    let result = state.supervisor_service.cancel_timeout();
+    let message = if result.status.as_deref() == Some("timeout_cancelled") {
+        "超时销毁已取消"
+    } else {
+        "超时销毁未激活"
+    };
+    ApiResponse::success(Some(result), message)
+}
+
+#[utoipa::path(
+    get,
+    context_path = "/api",
+    path = "/supervisor/timeout-status",
+    tag = "Supervisor模块",
+    description = "获取当前supervisor的超时状态配置",
+    responses(
+        (status = 200, description = "获取超时销毁状态成功", body = ApiResponse<SupervisorTimeout>),
+    ),
+)]
+async fn get_timeout_status(State(state): State<AppState>) -> ApiResponse<SupervisorTimeout> {
+    let result = state.supervisor_service.get_timeout_status();
+    let message = if result.active {
+        format!(
+            "剩余超时销毁分钟数: {}",
+            result.remaining_seconds.unwrap_or_default() / 60
+        )
+    } else {
+        "未激活超时销毁".to_string()
+    };
+    ApiResponse::success(Some(result), message)
+}
+
 impl SupervisorController {
     pub fn routes() -> Router<AppState> {
         Router::new()
@@ -104,6 +199,10 @@ impl SupervisorController {
             .route("/stop-all-processes", post(stop_all_processes))
             .route("/shutdown", post(shutdown))
             .route("/restart", post(restart))
+            .route("/activate-timeout", post(activate_timeout))
+            .route("/extend-timeout", post(extend_timeout))
+            .route("/cancel-timeout", post(cancel_timeout))
+            .route("/timeout-status", get(get_timeout_status))
     }
 }
 
@@ -128,6 +227,30 @@ mod tests {
         );
         assert!(openapi.paths.paths.contains_key("/api/supervisor/shutdown"));
         assert!(openapi.paths.paths.contains_key("/api/supervisor/restart"));
+        assert!(
+            openapi
+                .paths
+                .paths
+                .contains_key("/api/supervisor/activate-timeout")
+        );
+        assert!(
+            openapi
+                .paths
+                .paths
+                .contains_key("/api/supervisor/extend-timeout")
+        );
+        assert!(
+            openapi
+                .paths
+                .paths
+                .contains_key("/api/supervisor/cancel-timeout")
+        );
+        assert!(
+            openapi
+                .paths
+                .paths
+                .contains_key("/api/supervisor/timeout-status")
+        );
 
         let restart = openapi
             .paths
@@ -137,6 +260,47 @@ mod tests {
             .expect("restart POST operation should exist");
         assert!(restart.responses.responses.contains_key("202"));
         assert!(restart.responses.responses.contains_key("400"));
+    }
+
+    #[tokio::test]
+    async fn timeout_controllers_manage_the_manual_and_automatic_modes() {
+        let supervisor_service = Arc::new(crate::services::SupervisorService::new());
+        let state = AppState {
+            shell_service: Arc::new(crate::services::ShellService::new()),
+            file_service: Arc::new(crate::services::FileService::new()),
+            supervisor_service: Arc::clone(&supervisor_service),
+        };
+
+        let activated = activate_timeout(
+            State(state.clone()),
+            Json(TimeoutRequest { minutes: Some(10) }),
+        )
+        .await
+        .expect("activate endpoint should succeed");
+        assert_eq!(activated.data.status.as_deref(), Some("timeout_activated"));
+        assert_eq!(activated.data.timeout_minutes, Some(10));
+        assert!(!supervisor_service.expand_enabled());
+
+        let extended = extend_timeout(
+            State(state.clone()),
+            Json(TimeoutRequest { minutes: Some(5) }),
+        )
+        .await
+        .expect("extend endpoint should succeed");
+        assert_eq!(extended.data.status.as_deref(), Some("timeout_extended"));
+        assert_eq!(
+            extended.msg,
+            "超时销毁时间已延长5分钟, 所有服务与沙箱将在15分钟后销毁"
+        );
+        assert!(!supervisor_service.expand_enabled());
+
+        let cancelled = cancel_timeout(State(state.clone())).await;
+        assert_eq!(cancelled.data.status.as_deref(), Some("timeout_cancelled"));
+        assert!(supervisor_service.expand_enabled());
+
+        let status = get_timeout_status(State(state)).await;
+        assert!(!status.data.active);
+        assert_eq!(status.msg, "未激活超时销毁");
     }
 
     #[cfg(unix)]

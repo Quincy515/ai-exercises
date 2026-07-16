@@ -30,6 +30,10 @@ pub mod supervisor;
         supervisor::stop_all_processes,
         supervisor::shutdown,
         supervisor::restart,
+        supervisor::activate_timeout,
+        supervisor::extend_timeout,
+        supervisor::cancel_timeout,
+        supervisor::get_timeout_status,
     ),
     info(
         title = "MoocManus沙箱系统",
@@ -89,10 +93,14 @@ mod tests {
                 "/api/shell/read-shell-output",
                 "/api/shell/wait-process",
                 "/api/shell/write-shell-input",
+                "/api/supervisor/activate-timeout",
+                "/api/supervisor/cancel-timeout",
+                "/api/supervisor/extend-timeout",
                 "/api/supervisor/restart",
                 "/api/supervisor/shutdown",
                 "/api/supervisor/status",
                 "/api/supervisor/stop-all-processes",
+                "/api/supervisor/timeout-status",
             ]
         );
     }

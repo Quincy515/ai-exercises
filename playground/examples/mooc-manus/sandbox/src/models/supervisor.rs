@@ -103,6 +103,22 @@ impl SupervisorActionResult {
     }
 }
 
+/// Supervisor超时销毁模型
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+pub struct SupervisorTimeout {
+    /// 超时设置状态
+    pub status: Option<String>,
+    /// 超时销毁是否激活
+    #[serde(default)]
+    pub active: bool,
+    /// 销毁时间，使用 ISO-8601 UTC 字符串表示
+    pub shutdown_time: Option<String>,
+    /// 超时时间, 单位为分钟
+    pub timeout_minutes: Option<usize>,
+    /// 超时剩余秒数
+    pub remaining_seconds: Option<usize>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +210,16 @@ mod tests {
         assert_eq!(processes.len(), 1);
         assert_eq!(processes[0].name, "app");
         assert_eq!(processes[0].pid, 42);
+    }
+
+    #[test]
+    fn supervisor_timeout_default_represents_an_inactive_timer() {
+        let timeout = SupervisorTimeout::default();
+
+        assert_eq!(timeout.status, None);
+        assert!(!timeout.active);
+        assert_eq!(timeout.shutdown_time, None);
+        assert_eq!(timeout.timeout_minutes, None);
+        assert_eq!(timeout.remaining_seconds, None);
     }
 }

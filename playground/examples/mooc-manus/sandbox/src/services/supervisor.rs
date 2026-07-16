@@ -3,7 +3,7 @@ use std::{
         Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
@@ -25,7 +25,7 @@ use tracing::error;
 use crate::{
     core::Settings,
     exceptions::AppException,
-    models::{ProcessInfo, SupervisorActionResult, SupervisorProcessAction},
+    models::{ProcessInfo, SupervisorActionResult, SupervisorProcessAction, SupervisorTimeout},
 };
 
 const SUPERVISOR_SOCKET_PATH: &str = "/tmp/supervisor.sock";
@@ -36,6 +36,8 @@ const START_ALL_PROCESSES_METHOD: &str = "supervisor.startAllProcesses";
 const SHUTDOWN_METHOD: &str = "supervisor.shutdown";
 const SUPERVISOR_ACTION_SUCCESS_STATUS: i32 = 80;
 pub const SUPERVISOR_RESTART_HELPER_ARG: &str = "--supervisor-restart-helper";
+/// 自动保活中间件每次请求默认延长的分钟数。
+pub const DEFAULT_TIMEOUT_EXTENSION_MINUTES: usize = 3;
 #[cfg(unix)]
 const RESTART_LOCK_PATH: &str = "/tmp/sandbox-supervisor-restart.lock";
 const RESTART_HELPER_DELAY: Duration = Duration::from_millis(500);
@@ -66,17 +68,20 @@ static RESTART_SCHEDULED: AtomicBool = AtomicBool::new(false);
 pub struct SupervisorService {
     /// Supervisor 用于 XML-RPC 通信的 Unix Socket 文件路径。
     rpc_url: String,
-    /// 当前自动销毁定时器。
+    /// 当前自动销毁任务与自动续期模式。
     ///
-    /// `None` 表示没有激活超时销毁；`Some` 同时保存计划销毁时间和取消句柄，
-    /// 避免“状态显示已激活，实际任务却不存在”这一类状态不一致问题。
-    shutdown_timer: Mutex<Option<ShutdownTimer>>,
-    /// 是否开启自动保活。
-    ///
-    /// 本节先保存开关；后续请求中间件可以在每次调用接口时读取它，
-    /// 决定是否重新设置定时器并延长沙箱存活时间。服务会通过 `Arc` 被多个
-    /// Axum 请求共享，因此使用 `AtomicBool` 完成无锁的并发读写。
-    expand_enabled: AtomicBool,
+    /// 两个字段必须在同一临界区修改，确保手动设置固定租约时，中间件无法
+    /// 同时追加自动续期分钟数。
+    timeout_state: Mutex<TimeoutState>,
+}
+
+/// Supervisor 超时销毁的完整共享状态。
+#[derive(Debug)]
+struct TimeoutState {
+    /// `None` 表示没有激活超时销毁；`Some` 保存截止时间和取消句柄。
+    timer: Option<ShutdownTimer>,
+    /// 普通 API 请求是否允许自动延长当前租约。
+    expand_enabled: bool,
 }
 
 /// 一次正在执行的沙箱自动销毁计划。
@@ -86,6 +91,11 @@ struct ShutdownTimer {
     ///
     /// `Instant` 不受系统时间校准影响，比日历时间更适合计算进程内倒计时。
     shutdown_time: Instant,
+    /// 面向 API 展示的关闭时间。
+    ///
+    /// 倒计时仍以 `Instant` 为准；`SystemTime` 只用于转换成可跨进程理解的
+    /// ISO-8601 UTC 字符串。
+    shutdown_at: SystemTime,
     /// 定时任务取消句柄，对应课程实现中 `shutdown_task.cancel()` 的职责。
     cancel: oneshot::Sender<()>,
 }
@@ -120,8 +130,10 @@ impl SupervisorService {
     pub(crate) fn with_rpc_url(rpc_url: impl Into<String>) -> Self {
         Self {
             rpc_url: rpc_url.into(),
-            shutdown_timer: Mutex::new(None),
-            expand_enabled: AtomicBool::new(true),
+            timeout_state: Mutex::new(TimeoutState {
+                timer: None,
+                expand_enabled: true,
+            }),
         }
     }
 
@@ -130,78 +142,220 @@ impl SupervisorService {
     /// 先完成 RPC 客户端状态初始化，再调用 `setup_timer()` 保存销毁时间并启动任务。
     fn with_shutdown_timeout(rpc_url: impl Into<String>, shutdown_timeout: Duration) -> Self {
         let service = Self::with_rpc_url(rpc_url);
-        service.setup_timer(shutdown_timeout);
+        if let Err(err) = service.setup_timer(shutdown_timeout) {
+            error!(error = %err, "创建 Supervisor 超时销毁定时器失败");
+        }
         service
     }
 
-    /// 获取定时器状态锁；即使其他线程持锁时发生 panic，也尽量取回内部状态完成清理。
-    fn lock_shutdown_timer(&self) -> MutexGuard<'_, Option<ShutdownTimer>> {
-        self.shutdown_timer
+    /// 获取超时状态锁；即使其他线程持锁时发生 panic，也尽量取回内部状态完成清理。
+    fn lock_timeout_state(&self) -> MutexGuard<'_, TimeoutState> {
+        self.timeout_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// 返回是否配置了沙箱超时销毁，即当前是否存在有效定时器。
     pub fn timeout_active(&self) -> bool {
-        self.shutdown_time().is_some()
+        self.lock_timeout_state().timer.is_some()
     }
 
     /// 返回当前计划关闭 Supervisor 的时间点；未激活时返回 `None`。
     pub fn shutdown_time(&self) -> Option<Instant> {
-        self.lock_shutdown_timer()
+        self.lock_timeout_state()
+            .timer
             .as_ref()
             .map(|timer| timer.shutdown_time)
     }
 
     /// 只读获取是否开启自动保活。
     pub fn expand_enabled(&self) -> bool {
-        self.expand_enabled.load(Ordering::Acquire)
+        self.lock_timeout_state().expand_enabled
     }
 
     /// 开启自动保活。
     ///
     /// 这里只修改开关；后续中间件收到下一次 API 请求时才会重新设置销毁时间。
     pub fn enable_expand(&self) {
-        self.expand_enabled.store(true, Ordering::Release);
+        self.lock_timeout_state().expand_enabled = true;
     }
 
     /// 关闭自动保活。
     ///
     /// 已创建的定时器继续倒计时，后续 API 请求不会再自动延长它。
     pub fn disable_expand(&self) {
-        self.expand_enabled.store(false, Ordering::Release);
+        self.lock_timeout_state().expand_enabled = false;
     }
 
     /// 传递超时时长并创建定时器，在时间结束后关闭 supervisord 主进程。
-    fn setup_timer(&self, timeout: Duration) {
-        // 1. 计算销毁时间。极端配置发生时间溢出时不创建无效任务。
-        let Some(shutdown_time) = Instant::now().checked_add(timeout) else {
-            error!("Supervisor 超时配置超出系统可表示范围");
-            return;
-        };
+    fn setup_timer(&self, timeout: Duration) -> Result<(), String> {
+        // 1. 计算销毁时间。倒计时使用单调时钟，API 展示使用系统时间。
+        let shutdown_time = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| "Supervisor 超时配置超出系统可表示范围".to_string())?;
+        let shutdown_at = SystemTime::now()
+            .checked_add(timeout)
+            .ok_or_else(|| "Supervisor 销毁时间超出系统可表示范围".to_string())?;
 
-        // 2. 创建一次性取消通道：Sender 由服务保存，Receiver 交给异步定时任务。
+        // 2. 在同一把锁内替换任务，保证并发续期不会覆盖彼此计算出的时间。
+        let mut state = self.lock_timeout_state();
+        self.replace_shutdown_timer(&mut state.timer, shutdown_time, shutdown_at)
+    }
+
+    /// 使用给定截止时间替换当前定时任务。
+    ///
+    /// 调用者必须持有 `timeout_state` 锁，使“读取旧截止时间 -> 计算新时间 ->
+    /// 替换任务”成为一个原子操作。新任务启动成功后才取消旧任务；启动失败时
+    /// 原任务继续有效。
+    fn replace_shutdown_timer(
+        &self,
+        timer: &mut Option<ShutdownTimer>,
+        shutdown_time: Instant,
+        shutdown_at: SystemTime,
+    ) -> Result<(), String> {
+        let timeout = shutdown_time.saturating_duration_since(Instant::now());
         let (cancel, cancel_rx) = oneshot::channel();
-        let previous_timer = self.lock_shutdown_timer().replace(ShutdownTimer {
+
+        // 3. 优先使用当前 Tokio 运行时；同步上下文由后台线程兜底。
+        spawn_shutdown_timer(self.rpc_url.clone(), timeout, cancel_rx)?;
+
+        // 4. 新任务已经启动，再取消旧任务并发布新的截止时间。
+        let previous_timer = timer.replace(ShutdownTimer {
             shutdown_time,
+            shutdown_at,
             cancel,
         });
-
-        // 3. 检测当前是否存在销毁任务；存在时先取消，再使用新的销毁时间。
-        // 取消失败表示旧任务已经结束，不影响新任务继续执行。
         if let Some(previous_timer) = previous_timer {
             let _ = previous_timer.cancel.send(());
         }
 
-        // 4. 获取 Tokio 事件循环并添加任务；运行时不可用时由后台线程兜底。
-        // 两种启动方式都失败时清空定时器，确保 `timeout_active()` 返回真实状态。
-        if let Err(err) = spawn_shutdown_timer(self.rpc_url.clone(), timeout, cancel_rx) {
-            let timer = self.lock_shutdown_timer().take();
-            if let Some(timer) = timer {
-                let _ = timer.cancel.send(());
-            }
-            error!(error = %err, "创建 Supervisor 超时销毁定时器失败");
+        Ok(())
+    }
+
+    /// 传递指定分钟数，激活定时销毁任务。
+    pub fn activate_timeout(
+        &self,
+        minutes: Option<usize>,
+    ) -> Result<SupervisorTimeout, AppException> {
+        // 1. 未传分钟数时使用系统配置的默认值。
+        let timeout_minutes = minutes.unwrap_or_else(|| Settings::load().server_timeout_minutes);
+        let timeout = timeout_duration(timeout_minutes)?;
+
+        // 2. 更新关闭时间，并使用新的定时器替换当前任务。
+        let shutdown_time = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| AppException::bad_request("超时时间超出系统可表示范围"))?;
+        let shutdown_at = SystemTime::now()
+            .checked_add(timeout)
+            .ok_or_else(|| AppException::bad_request("销毁时间超出系统可表示范围"))?;
+        let mut state = self.lock_timeout_state();
+        self.replace_shutdown_timer(&mut state.timer, shutdown_time, shutdown_at)
+            .map_err(Self::timeout_error)?;
+        state.expand_enabled = false;
+
+        // 3. 手动设置固定租约时，在同一临界区关闭自动保活。
+        Ok(supervisor_timeout(
+            Some("timeout_activated"),
+            state.timer.as_ref(),
+            Some(timeout_minutes),
+        ))
+    }
+
+    /// 在当前剩余时长上继续增加指定分钟数，未传时默认增加 3 分钟。
+    pub fn extend_timeout(
+        &self,
+        minutes: Option<usize>,
+    ) -> Result<SupervisorTimeout, AppException> {
+        // 1. 读取延长分钟数。
+        let extension_minutes = minutes.unwrap_or(DEFAULT_TIMEOUT_EXTENSION_MINUTES);
+        let extension = timeout_duration(extension_minutes)?;
+        let mut state = self.lock_timeout_state();
+        let result = self.extend_timeout_locked(&mut state.timer, extension)?;
+
+        // 2. 手动延长固定租约时，在同一临界区关闭自动保活。
+        state.expand_enabled = false;
+        Ok(result)
+    }
+
+    /// 自动续期入口：只有定时器已激活且自动保活开启时才延长。
+    ///
+    /// 模式检查与定时器替换共用一把锁，避免中间件与手动管理接口并发时
+    /// 修改固定租约。
+    pub fn auto_extend_timeout(&self, minutes: usize) -> Result<bool, AppException> {
+        let extension = timeout_duration(minutes)?;
+        let mut state = self.lock_timeout_state();
+        if !state.expand_enabled || state.timer.is_none() {
+            return Ok(false);
         }
+
+        self.extend_timeout_locked(&mut state.timer, extension)?;
+        Ok(true)
+    }
+
+    /// 调用者持有 `timeout_state` 锁时，延长当前定时器。
+    fn extend_timeout_locked(
+        &self,
+        timer: &mut Option<ShutdownTimer>,
+        extension: Duration,
+    ) -> Result<SupervisorTimeout, AppException> {
+        let current = timer
+            .as_ref()
+            .ok_or_else(|| AppException::bad_request("超时销毁未激活, 请核实后重试"))?;
+
+        // 1. 先计算非负剩余时间，再增加指定分钟数。
+        // 旧任务已经到期时从当前时刻重新计时，避免延长后仍得到过去的截止时间。
+        let now = Instant::now();
+        let remaining = current.shutdown_time.saturating_duration_since(now);
+        let timeout = remaining
+            .checked_add(extension)
+            .ok_or_else(|| AppException::bad_request("延长后的超时时间超出系统可表示范围"))?;
+        let shutdown_time = now
+            .checked_add(timeout)
+            .ok_or_else(|| AppException::bad_request("延长后的超时时间超出系统可表示范围"))?;
+        let shutdown_at = SystemTime::now()
+            .checked_add(timeout)
+            .ok_or_else(|| AppException::bad_request("延长后的销毁时间超出系统可表示范围"))?;
+        let timeout_minutes = duration_minutes_ceil(timeout);
+
+        // 2. 在仍持有状态锁时替换任务，多个并发请求会逐个累加而不会丢失分钟数。
+        self.replace_shutdown_timer(timer, shutdown_time, shutdown_at)
+            .map_err(Self::timeout_error)?;
+
+        Ok(supervisor_timeout(
+            Some("timeout_extended"),
+            timer.as_ref(),
+            Some(timeout_minutes),
+        ))
+    }
+
+    /// 取消超时销毁设置，并恢复自动保活配置。
+    pub fn cancel_timeout(&self) -> SupervisorTimeout {
+        // 1. 在同一临界区取出任务并恢复自动保活模式。
+        let mut state = self.lock_timeout_state();
+        let timer = state.timer.take();
+        state.expand_enabled = true;
+        drop(state);
+
+        let Some(timer) = timer else {
+            return SupervisorTimeout {
+                status: Some("no_timeout_active".to_string()),
+                ..SupervisorTimeout::default()
+            };
+        };
+
+        // 2. 取消销毁任务。接收端已经结束时发送会失败，此时任务无需再次取消。
+        let _ = timer.cancel.send(());
+
+        SupervisorTimeout {
+            status: Some("timeout_cancelled".to_string()),
+            ..SupervisorTimeout::default()
+        }
+    }
+
+    /// 获取当前 Supervisor 超时销毁状态。
+    pub fn get_timeout_status(&self) -> SupervisorTimeout {
+        let state = self.lock_timeout_state();
+        supervisor_timeout(None, state.timer.as_ref(), None)
     }
 
     /// 获取当前 Supervisor 管理的所有进程信息。
@@ -452,20 +606,103 @@ impl SupervisorService {
         error!(error = %msg, "重启 Supervisor 进程服务失败");
         AppException::internal(msg)
     }
+
+    fn timeout_error(err: String) -> AppException {
+        let msg = format!("设置Supervisor超时销毁失败: {err}");
+        error!(error = %msg, "设置 Supervisor 超时销毁失败");
+        AppException::internal(msg)
+    }
 }
 
 impl Drop for SupervisorService {
     fn drop(&mut self) {
         // 服务状态释放时取消尚未到期的任务，避免后台任务继续关闭已结束的沙箱实例。
         let timer = self
-            .shutdown_timer
+            .timeout_state
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .timer
             .take();
         if let Some(timer) = timer {
             let _ = timer.cancel.send(());
         }
     }
+}
+
+/// 将分钟数转换为 `Duration`，同时拒绝没有业务意义的 0 分钟和整数溢出。
+fn timeout_duration(minutes: usize) -> Result<Duration, AppException> {
+    if minutes == 0 {
+        return Err(AppException::bad_request("超时时间必须大于0分钟"));
+    }
+
+    let seconds = u64::try_from(minutes)
+        .ok()
+        .and_then(|minutes| minutes.checked_mul(60))
+        .ok_or_else(|| AppException::bad_request("超时时间超出系统可表示范围"))?;
+    Ok(Duration::from_secs(seconds))
+}
+
+/// 将当前定时器转换为 API 响应模型。
+fn supervisor_timeout(
+    status: Option<&str>,
+    timer: Option<&ShutdownTimer>,
+    timeout_minutes: Option<usize>,
+) -> SupervisorTimeout {
+    let Some(timer) = timer else {
+        return SupervisorTimeout::default();
+    };
+    let remaining = timer
+        .shutdown_time
+        .saturating_duration_since(Instant::now());
+    let shutdown_time = format_system_time_iso8601(timer.shutdown_at);
+
+    SupervisorTimeout {
+        status: status.map(str::to_string),
+        active: true,
+        shutdown_time,
+        timeout_minutes,
+        remaining_seconds: Some(duration_seconds_ceil(remaining)),
+    }
+}
+
+/// 向上取整可以避免刚设置 600 秒后，接口立即显示成 599 秒。
+fn duration_seconds_ceil(duration: Duration) -> usize {
+    usize::try_from(duration.as_millis().div_ceil(1_000)).unwrap_or(usize::MAX)
+}
+
+fn duration_minutes_ceil(duration: Duration) -> usize {
+    usize::try_from(duration.as_millis().div_ceil(60_000)).unwrap_or(usize::MAX)
+}
+
+/// 将 `SystemTime` 格式化为不带小数秒的 ISO-8601 UTC 时间。
+///
+/// 这里使用公历日期换算，避免为了一个展示字段增加完整日期时间依赖。
+fn format_system_time_iso8601(time: SystemTime) -> Option<String> {
+    let timestamp = time.duration_since(UNIX_EPOCH).ok()?.as_secs();
+    let days = i64::try_from(timestamp / 86_400).ok()?;
+    let seconds_of_day = timestamp % 86_400;
+
+    // 将 Unix epoch 之后的天数转换为公历年月日。
+    let shifted_days = days.checked_add(719_468)?;
+    let era = shifted_days.div_euclid(146_097);
+    let day_of_era = shifted_days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+
+    let hour = seconds_of_day / 3_600;
+    let minute = seconds_of_day % 3_600 / 60;
+    let second = seconds_of_day % 60;
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"
+    ))
 }
 
 /// 创建 Supervisor 关闭定时任务。
@@ -1668,5 +1905,235 @@ mod tests {
         server.abort();
         let _ = server.await;
         std::fs::remove_file(socket_path).expect("test socket should be removed");
+    }
+
+    #[tokio::test]
+    async fn activate_timeout_replaces_the_deadline_and_reports_the_new_lease() {
+        let service = SupervisorService::with_shutdown_timeout(
+            "/tmp/test-supervisor.sock",
+            Duration::from_secs(60),
+        );
+        let before = Instant::now();
+
+        let result = service
+            .activate_timeout(Some(10))
+            .expect("explicit timeout should activate");
+
+        assert_eq!(result.status.as_deref(), Some("timeout_activated"));
+        assert!(result.active);
+        assert_eq!(result.timeout_minutes, Some(10));
+        assert!(result.shutdown_time.is_some());
+        assert!(
+            result
+                .remaining_seconds
+                .is_some_and(|seconds| seconds <= 600)
+        );
+        assert!(
+            result
+                .remaining_seconds
+                .is_some_and(|seconds| seconds >= 599)
+        );
+        assert!(
+            service
+                .shutdown_time()
+                .is_some_and(|deadline| deadline >= before + Duration::from_secs(599))
+        );
+    }
+
+    #[tokio::test]
+    async fn activate_timeout_without_minutes_uses_the_configured_default() {
+        let service = SupervisorService::with_rpc_url("/tmp/test-supervisor.sock");
+
+        let result = service
+            .activate_timeout(None)
+            .expect("missing minutes should use Settings");
+
+        assert_eq!(result.timeout_minutes, Some(60));
+        assert!(service.timeout_active());
+    }
+
+    #[tokio::test]
+    async fn extend_timeout_adds_to_the_existing_deadline_and_defaults_to_three_minutes() {
+        let service = SupervisorService::with_shutdown_timeout(
+            "/tmp/test-supervisor.sock",
+            Duration::from_secs(60),
+        );
+        let before = service
+            .shutdown_time()
+            .expect("initial timeout should be active");
+
+        let result = service
+            .extend_timeout(None)
+            .expect("missing extension should default to three minutes");
+        let after = service
+            .shutdown_time()
+            .expect("extended timeout should remain active");
+
+        assert_eq!(result.status.as_deref(), Some("timeout_extended"));
+        assert_eq!(result.timeout_minutes, Some(4));
+        assert!(after >= before + Duration::from_secs(179));
+        assert!(after <= before + Duration::from_secs(181));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_extensions_are_accumulated_without_losing_minutes() {
+        let service = Arc::new(SupervisorService::with_shutdown_timeout(
+            "/tmp/test-supervisor.sock",
+            Duration::from_secs(60),
+        ));
+        let before = service
+            .shutdown_time()
+            .expect("initial timeout should be active");
+        let mut tasks = Vec::new();
+
+        for _ in 0..8 {
+            let service = Arc::clone(&service);
+            tasks.push(tokio::spawn(async move {
+                service
+                    .extend_timeout(Some(1))
+                    .expect("concurrent extension should succeed");
+            }));
+        }
+        for task in tasks {
+            task.await.expect("extension task should finish");
+        }
+
+        let after = service
+            .shutdown_time()
+            .expect("extended timeout should remain active");
+        assert!(after >= before + Duration::from_secs(479));
+        assert!(after <= before + Duration::from_secs(481));
+    }
+
+    #[tokio::test]
+    async fn cancel_timeout_cancels_the_timer_and_restores_automatic_extension() {
+        let service = SupervisorService::with_shutdown_timeout(
+            "/tmp/test-supervisor.sock",
+            Duration::from_secs(60),
+        );
+        service.disable_expand();
+
+        let result = service.cancel_timeout();
+
+        assert_eq!(result.status.as_deref(), Some("timeout_cancelled"));
+        assert!(!result.active);
+        assert!(!service.timeout_active());
+        assert!(service.expand_enabled());
+        assert_eq!(service.get_timeout_status(), SupervisorTimeout::default());
+    }
+
+    #[tokio::test]
+    async fn cancel_timeout_reports_when_no_timer_is_active() {
+        let service = SupervisorService::with_rpc_url("/tmp/test-supervisor.sock");
+
+        let result = service.cancel_timeout();
+
+        assert_eq!(result.status.as_deref(), Some("no_timeout_active"));
+        assert!(!result.active);
+        assert!(service.expand_enabled());
+    }
+
+    #[tokio::test]
+    async fn extend_timeout_rejects_an_inactive_timer() {
+        let service = SupervisorService::with_rpc_url("/tmp/test-supervisor.sock");
+
+        let error = service
+            .extend_timeout(Some(3))
+            .expect_err("inactive timeout cannot be extended");
+
+        assert_eq!(error.status_code, axum::http::StatusCode::BAD_REQUEST);
+        assert!(error.msg.contains("未激活"));
+    }
+
+    #[tokio::test]
+    async fn extending_an_expired_timer_starts_the_new_lease_from_now() {
+        let service = SupervisorService::with_shutdown_timeout(
+            "/tmp/test-supervisor.sock",
+            Duration::from_secs(60),
+        );
+        {
+            let mut state = service.lock_timeout_state();
+            let timer = state.timer.as_mut().expect("timeout should be active");
+            timer.shutdown_time = Instant::now()
+                .checked_sub(Duration::from_secs(120))
+                .expect("past deadline should be representable");
+            timer.shutdown_at = SystemTime::now()
+                .checked_sub(Duration::from_secs(120))
+                .expect("past wall clock should be representable");
+        }
+        let before = Instant::now();
+
+        service
+            .extend_timeout(Some(1))
+            .expect("expired timeout should be extendable");
+
+        assert!(
+            service
+                .shutdown_time()
+                .is_some_and(|deadline| deadline >= before + Duration::from_secs(59))
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_management_rejects_zero_minutes() {
+        let service = SupervisorService::with_shutdown_timeout(
+            "/tmp/test-supervisor.sock",
+            Duration::from_secs(60),
+        );
+
+        let activate_error = service
+            .activate_timeout(Some(0))
+            .expect_err("zero-minute activation should fail");
+        let extend_error = service
+            .extend_timeout(Some(0))
+            .expect_err("zero-minute extension should fail");
+
+        assert_eq!(
+            activate_error.status_code,
+            axum::http::StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            extend_error.status_code,
+            axum::http::StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_timeout_mode_atomically_blocks_automatic_extension() {
+        let service = SupervisorService::with_shutdown_timeout(
+            "/tmp/test-supervisor.sock",
+            Duration::from_secs(60),
+        );
+
+        service
+            .activate_timeout(Some(10))
+            .expect("manual activation should succeed");
+        let manual_deadline = service
+            .shutdown_time()
+            .expect("manual timeout should be active");
+
+        let extended = service
+            .auto_extend_timeout(DEFAULT_TIMEOUT_EXTENSION_MINUTES)
+            .expect("automatic extension decision should succeed");
+
+        assert!(!extended);
+        assert_eq!(service.shutdown_time(), Some(manual_deadline));
+        assert!(!service.expand_enabled());
+    }
+
+    #[test]
+    fn shutdown_time_is_formatted_as_iso_8601_utc() {
+        assert_eq!(
+            format_system_time_iso8601(UNIX_EPOCH),
+            Some("1970-01-01T00:00:00Z".to_string())
+        );
+        assert_eq!(
+            format_system_time_iso8601(
+                UNIX_EPOCH
+                    .checked_add(Duration::from_secs(1_700_000_000))
+                    .expect("known timestamp should be representable")
+            ),
+            Some("2023-11-14T22:13:20Z".to_string())
+        );
     }
 }
