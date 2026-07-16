@@ -6,6 +6,11 @@ use crate::domain::models::ToolResult;
 
 #[async_trait]
 pub trait Browser: Send + Sync {
+    /// 清理浏览器会话持有的页面与连接资源。
+    async fn cleanup(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// 获取当前浏览器页面的内容源码
     async fn view_page(&self) -> Result<ToolResult<String>>;
 

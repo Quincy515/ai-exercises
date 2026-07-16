@@ -28,6 +28,7 @@ use super::browser_fun::{
 
 const MAX_CONTENT_CHARS: usize = 50_000;
 const MAX_INIT_RETRIES: usize = 5;
+const BROWSER_INIT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(15);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const PAGE_LOAD_TIMEOUT: Duration = Duration::from_secs(15);
 const PAGE_LOAD_CHECK_INTERVAL: Duration = Duration::from_secs(5);
@@ -50,6 +51,8 @@ pub struct ChromiumoxideBrowser {
     /// 当前浏览器会话。
     /// Current browser session.
     session: Arc<Mutex<Option<BrowserSession>>>,
+    /// 已有 Chromium 的 CDP 地址；为空时由当前进程启动本地 Chromium。
+    cdp_url: Option<String>,
 }
 
 struct BrowserSession {
@@ -57,8 +60,31 @@ struct BrowserSession {
     page: Page,
     handler: Option<tokio::task::JoinHandle<()>>,
     last_used: Instant,
-    _temp_dir: tempfile::TempDir,
+    _temp_dir: Option<tempfile::TempDir>,
+    owns_browser: bool,
     interactive_elements_cache: Vec<InteractiveElement>,
+}
+
+struct AbortTaskOnDrop(Option<tokio::task::JoinHandle<()>>);
+
+impl AbortTaskOnDrop {
+    fn new(task: tokio::task::JoinHandle<()>) -> Self {
+        Self(Some(task))
+    }
+
+    fn disarm(mut self) -> tokio::task::JoinHandle<()> {
+        self.0
+            .take()
+            .expect("abort task guard should contain a task")
+    }
+}
+
+impl Drop for AbortTaskOnDrop {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -77,6 +103,15 @@ impl ChromiumoxideBrowser {
         // 浏览器相关
         Self {
             session: Arc::new(Mutex::new(None)),
+            cdp_url: None,
+        }
+    }
+
+    /// 使用 CDP 地址连接已经运行的 Chromium。
+    pub fn from_cdp_url(cdp_url: impl Into<String>) -> Self {
+        Self {
+            session: Arc::new(Mutex::new(None)),
+            cdp_url: Some(cdp_url.into()),
         }
     }
 
@@ -112,20 +147,45 @@ impl ChromiumoxideBrowser {
     /// 初始化并确保资源是可用的。
     /// Initialize and verify browser resources.
     async fn initialize(&self) -> Result<BrowserSession> {
+        self.initialize_with_policy(
+            MAX_INIT_RETRIES,
+            BROWSER_INIT_ATTEMPT_TIMEOUT,
+            Duration::from_secs(1),
+        )
+        .await
+    }
+
+    async fn initialize_with_policy(
+        &self,
+        max_retries: usize,
+        attempt_timeout: Duration,
+        mut retry_interval: Duration,
+    ) -> Result<BrowserSession> {
         // 1.定义重试次数+重试延迟确保资源存在
-        let mut retry_interval = Duration::from_secs(1);
         let mut last_error = None;
 
         // 2.循环开始资源构建
-        for attempt in 0..MAX_INIT_RETRIES {
-            match BrowserSession::launch().await {
-                Ok(session) => return Ok(session),
-                Err(error) => {
+        for attempt in 0..max_retries {
+            match tokio::time::timeout(
+                attempt_timeout,
+                BrowserSession::open(self.cdp_url.as_deref()),
+            )
+            .await
+            {
+                Ok(Ok(session)) => return Ok(session),
+                result => {
                     // 10.清除所有资源
-                    last_error = Some(error.to_string());
+                    last_error = Some(match result {
+                        Ok(Err(error)) => error.to_string(),
+                        Err(_) => format!(
+                            "浏览器初始化单次尝试超过 {} 秒",
+                            attempt_timeout.as_secs_f64()
+                        ),
+                        Ok(Ok(_)) => unreachable!(),
+                    });
 
                     // 11.判断重试次数是否等于最大重试次数
-                    if attempt == MAX_INIT_RETRIES - 1 {
+                    if attempt + 1 == max_retries {
                         break;
                     }
 
@@ -138,12 +198,12 @@ impl ChromiumoxideBrowser {
 
         Err(anyhow!(
             "初始化Chromiumoxide浏览器失败(已重试{}次): {}",
-            MAX_INIT_RETRIES,
+            max_retries,
             last_error.unwrap_or_else(|| "未知错误".to_string())
         ))
     }
 
-    async fn cleanup(&self) {
+    async fn cleanup_session(&self) {
         let session = {
             let mut guard = self.session.lock().await;
             guard.take()
@@ -392,7 +452,50 @@ impl Default for ChromiumoxideBrowser {
     }
 }
 
+impl Drop for ChromiumoxideBrowser {
+    fn drop(&mut self) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let session = Arc::clone(&self.session);
+        runtime.spawn(async move {
+            let current = session.lock().await.take();
+            if let Some(current) = current {
+                current.shutdown().await;
+            }
+        });
+    }
+}
+
 impl BrowserSession {
+    async fn open(cdp_url: Option<&str>) -> Result<Self> {
+        match cdp_url {
+            Some(cdp_url) => Self::connect(cdp_url).await,
+            None => Self::launch().await,
+        }
+    }
+
+    async fn connect(cdp_url: &str) -> Result<Self> {
+        let (browser, mut handler) = ChromeBrowser::connect(cdp_url)
+            .await
+            .with_context(|| format!("连接沙箱 Chromium CDP 地址 {cdp_url} 失败"))?;
+        let handler = AbortTaskOnDrop::new(tokio::spawn(async move {
+            while handler.next().await.is_some() {}
+        }));
+        let page = browser.new_page("about:blank").await?;
+        let handler = handler.disarm();
+
+        Ok(Self {
+            browser,
+            page,
+            handler: Some(handler),
+            last_used: Instant::now(),
+            _temp_dir: None,
+            owns_browser: false,
+            interactive_elements_cache: Vec::new(),
+        })
+    }
+
     async fn launch() -> Result<Self> {
         // 3.创建隔离的浏览器用户目录，避免服务端工具污染用户本机 Chrome。
         let temp_dir = tempfile::Builder::new()
@@ -417,17 +520,21 @@ impl BrowserSession {
             .build()
             .map_err(|error| anyhow!("构建 chromiumoxide 浏览器配置失败: {error}"))?;
         let (browser, mut handler) = ChromeBrowser::launch(config).await?;
-        let handler = tokio::spawn(async move { while handler.next().await.is_some() {} });
+        let handler = AbortTaskOnDrop::new(tokio::spawn(async move {
+            while handler.next().await.is_some() {}
+        }));
 
         // 6.创建工具专用空白页面。
         let page = browser.new_page("about:blank").await?;
+        let handler = handler.disarm();
 
         Ok(Self {
             browser,
             page,
             handler: Some(handler),
             last_used: Instant::now(),
-            _temp_dir: temp_dir,
+            _temp_dir: Some(temp_dir),
+            owns_browser: true,
             interactive_elements_cache: Vec::new(),
         })
     }
@@ -444,9 +551,11 @@ impl BrowserSession {
         // 6.判断当前页面是否关闭：chromiumoxide 没有同步 is_closed，这里执行最佳努力关闭
         let _ = self.page.clone().close().await;
 
-        // 7.关闭当前适配器拥有的 Chrome 子进程，并等待进程退出。
-        let _ = self.browser.close().await;
-        let _ = self.browser.wait().await;
+        // 7.只有本地启动的 Chrome 才由当前适配器关闭；远程 CDP 会话仅断开连接。
+        if self.owns_browser {
+            let _ = self.browser.close().await;
+            let _ = self.browser.wait().await;
+        }
 
         // 8.停止 chromiumoxide handler；临时用户目录随 TempDir drop 自动回收。
         if let Some(handler) = self.handler.take() {
@@ -466,6 +575,11 @@ impl Drop for BrowserSession {
 
 #[async_trait]
 impl Browser for ChromiumoxideBrowser {
+    async fn cleanup(&self) -> Result<()> {
+        self.cleanup_session().await;
+        Ok(())
+    }
+
     /// 获取当前网页的内容(内容+可交互元素列表)
     async fn view_page(&self) -> Result<ToolResult<String>> {
         // 1.确保页面存在
@@ -515,7 +629,7 @@ impl Browser for ChromiumoxideBrowser {
 
     /// 重启并跳转到指定URL
     async fn restart(&self, url: &str) -> Result<ToolResult<String>> {
-        self.cleanup().await;
+        self.cleanup_session().await;
         self.navigate(url).await
     }
 
@@ -806,5 +920,42 @@ fn failure(message: impl Into<String>) -> ToolResult<String> {
         success: false,
         message: Some(message.into()),
         data: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{future::pending, time::Duration};
+
+    use tokio::net::TcpListener;
+
+    use super::ChromiumoxideBrowser;
+
+    #[test]
+    fn stores_the_remote_cdp_url() {
+        let browser = ChromiumoxideBrowser::from_cdp_url("http://172.18.0.2:9222");
+
+        assert_eq!(browser.cdp_url.as_deref(), Some("http://172.18.0.2:9222"));
+    }
+
+    #[tokio::test]
+    async fn bounds_each_remote_cdp_connection_attempt() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _connection = listener.accept().await.unwrap();
+            pending::<()>().await;
+        });
+        let browser = ChromiumoxideBrowser::from_cdp_url(format!("http://{address}"));
+
+        let result = browser
+            .initialize_with_policy(1, Duration::from_millis(20), Duration::ZERO)
+            .await;
+        server.abort();
+
+        let error = result
+            .err()
+            .expect("the hanging CDP endpoint should time out");
+        assert!(error.to_string().contains("浏览器初始化单次尝试超过"));
     }
 }

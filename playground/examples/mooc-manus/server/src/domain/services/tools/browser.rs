@@ -326,6 +326,10 @@ impl BaseTool for BrowserTool {
         &self.definitions
     }
 
+    async fn cleanup(&mut self) -> Result<()> {
+        self.browser.cleanup().await
+    }
+
     async fn call_tool(&self, tool_name: &str, kwargs: ToolArguments) -> Result<ToolResult<Value>> {
         let result = match tool_name {
             "browser_view" => self.browser_view().await?,
@@ -406,6 +410,7 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq)]
     enum BrowserCall {
+        Cleanup,
         ViewPage,
         Navigate(String),
         Restart(String),
@@ -437,6 +442,11 @@ mod tests {
 
     #[async_trait]
     impl Browser for MockBrowser {
+        async fn cleanup(&self) -> Result<()> {
+            self.calls.lock().unwrap().push(BrowserCall::Cleanup);
+            Ok(())
+        }
+
         async fn view_page(&self) -> Result<ToolResult<String>> {
             Ok(self.record(BrowserCall::ViewPage, "view"))
         }
@@ -532,6 +542,15 @@ mod tests {
         };
 
         (BrowserTool::new(Box::new(browser)), calls)
+    }
+
+    #[tokio::test]
+    async fn cleanup_releases_the_browser_session() {
+        let (mut tool, calls) = browser_tool();
+
+        tool.cleanup().await.unwrap();
+
+        assert_eq!(*calls.lock().unwrap(), vec![BrowserCall::Cleanup]);
     }
 
     #[test]
