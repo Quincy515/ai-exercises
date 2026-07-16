@@ -43,7 +43,7 @@ workers:
   #   - BackgroundAsync - Workers operate asynchronously in the background, processing tasks with async capabilities.
   mode: BackgroundAsync
 
-  
+
 
 # Mailer Configuration.
 mailer:
@@ -126,3 +126,19 @@ settings:
     # access_key_id: '{{ get_env(name="R2_ACCESS_KEY_ID", default="") }}'
     # secret_access_key: '{{ get_env(name="R2_SECRET_ACCESS_KEY", default="") }}'
     # region: auto
+
+  # Sandbox Configuration / 沙箱配置
+  sandbox:
+    # 已有沙箱地址；留空时由后续 Docker 适配器创建容器
+    address: '{{ get_env(name="SANDBOX_ADDRESS", default="") }}'
+    # 创建容器时使用的镜像和容器名前缀
+    image: '{{ get_env(name="SANDBOX_IMAGE", default="lenexus-sandbox") }}'
+    name_prefix: '{{ get_env(name="SANDBOX_NAME_PREFIX", default="lenexus-sandbox") }}'
+    # 沙箱过期时间（分钟）与 Docker 网络
+    ttl_minutes: {{ get_env(name="SANDBOX_TTL_MINUTES", default=60) }}
+    network: '{{ get_env(name="SANDBOX_NETWORK", default="lenexus-network") }}'
+    # Chrome 启动参数与代理配置
+    chrome_args: '{{ get_env(name="SANDBOX_CHROME_ARGS", default="") }}'
+    https_proxy: '{{ get_env(name="SANDBOX_HTTPS_PROXY", default="") }}'
+    http_proxy: '{{ get_env(name="SANDBOX_HTTP_PROXY", default="") }}'
+    no_proxy: '{{ get_env(name="SANDBOX_NO_PROXY", default="") }}'
