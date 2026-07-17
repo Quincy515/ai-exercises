@@ -1,5 +1,6 @@
 mod arguments;
 
+pub mod a2a;
 pub mod base;
 pub mod browser;
 pub mod file;
@@ -7,6 +8,7 @@ pub mod mcp;
 pub mod search;
 pub mod shell;
 
+pub use a2a::*;
 pub use base::*;
 pub use browser::*;
 pub use file::*;
