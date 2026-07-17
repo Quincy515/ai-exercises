@@ -1,4 +1,10 @@
-use std::{any::Any, collections::BTreeMap, error::Error, fmt};
+use std::{
+    any::Any,
+    collections::BTreeMap,
+    error::Error,
+    fmt,
+    ops::{Deref, DerefMut},
+};
 
 use axum::{
     Json,
@@ -17,7 +23,29 @@ const APP_ERROR_LOG_MSG: &str = "沙箱发生错误";
 const PANIC_LOG_MSG: &str = "沙箱服务发生未定义异常";
 
 /// 错误响应附加数据 / extra error response data.
-pub type ErrorData = BTreeMap<String, String>;
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct ErrorData(BTreeMap<String, String>);
+
+impl<const N: usize> From<[(String, String); N]> for ErrorData {
+    fn from(entries: [(String, String); N]) -> Self {
+        Self(BTreeMap::from(entries))
+    }
+}
+
+impl Deref for ErrorData {
+    type Target = BTreeMap<String, String>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for ErrorData {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 /// 应用基础异常 / base application error.
 #[derive(Debug, Clone)]

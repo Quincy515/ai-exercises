@@ -11,6 +11,7 @@ pub mod supervisor;
 
 #[derive(OpenApi)]
 #[openapi(
+    components(schemas(exceptions::ErrorData)),
     paths(
         file::read_file,
         file::write_file,
@@ -119,6 +120,27 @@ mod tests {
         assert!(
             json.contains(r#""file":{"type":"string","format":"binary""#),
             "upload file schema should use string/binary: {json}"
+        );
+    }
+
+    #[test]
+    fn error_response_schema_uses_registered_error_data_component() {
+        let openapi = ApiDoc::openapi();
+        let components = openapi
+            .components
+            .as_ref()
+            .expect("OpenAPI document should contain components");
+        let json = openapi
+            .to_json()
+            .expect("OpenAPI document should serialize");
+
+        assert!(
+            components.schemas.contains_key("ErrorData"),
+            "error response data schema should be registered: {json}"
+        );
+        assert!(
+            !json.contains("#/components/schemas/BTreeMap"),
+            "OpenAPI document should not expose an unresolved BTreeMap reference: {json}"
         );
     }
 }
