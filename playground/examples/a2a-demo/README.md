@@ -1,7 +1,7 @@
 ```
 export DEEPSEEK_API_KEY=
 
-cargo run
+cargo run --bin a2a-demo
 
 curl 'http://localhost:9999/jsonrpc' \
   -X POST \
@@ -22,4 +22,6 @@ curl 'http://localhost:9999/jsonrpc' \
       }
     }
   }'
+
+cargo run --bin client
 ```
