@@ -224,6 +224,92 @@ pub async fn set_mcp_server_enabled(
     format::json(McpConfigResponse::from(config))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/app_configs/a2a-servers",
+    tag = "设置模块",
+    summary = "获取 A2A 服务器列表",
+    description = "获取 MoocManus 项目中的所有已配置的 A2A 服务列表",
+    responses(
+        (status = 200, description = "A2A 服务器列表获取成功"),
+        (status = 500, description = "A2A 服务器列表获取失败")
+    )
+)]
+#[debug_handler]
+pub async fn get_a2a_servers(State(_ctx): State<AppContext>) -> Result<Response> {
+    // 获取 A2A 服务列表，具体业务逻辑将在后续课程实现。
+    todo!()
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/app_configs/a2a-servers",
+    tag = "设置模块",
+    summary = "新增 A2A 服务器",
+    description = "为 MoocManus 项目新增 A2A 服务器",
+    request_body = String,
+    responses(
+        (status = 200, description = "A2A 服务器新增成功"),
+        (status = 500, description = "A2A 服务器新增失败")
+    )
+)]
+#[debug_handler]
+pub async fn create_a2a_server(
+    State(_ctx): State<AppContext>,
+    Json(_base_url): Json<String>,
+) -> Result<Response> {
+    // 新增 A2A 服务器，具体业务逻辑将在后续课程实现。
+    todo!()
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/app_configs/a2a-servers/{a2a_id}/delete",
+    tag = "设置模块",
+    summary = "删除 A2A 服务器",
+    description = "根据 A2A 服务 id 标识删除指定的 A2A 服务",
+    params(
+        ("a2a_id" = String, Path, description = "A2A 服务唯一标识")
+    ),
+    responses(
+        (status = 200, description = "A2A 服务器删除成功"),
+        (status = 500, description = "A2A 服务器删除失败")
+    )
+)]
+#[debug_handler]
+pub async fn delete_a2a_server(
+    State(_ctx): State<AppContext>,
+    Path(_a2a_id): Path<String>,
+) -> Result<Response> {
+    // 删除 A2A 服务器，具体业务逻辑将在后续课程实现。
+    todo!()
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/app_configs/a2a-servers/{a2a_id}/enabled",
+    tag = "设置模块",
+    summary = "更新 A2A 服务的启用状态",
+    description = "启用或禁用指定的 A2A 服务",
+    request_body = bool,
+    params(
+        ("a2a_id" = String, Path, description = "A2A 服务唯一标识")
+    ),
+    responses(
+        (status = 200, description = "A2A 服务启用状态更新成功"),
+        (status = 500, description = "A2A 服务启用状态更新失败")
+    )
+)]
+#[debug_handler]
+pub async fn set_a2a_server_enabled(
+    State(_ctx): State<AppContext>,
+    Path(_a2a_id): Path<String>,
+    Json(_enabled): Json<bool>,
+) -> Result<Response> {
+    // 更新 A2A 服务的启用状态，具体业务逻辑将在后续课程实现。
+    todo!()
+}
+
 pub fn routes() -> Routes {
     Routes::new()
         .prefix("/api/app_configs")
@@ -257,6 +343,24 @@ pub fn routes() -> Routes {
             openapi(
                 post(set_mcp_server_enabled),
                 routes!(set_mcp_server_enabled),
+            ),
+        )
+        .add(
+            "/a2a-servers",
+            openapi(
+                get(get_a2a_servers).post(create_a2a_server),
+                routes!(get_a2a_servers, create_a2a_server),
+            ),
+        )
+        .add(
+            "/a2a-servers/{a2a_id}/delete",
+            openapi(post(delete_a2a_server), routes!(delete_a2a_server)),
+        )
+        .add(
+            "/a2a-servers/{a2a_id}/enabled",
+            openapi(
+                post(set_a2a_server_enabled),
+                routes!(set_a2a_server_enabled),
             ),
         )
 }

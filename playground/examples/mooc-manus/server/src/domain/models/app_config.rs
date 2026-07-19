@@ -2,6 +2,7 @@ use std::{borrow::Cow, collections::HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use uuid::Uuid;
 use validator::{Validate, ValidationError};
 
 /// 语言模型配置
@@ -132,6 +133,36 @@ pub struct McpConfig {
     pub mcp_servers: HashMap<String, McpServerConfig>,
 }
 
+/// A2A 服务配置
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Validate)]
+pub struct A2aServerConfig {
+    /// 唯一标识
+    #[serde(default = "default_a2a_server_id")]
+    pub id: String,
+    /// 服务基础 URL
+    pub base_url: String,
+    /// 服务是否启用
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+fn default_a2a_server_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+/// A2A 配置
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, Validate)]
+#[serde(default)]
+pub struct A2aConfig {
+    /// A2A 服务配置
+    #[validate(nested)]
+    pub a2a_servers: Vec<A2aServerConfig>,
+}
+
 /// 应用配置信息，包含Agent配置、LLM提供商、A2A网络、MCP服务配置等
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default, Validate)]
 pub struct AppConfig {
@@ -147,11 +178,19 @@ pub struct AppConfig {
     #[serde(default)]
     #[validate(nested)]
     pub mcp_config: McpConfig,
+    /// A2A 配置
+    #[serde(default)]
+    #[validate(nested)]
+    pub a2a_config: A2aConfig,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentConfig, AppConfig, LlmConfig, McpConfig, McpServerConfig, McpTransport};
+    use super::{
+        A2aConfig, A2aServerConfig, AgentConfig, AppConfig, LlmConfig, McpConfig, McpServerConfig,
+        McpTransport,
+    };
+    use uuid::Uuid;
     use validator::Validate;
 
     #[test]
@@ -165,6 +204,7 @@ mod tests {
         );
         assert_eq!(config.agent_config, AgentConfig::default());
         assert_eq!(config.mcp_config, McpConfig::default());
+        assert_eq!(config.a2a_config, A2aConfig::default());
         assert_eq!(
             McpServerConfig::default().transport,
             McpTransport::StreamableHttp
@@ -221,6 +261,42 @@ mod tests {
 
         assert_eq!(config.agent_config, AgentConfig::default());
         assert_eq!(config.mcp_config, McpConfig::default());
+        assert_eq!(config.a2a_config, A2aConfig::default());
+    }
+
+    #[test]
+    fn generates_unique_a2a_server_ids() {
+        let first: A2aServerConfig = serde_json::from_value(serde_json::json!({
+            "base_url": "https://first-agent.example.com"
+        }))
+        .unwrap();
+        let second: A2aServerConfig = serde_json::from_value(serde_json::json!({
+            "base_url": "https://second-agent.example.com"
+        }))
+        .unwrap();
+
+        assert!(Uuid::parse_str(&first.id).is_ok());
+        assert!(Uuid::parse_str(&second.id).is_ok());
+        assert_ne!(first.id, second.id);
+    }
+
+    #[test]
+    fn fills_a2a_id_and_enabled_when_deserializing() {
+        let server: A2aServerConfig = serde_json::from_value(serde_json::json!({
+            "base_url": "https://agent.example.com"
+        }))
+        .unwrap();
+
+        assert!(Uuid::parse_str(&server.id).is_ok());
+        assert_eq!(server.base_url, "https://agent.example.com");
+        assert!(server.enabled);
+    }
+
+    #[test]
+    fn requires_a2a_base_url_like_python_model() {
+        let result = serde_json::from_value::<A2aServerConfig>(serde_json::json!({}));
+
+        assert!(result.is_err());
     }
 
     #[test]
