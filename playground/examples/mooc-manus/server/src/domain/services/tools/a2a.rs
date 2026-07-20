@@ -115,8 +115,12 @@ impl A2AClientManager {
             .await;
 
             match result {
-                Ok(agent_card) => {
+                Ok(mut agent_card) => {
                     // 3.存储到 agent_cards
+                    agent_card.insert(
+                        "enabled".to_string(),
+                        Value::Bool(a2a_server_config.enabled),
+                    );
                     self.agent_cards
                         .insert(a2a_server_config.id.clone(), agent_card);
                 }
@@ -461,6 +465,7 @@ mod tests {
         assert!(manager.initialized);
         assert_eq!(manager.agent_cards().len(), 1);
         assert_eq!(manager.agent_cards()["remote"]["name"], "测试 Agent");
+        assert_eq!(manager.agent_cards()["remote"]["enabled"], true);
 
         let result = manager.invoke("remote", "分析这段代码").await;
         assert!(result.success);
@@ -555,7 +560,9 @@ mod tests {
             .invoke("get_remote_agent_cards", Map::new())
             .await
             .unwrap();
-        assert_eq!(cards.data.unwrap()[0]["id"], "remote");
+        let cards = cards.data.unwrap();
+        assert_eq!(cards[0]["id"], "remote");
+        assert_eq!(cards[0]["enabled"], true);
 
         let result = tool
             .invoke(

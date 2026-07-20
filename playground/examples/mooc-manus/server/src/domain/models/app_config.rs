@@ -146,6 +146,17 @@ pub struct A2aServerConfig {
     pub enabled: bool,
 }
 
+impl A2aServerConfig {
+    /// 根据服务基础 URL 创建默认启用的 A2A 服务配置。
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            id: default_a2a_server_id(),
+            base_url: base_url.into(),
+            enabled: default_enabled(),
+        }
+    }
+}
+
 fn default_a2a_server_id() -> String {
     Uuid::new_v4().to_string()
 }
@@ -278,6 +289,15 @@ mod tests {
         assert!(Uuid::parse_str(&first.id).is_ok());
         assert!(Uuid::parse_str(&second.id).is_ok());
         assert_ne!(first.id, second.id);
+    }
+
+    #[test]
+    fn creates_enabled_a2a_server_with_unique_id() {
+        let server = A2aServerConfig::new("http://localhost:9999");
+
+        assert!(Uuid::parse_str(&server.id).is_ok());
+        assert_eq!(server.base_url, "http://localhost:9999");
+        assert!(server.enabled);
     }
 
     #[test]

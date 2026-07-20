@@ -1,9 +1,12 @@
 use anyhow::Result;
+use serde_json::{Map, Value};
 use validator::Validate;
 
-use crate::domain::models::{AgentConfig, AppConfig, LlmConfig, McpConfig, McpTransport};
+use crate::domain::models::{
+    A2aConfig, A2aServerConfig, AgentConfig, AppConfig, LlmConfig, McpConfig, McpTransport,
+};
 use crate::domain::repositories::AppConfigRepository;
-use crate::domain::services::tools::McpClientManager;
+use crate::domain::services::tools::{a2a::A2AClientManager, McpClientManager};
 
 /// MCP 服务器及其工具信息。
 /// MCP server information with cached tool names.
@@ -210,18 +213,133 @@ impl<R: AppConfigRepository> AppConfigService<R> {
         self.app_config_repository.save(config.clone()).await?;
         Ok(config.mcp_config)
     }
+
+    /// 根据传递的配置新增 A2A 服务器。
+    pub async fn create_a2a_server(&self, base_url: &str) -> Result<A2aConfig> {
+        // 1. 获取当前的应用配置
+        let mut config = self.load_app_config().await?;
+
+        // 2. 往数据中新增 A2A 服务（在新增之前其实可以检测下当前 Agent 是否存在）
+        let a2a_server_config = A2aServerConfig::new(base_url);
+        config.a2a_config.a2a_servers.push(a2a_server_config);
+        config.a2a_config.validate()?;
+
+        // 3. 调用数据仓库更新
+        self.app_config_repository.save(config.clone()).await?;
+        Ok(config.a2a_config)
+    }
+
+    /// 获取 A2A 服务列表。
+    pub async fn get_a2a_servers(&self) -> Result<Vec<A2aServerAgentInfo>> {
+        // 1. 获取当前的应用配置
+        let app_config = self.load_app_config().await?;
+
+        // 2. 构建 A2A 客户端管理器，对配置信息不过滤
+        let mut a2a_client_manager = A2AClientManager::new(Some(app_config.a2a_config.clone()));
+
+        let result: Result<Vec<A2aServerAgentInfo>> = async {
+            // 3. 初始化 A2A 客户端管理器
+            a2a_client_manager.initialize().await?;
+
+            // 4. 获取 Agent 卡片列表
+            let agent_cards = a2a_client_manager.agent_cards();
+
+            // 5. 组装响应结构
+            let mut a2a_servers = agent_cards
+                .iter()
+                .map(|(id, agent_card)| A2aServerAgentInfo::from_agent_card(id.clone(), agent_card))
+                .collect::<Vec<_>>();
+            a2a_servers.sort_by(|left, right| left.id.cmp(&right.id));
+
+            Ok(a2a_servers)
+        }
+        .await;
+
+        // 6. 清除客户端管理器资源
+        a2a_client_manager.cleanup().await;
+        result
+    }
+}
+
+/// A2A 服务器及其远程 Agent 卡片信息。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct A2aServerAgentInfo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub input_modes: Vec<String>,
+    pub output_modes: Vec<String>,
+    pub streaming: bool,
+    pub push_notifications: bool,
+    pub enabled: bool,
+}
+
+impl A2aServerAgentInfo {
+    fn from_agent_card(id: String, agent_card: &Map<String, Value>) -> Self {
+        let capabilities = agent_card.get("capabilities").and_then(Value::as_object);
+
+        Self {
+            id,
+            name: string_field(agent_card, "name"),
+            description: string_field(agent_card, "description"),
+            input_modes: string_list_field(agent_card, "defaultInputModes"),
+            output_modes: string_list_field(agent_card, "defaultOutputModes"),
+            streaming: capabilities
+                .and_then(|value| value.get("streaming"))
+                .and_then(Value::as_bool)
+                .unwrap_or_default(),
+            push_notifications: capabilities
+                .and_then(|value| value.get("push_notifications"))
+                .and_then(Value::as_bool)
+                .unwrap_or_default(),
+            enabled: agent_card
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or_default(),
+        }
+    }
+}
+
+fn string_field(agent_card: &Map<String, Value>, field: &str) -> String {
+    agent_card
+        .get(field)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn string_list_field(agent_card: &Map<String, Value>, field: &str) -> Vec<String> {
+    agent_card
+        .get(field)
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        net::Ipv4Addr,
+        sync::{Arc, Mutex},
+    };
 
     use anyhow::Result;
     use async_trait::async_trait;
+    use axum::{routing::get, Json, Router};
+    use tokio::net::TcpListener;
 
-    use super::{AppConfigService, McpServerNotFound};
+    use super::{A2aServerAgentInfo, AppConfigService, McpServerNotFound};
     use crate::domain::{
-        models::{AgentConfig, AppConfig, LlmConfig, McpConfig, McpServerConfig, McpTransport},
+        models::{
+            A2aConfig, A2aServerConfig, AgentConfig, AppConfig, LlmConfig, McpConfig,
+            McpServerConfig, McpTransport,
+        },
         repositories::AppConfigRepository,
     };
 
@@ -414,6 +532,73 @@ mod tests {
         let updated = service.set_mcp_server_enabled("demo", true).await.unwrap();
 
         assert!(updated.mcp_servers.get("demo").unwrap().enabled);
+    }
+
+    #[tokio::test]
+    async fn creates_enabled_a2a_server_and_saves_it() {
+        let service = AppConfigService::new(MemoryAppConfigRepository::new(AppConfig::default()));
+
+        let updated = service
+            .create_a2a_server("http://localhost:9999")
+            .await
+            .unwrap();
+
+        assert_eq!(updated.a2a_servers.len(), 1);
+        assert_eq!(updated.a2a_servers[0].base_url, "http://localhost:9999");
+        assert!(updated.a2a_servers[0].enabled);
+        assert_eq!(service.load_app_config().await.unwrap().a2a_config, updated);
+    }
+
+    #[tokio::test]
+    async fn combines_agent_card_with_local_a2a_enabled_state() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/.well-known/agent-card.json",
+            get(|| async {
+                Json(serde_json::json!({
+                    "name": "Writer Agent",
+                    "description": "撰写文章",
+                    "enabled": true,
+                    "defaultInputModes": ["text"],
+                    "defaultOutputModes": ["text", "file"],
+                    "capabilities": {
+                        "streaming": true,
+                        "push_notifications": true
+                    }
+                }))
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let service = AppConfigService::new(MemoryAppConfigRepository::new(AppConfig {
+            a2a_config: A2aConfig {
+                a2a_servers: vec![A2aServerConfig {
+                    id: "writer-agent".to_string(),
+                    base_url: format!("http://{address}"),
+                    enabled: false,
+                }],
+            },
+            ..AppConfig::default()
+        }));
+
+        let servers = service.get_a2a_servers().await.unwrap();
+        server.abort();
+
+        assert_eq!(
+            servers,
+            vec![A2aServerAgentInfo {
+                id: "writer-agent".to_string(),
+                name: "Writer Agent".to_string(),
+                description: "撰写文章".to_string(),
+                input_modes: vec!["text".to_string()],
+                output_modes: vec!["text".to_string(), "file".to_string()],
+                streaming: true,
+                push_notifications: true,
+                enabled: false,
+            }]
+        );
     }
 
     fn streamable_http_server(url: &str, enabled: bool) -> McpServerConfig {

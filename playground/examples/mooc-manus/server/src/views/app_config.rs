@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use utoipa::ToSchema;
 
-use crate::application::services::McpServerToolInfo;
+use crate::application::services::app_config_service::{A2aServerAgentInfo, McpServerToolInfo};
 use crate::domain::models::{AgentConfig, LlmConfig, McpConfig, McpServerConfig, McpTransport};
 
 /// LLM 配置更新请求。
@@ -279,14 +279,77 @@ pub struct McpServerEnabledRequest {
     pub enabled: bool,
 }
 
+/// 新增 A2A 服务器请求。
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+pub struct CreateA2aServerRequest {
+    /// A2A 服务基础 URL。
+    pub base_url: String,
+}
+
+/// A2A 服务列表条目。
+#[derive(Clone, Debug, Default, Serialize, ToSchema)]
+pub struct ListA2aServerItem {
+    /// 唯一标识。
+    pub id: String,
+    /// Agent 名字。
+    pub name: String,
+    /// Agent 描述信息。
+    pub description: String,
+    /// 输入模态。
+    pub input_modes: Vec<String>,
+    /// 输出模态。
+    pub output_modes: Vec<String>,
+    /// 是否支持流式响应。
+    pub streaming: bool,
+    /// 是否支持推送通知。
+    pub push_notifications: bool,
+    /// 启用状态。
+    pub enabled: bool,
+}
+
+impl From<A2aServerAgentInfo> for ListA2aServerItem {
+    fn from(server: A2aServerAgentInfo) -> Self {
+        Self {
+            id: server.id,
+            name: server.name,
+            description: server.description,
+            input_modes: server.input_modes,
+            output_modes: server.output_modes,
+            streaming: server.streaming,
+            push_notifications: server.push_notifications,
+            enabled: server.enabled,
+        }
+    }
+}
+
+/// 获取 A2A 服务列表响应结构。
+#[derive(Clone, Debug, Default, Serialize, ToSchema)]
+pub struct ListA2aServerResponse {
+    /// A2A 服务列表。
+    pub a2a_servers: Vec<ListA2aServerItem>,
+}
+
+impl From<Vec<A2aServerAgentInfo>> for ListA2aServerResponse {
+    fn from(servers: Vec<A2aServerAgentInfo>) -> Self {
+        Self {
+            a2a_servers: servers.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 fn default_mcp_enabled() -> bool {
     true
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ListMcpServerResponse, McpConfigRequest};
-    use crate::{application::services::McpServerToolInfo, domain::models::McpTransport};
+    use super::{
+        CreateA2aServerRequest, ListA2aServerResponse, ListMcpServerResponse, McpConfigRequest,
+    };
+    use crate::{
+        application::services::{app_config_service::A2aServerAgentInfo, McpServerToolInfo},
+        domain::models::McpTransport,
+    };
 
     #[test]
     fn accepts_empty_mcp_config_request_like_python_default() {
@@ -344,6 +407,41 @@ mod tests {
                         "tools": ["search", "read"]
                     }
                 ]
+            })
+        );
+    }
+
+    #[test]
+    fn supports_a2a_endpoint_payloads() {
+        let request: CreateA2aServerRequest = serde_json::from_value(serde_json::json!({
+            "base_url": "http://localhost:9999"
+        }))
+        .unwrap();
+        let response = ListA2aServerResponse::from(vec![A2aServerAgentInfo {
+            id: "writer-agent".to_string(),
+            name: "Writer Agent".to_string(),
+            description: "撰写文章".to_string(),
+            input_modes: vec!["text".to_string()],
+            output_modes: vec!["text".to_string()],
+            streaming: true,
+            push_notifications: false,
+            enabled: true,
+        }]);
+
+        assert_eq!(request.base_url, "http://localhost:9999");
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            serde_json::json!({
+                "a2a_servers": [{
+                    "id": "writer-agent",
+                    "name": "Writer Agent",
+                    "description": "撰写文章",
+                    "input_modes": ["text"],
+                    "output_modes": ["text"],
+                    "streaming": true,
+                    "push_notifications": false,
+                    "enabled": true
+                }]
             })
         );
     }

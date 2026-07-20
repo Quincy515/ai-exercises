@@ -11,7 +11,10 @@ use crate::{
     application::{error::AppError, services::app_config_service::McpServerNotFound},
     interfaces::service_dependencies,
     views::{
-        app_config::{McpConfigRequest, McpConfigResponse, McpServerEnabledRequest},
+        app_config::{
+            CreateA2aServerRequest, ListA2aServerResponse, McpConfigRequest, McpConfigResponse,
+            McpServerEnabledRequest,
+        },
         AgentConfigRequest, AgentConfigResponse, ListMcpServerResponse, LlmConfigRequest,
         LlmConfigResponse,
     },
@@ -231,14 +234,18 @@ pub async fn set_mcp_server_enabled(
     summary = "获取 A2A 服务器列表",
     description = "获取 MoocManus 项目中的所有已配置的 A2A 服务列表",
     responses(
-        (status = 200, description = "A2A 服务器列表获取成功"),
+        (status = 200, description = "A2A 服务器列表获取成功", body = ListA2aServerResponse),
         (status = 500, description = "A2A 服务器列表获取失败")
     )
 )]
 #[debug_handler]
-pub async fn get_a2a_servers(State(_ctx): State<AppContext>) -> Result<Response> {
-    // 获取 A2A 服务列表，具体业务逻辑将在后续课程实现。
-    todo!()
+pub async fn get_a2a_servers(State(ctx): State<AppContext>) -> Result<Response> {
+    let service = service_dependencies::get_app_config_service(&ctx);
+    let a2a_servers = service
+        .get_a2a_servers()
+        .await
+        .map_err(|err| AppError::internal("app_config.get_a2a_servers_failed", err.to_string()))?;
+    format::json(ListA2aServerResponse::from(a2a_servers))
 }
 
 #[utoipa::path(
@@ -247,19 +254,24 @@ pub async fn get_a2a_servers(State(_ctx): State<AppContext>) -> Result<Response>
     tag = "设置模块",
     summary = "新增 A2A 服务器",
     description = "为 MoocManus 项目新增 A2A 服务器",
-    request_body = String,
+    request_body = CreateA2aServerRequest,
     responses(
         (status = 200, description = "A2A 服务器新增成功"),
+        (status = 422, description = "A2A 服务器配置校验失败"),
         (status = 500, description = "A2A 服务器新增失败")
     )
 )]
 #[debug_handler]
 pub async fn create_a2a_server(
-    State(_ctx): State<AppContext>,
-    Json(_base_url): Json<String>,
+    State(ctx): State<AppContext>,
+    Json(request): Json<CreateA2aServerRequest>,
 ) -> Result<Response> {
-    // 新增 A2A 服务器，具体业务逻辑将在后续课程实现。
-    todo!()
+    let service = service_dependencies::get_app_config_service(&ctx);
+    service
+        .create_a2a_server(&request.base_url)
+        .await
+        .map_err(|err| map_app_config_error(err, "app_config.create_a2a_server_failed"))?;
+    format::json(())
 }
 
 #[utoipa::path(
