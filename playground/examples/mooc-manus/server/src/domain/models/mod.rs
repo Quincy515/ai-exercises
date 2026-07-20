@@ -6,6 +6,7 @@ pub mod memory;
 pub mod message;
 pub mod plan;
 pub mod search;
+pub mod session;
 pub mod tool_result;
 
 pub use app_config::{
@@ -23,4 +24,5 @@ pub use memory::{Memory, Message as MemoryMessage};
 pub use message::Message;
 pub use plan::{ExecutionStatus, Plan, Step};
 pub use search::{SearchResultItem, SearchResults};
+pub use session::{Session, SessionStatus};
 pub use tool_result::ToolResult;

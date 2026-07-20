@@ -4,4 +4,5 @@ pub use super::a2a_servers::Entity as A2aServers;
 pub use super::agent_configs::Entity as AgentConfigs;
 pub use super::llm_configs::Entity as LlmConfigs;
 pub use super::mcp_servers::Entity as McpServers;
+pub use super::sessions::Entity as Sessions;
 pub use super::users::Entity as Users;
