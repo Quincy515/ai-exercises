@@ -286,6 +286,12 @@ pub struct CreateA2aServerRequest {
     pub base_url: String,
 }
 
+/// A2A 服务启用状态更新请求。
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+pub struct A2aServerEnabledRequest {
+    pub enabled: bool,
+}
+
 /// A2A 服务列表条目。
 #[derive(Clone, Debug, Default, Serialize, ToSchema)]
 pub struct ListA2aServerItem {
@@ -344,7 +350,8 @@ fn default_mcp_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateA2aServerRequest, ListA2aServerResponse, ListMcpServerResponse, McpConfigRequest,
+        A2aServerEnabledRequest, CreateA2aServerRequest, ListA2aServerResponse,
+        ListMcpServerResponse, McpConfigRequest,
     };
     use crate::{
         application::services::{app_config_service::A2aServerAgentInfo, McpServerToolInfo},
@@ -417,6 +424,10 @@ mod tests {
             "base_url": "http://localhost:9999"
         }))
         .unwrap();
+        let enabled_request: A2aServerEnabledRequest = serde_json::from_value(serde_json::json!({
+            "enabled": false
+        }))
+        .unwrap();
         let response = ListA2aServerResponse::from(vec![A2aServerAgentInfo {
             id: "writer-agent".to_string(),
             name: "Writer Agent".to_string(),
@@ -429,6 +440,7 @@ mod tests {
         }]);
 
         assert_eq!(request.base_url, "http://localhost:9999");
+        assert!(!enabled_request.enabled);
         assert_eq!(
             serde_json::to_value(response).unwrap(),
             serde_json::json!({

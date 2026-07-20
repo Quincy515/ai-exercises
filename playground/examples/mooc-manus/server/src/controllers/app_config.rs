@@ -8,12 +8,15 @@ use loco_rs::prelude::*;
 use validator::ValidationErrors;
 
 use crate::{
-    application::{error::AppError, services::app_config_service::McpServerNotFound},
+    application::{
+        error::AppError,
+        services::app_config_service::{A2aServerNotFound, McpServerNotFound},
+    },
     interfaces::service_dependencies,
     views::{
         app_config::{
-            CreateA2aServerRequest, ListA2aServerResponse, McpConfigRequest, McpConfigResponse,
-            McpServerEnabledRequest,
+            A2aServerEnabledRequest, CreateA2aServerRequest, ListA2aServerResponse,
+            McpConfigRequest, McpConfigResponse, McpServerEnabledRequest,
         },
         AgentConfigRequest, AgentConfigResponse, ListMcpServerResponse, LlmConfigRequest,
         LlmConfigResponse,
@@ -285,16 +288,21 @@ pub async fn create_a2a_server(
     ),
     responses(
         (status = 200, description = "A2A 服务器删除成功"),
+        (status = 404, description = "A2A 服务器不存在"),
         (status = 500, description = "A2A 服务器删除失败")
     )
 )]
 #[debug_handler]
 pub async fn delete_a2a_server(
-    State(_ctx): State<AppContext>,
-    Path(_a2a_id): Path<String>,
+    State(ctx): State<AppContext>,
+    Path(a2a_id): Path<String>,
 ) -> Result<Response> {
-    // 删除 A2A 服务器，具体业务逻辑将在后续课程实现。
-    todo!()
+    let service = service_dependencies::get_app_config_service(&ctx);
+    service
+        .delete_a2a_server(&a2a_id)
+        .await
+        .map_err(|err| map_app_config_error(err, "app_config.delete_a2a_server_failed"))?;
+    format::json(())
 }
 
 #[utoipa::path(
@@ -303,23 +311,28 @@ pub async fn delete_a2a_server(
     tag = "设置模块",
     summary = "更新 A2A 服务的启用状态",
     description = "启用或禁用指定的 A2A 服务",
-    request_body = bool,
+    request_body = A2aServerEnabledRequest,
     params(
         ("a2a_id" = String, Path, description = "A2A 服务唯一标识")
     ),
     responses(
         (status = 200, description = "A2A 服务启用状态更新成功"),
+        (status = 404, description = "A2A 服务器不存在"),
         (status = 500, description = "A2A 服务启用状态更新失败")
     )
 )]
 #[debug_handler]
 pub async fn set_a2a_server_enabled(
-    State(_ctx): State<AppContext>,
-    Path(_a2a_id): Path<String>,
-    Json(_enabled): Json<bool>,
+    State(ctx): State<AppContext>,
+    Path(a2a_id): Path<String>,
+    Json(request): Json<A2aServerEnabledRequest>,
 ) -> Result<Response> {
-    // 更新 A2A 服务的启用状态，具体业务逻辑将在后续课程实现。
-    todo!()
+    let service = service_dependencies::get_app_config_service(&ctx);
+    service
+        .set_a2a_server_enabled(&a2a_id, request.enabled)
+        .await
+        .map_err(|err| map_app_config_error(err, "app_config.set_a2a_server_enabled_failed"))?;
+    format::json(())
 }
 
 pub fn routes() -> Routes {
@@ -378,7 +391,7 @@ pub fn routes() -> Routes {
 }
 
 fn map_app_config_error(err: anyhow::Error, code: &'static str) -> AppError {
-    if err.is::<McpServerNotFound>() {
+    if err.is::<McpServerNotFound>() || err.is::<A2aServerNotFound>() {
         AppError::business(StatusCode::NOT_FOUND, code, err.to_string(), None)
     } else if let Some(validation_errors) = err.downcast_ref::<ValidationErrors>() {
         let details = serde_json::to_value(validation_errors).unwrap_or_else(|_| {

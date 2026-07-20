@@ -259,7 +259,70 @@ impl<R: AppConfigRepository> AppConfigService<R> {
         a2a_client_manager.cleanup().await;
         result
     }
+
+    /// 根据传递的 id + enabled 更新服务启用状态。
+    pub async fn set_a2a_server_enabled(&self, a2a_id: &str, enabled: bool) -> Result<A2aConfig> {
+        // 1. 获取当前的应用配置
+        let mut config = self.load_app_config().await?;
+
+        // 2. 查找需要更新的 A2A 服务并判断是否存在
+        let server = config
+            .a2a_config
+            .a2a_servers
+            .iter_mut()
+            .find(|server| server.id == a2a_id)
+            .ok_or_else(|| A2aServerNotFound::new(a2a_id))?;
+
+        // 3. 如果存在则更新数据
+        server.enabled = enabled;
+
+        // 4. 调用数据仓库更新
+        self.app_config_repository.save(config.clone()).await?;
+        Ok(config.a2a_config)
+    }
+
+    /// 根据传递的 id 删除指定的 A2A 服务。
+    pub async fn delete_a2a_server(&self, a2a_id: &str) -> Result<A2aConfig> {
+        // 1. 获取当前的应用配置
+        let mut config = self.load_app_config().await?;
+
+        // 2. 计算需要删除位置的索引并判断是否存在
+        let index = config
+            .a2a_config
+            .a2a_servers
+            .iter()
+            .position(|server| server.id == a2a_id)
+            .ok_or_else(|| A2aServerNotFound::new(a2a_id))?;
+
+        // 3. 删除 A2A 服务器
+        config.a2a_config.a2a_servers.remove(index);
+
+        // 4. 调用数据仓库更新
+        self.app_config_repository.save(config.clone()).await?;
+        Ok(config.a2a_config)
+    }
 }
+
+#[derive(Debug)]
+pub struct A2aServerNotFound {
+    a2a_id: String,
+}
+
+impl A2aServerNotFound {
+    fn new(a2a_id: impl Into<String>) -> Self {
+        Self {
+            a2a_id: a2a_id.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for A2aServerNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "该A2A服务[{}]不存在，请核实后重试", self.a2a_id)
+    }
+}
+
+impl std::error::Error for A2aServerNotFound {}
 
 /// A2A 服务器及其远程 Agent 卡片信息。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -334,7 +397,7 @@ mod tests {
     use axum::{routing::get, Json, Router};
     use tokio::net::TcpListener;
 
-    use super::{A2aServerAgentInfo, AppConfigService, McpServerNotFound};
+    use super::{A2aServerAgentInfo, A2aServerNotFound, AppConfigService, McpServerNotFound};
     use crate::domain::{
         models::{
             A2aConfig, A2aServerConfig, AgentConfig, AppConfig, LlmConfig, McpConfig,
@@ -599,6 +662,38 @@ mod tests {
                 enabled: false,
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn updates_and_deletes_a2a_server_by_id() {
+        let service = AppConfigService::new(MemoryAppConfigRepository::new(AppConfig {
+            a2a_config: A2aConfig {
+                a2a_servers: vec![A2aServerConfig {
+                    id: "writer-agent".to_string(),
+                    base_url: "http://localhost:9999".to_string(),
+                    enabled: true,
+                }],
+            },
+            ..AppConfig::default()
+        }));
+
+        let updated = service
+            .set_a2a_server_enabled("writer-agent", false)
+            .await
+            .unwrap();
+        assert!(!updated.a2a_servers[0].enabled);
+
+        let updated = service.delete_a2a_server("writer-agent").await.unwrap();
+        assert!(updated.a2a_servers.is_empty());
+
+        let err = service
+            .set_a2a_server_enabled("writer-agent", true)
+            .await
+            .unwrap_err();
+        assert!(err.is::<A2aServerNotFound>());
+
+        let err = service.delete_a2a_server("writer-agent").await.unwrap_err();
+        assert!(err.is::<A2aServerNotFound>());
     }
 
     fn streamable_http_server(url: &str, enabled: bool) -> McpServerConfig {
