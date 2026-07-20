@@ -212,6 +212,7 @@ impl A2AClientManager {
 
 /// A2A 工具包，根据传递的配置完成 A2A 工具包的初始化
 pub struct A2ATool {
+    name: String,
     manager: Option<A2AClientManager>,
     definitions: Vec<ToolDefinition>,
     initialized: bool,
@@ -221,6 +222,7 @@ impl A2ATool {
     /// 构造函数，完成工具包初始化
     pub fn new() -> Self {
         Self {
+            name: "a2a".to_string(),
             manager: None,
             definitions: vec![
                 tool(
@@ -243,7 +245,7 @@ impl A2ATool {
                         (
                             "query".to_string(),
                             json!({
-                                "type": "query",
+                                "type": "string",
                                 "description": "需要分配给该远程 Agent 实现的任务/需求 query",
                             }),
                         ),
@@ -274,7 +276,7 @@ impl A2ATool {
         let manager = self
             .manager
             .as_ref()
-            .ok_or_else(|| anyhow!("A2A工具包未初始化"))?;
+            .ok_or_else(|| anyhow!("A2A 工具包未初始化"))?;
 
         // 1.重组结构，将 id 填充到 agent_card 中
         let agent_cards = manager
@@ -291,7 +293,7 @@ impl A2ATool {
         // 2.组装 ToolResult 响应
         Ok(ToolResult {
             success: true,
-            message: Some("获取Agent卡片信息列表成功".to_string()),
+            message: Some("获取 Agent 卡片信息列表成功".to_string()),
             data: Some(agent_cards),
         })
     }
@@ -301,7 +303,7 @@ impl A2ATool {
         let manager = self
             .manager
             .as_ref()
-            .ok_or_else(|| anyhow!("A2A工具包未初始化"))?;
+            .ok_or_else(|| anyhow!("A2A 工具包未初始化"))?;
         Ok(manager.invoke(id, query).await)
     }
 }
@@ -315,7 +317,7 @@ impl Default for A2ATool {
 #[async_trait]
 impl BaseTool for A2ATool {
     fn name(&self) -> &str {
-        "a2a"
+        &self.name
     }
 
     fn tool_definitions(&self) -> &[ToolDefinition] {
@@ -533,7 +535,7 @@ mod tests {
         );
         assert_eq!(
             call_agent["function"]["parameters"]["properties"]["query"]["type"],
-            "query"
+            "string"
         );
         assert_eq!(
             call_agent["function"]["parameters"]["required"],
