@@ -170,7 +170,7 @@ impl A2AClientManager {
                     "method": "message/send",
                     "params": {
                         "message": {
-                            "messageId": Uuid::new_v4().simple().to_string(),
+                            "messageId": Uuid::new_v4().to_string(),
                             "role": "user",
                             "parts": [
                                 {"kind": "text", "text": query},
@@ -475,6 +475,11 @@ mod tests {
         let request = server.request();
         assert_eq!(request["jsonrpc"], "2.0");
         assert_eq!(request["method"], "message/send");
+        // 消息标识使用带连字符的标准 UUID，便于远程 Agent 按统一格式解析。
+        let message_id = request["params"]["message"]["messageId"].as_str().unwrap();
+        let uuid = Uuid::parse_str(message_id).unwrap();
+        assert_eq!(message_id, uuid.hyphenated().to_string());
+        assert_eq!(uuid.get_version_num(), 4);
         assert_eq!(
             request["params"]["message"]["parts"],
             json!([{"kind": "text", "text": "分析这段代码"}])

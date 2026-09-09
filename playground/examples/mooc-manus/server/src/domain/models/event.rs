@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
@@ -384,8 +384,7 @@ impl Default for DoneEvent {
 
 /// 应用事件类型声明
 /// Application event union.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Plan(PlanEvent),
     Title(TitleEvent),
@@ -395,6 +394,94 @@ pub enum Event {
     Wait(WaitEvent),
     Error(ErrorEvent),
     Done(DoneEvent),
+}
+
+impl Serialize for Event {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // 保持原有扁平 JSON，同时防止公共 base 字段与 Rust 枚举变体不一致。
+        // 否则保存的是一种事件，重新读取时却会变成另一种事件。
+        match self {
+            Self::Plan(event) => {
+                serialize_typed_event(event, event.base.event_type, EventType::Plan, serializer)
+            }
+            Self::Title(event) => {
+                serialize_typed_event(event, event.base.event_type, EventType::Title, serializer)
+            }
+            Self::Step(event) => {
+                serialize_typed_event(event, event.base.event_type, EventType::Step, serializer)
+            }
+            Self::Message(event) => {
+                serialize_typed_event(event, event.base.event_type, EventType::Message, serializer)
+            }
+            Self::Tool(event) => {
+                serialize_typed_event(event, event.base.event_type, EventType::Tool, serializer)
+            }
+            Self::Wait(event) => {
+                serialize_typed_event(event, event.base.event_type, EventType::Wait, serializer)
+            }
+            Self::Error(event) => {
+                serialize_typed_event(event, event.base.event_type, EventType::Error, serializer)
+            }
+            Self::Done(event) => {
+                serialize_typed_event(event, event.base.event_type, EventType::Done, serializer)
+            }
+        }
+    }
+}
+
+/// 校验具体事件与类型标签，再复用该事件原有的序列化实现。
+fn serialize_typed_event<T, S>(
+    event: &T,
+    actual_type: EventType,
+    expected_type: EventType,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    T: Serialize,
+    S: Serializer,
+{
+    if actual_type != expected_type {
+        return Err(serde::ser::Error::custom(format!(
+            "event type mismatch: expected {expected_type:?}, found {actual_type:?}"
+        )));
+    }
+    event.serialize(serializer)
+}
+
+impl<'de> Deserialize<'de> for Event {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // 先读取 type，再只解析对应的具体事件，不能按变体顺序尝试匹配。
+        // TitleEvent 的字段都有默认值，按顺序尝试会把消息等误读为标题并丢失内容。
+        let value = Value::deserialize(deserializer)?;
+        let event_type = value
+            .get("type")
+            .ok_or_else(|| serde::de::Error::missing_field("type"))?;
+        let event_type: EventType =
+            serde_json::from_value(event_type.clone()).map_err(serde::de::Error::custom)?;
+
+        match event_type {
+            EventType::Plan => serde_json::from_value(value).map(Self::Plan),
+            EventType::Title => serde_json::from_value(value).map(Self::Title),
+            EventType::Step => serde_json::from_value(value).map(Self::Step),
+            EventType::Message => serde_json::from_value(value).map(Self::Message),
+            EventType::Tool => serde_json::from_value(value).map(Self::Tool),
+            EventType::Wait => serde_json::from_value(value).map(Self::Wait),
+            EventType::Error => serde_json::from_value(value).map(Self::Error),
+            EventType::Done => serde_json::from_value(value).map(Self::Done),
+            EventType::Empty => {
+                return Err(serde::de::Error::custom(
+                    "application event type must not be empty",
+                ));
+            }
+        }
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 fn new_event_id() -> String {
@@ -408,9 +495,11 @@ fn event_now() -> DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BaseEvent, BrowserToolContent, Event, EventType, McpToolContent, MessageEvent, MessageRole,
-        PlanEvent, TitleEvent, ToolContent, ToolEvent, ToolEventStatus,
+        BaseEvent, BrowserToolContent, DoneEvent, ErrorEvent, Event, EventType, McpToolContent,
+        MessageEvent, MessageRole, PlanEvent, PlanEventStatus, StepEvent, StepEventStatus,
+        TitleEvent, ToolContent, ToolEvent, ToolEventStatus, WaitEvent,
     };
+    use crate::domain::models::{File, Plan, Step, ToolResult};
     use serde_json::{json, Value};
     use uuid::Uuid;
 
@@ -465,6 +554,161 @@ mod tests {
         let value = serde_json::to_value(event).unwrap();
 
         assert_eq!(value.get("type"), Some(&Value::String("title".to_string())));
+    }
+
+    #[test]
+    fn all_event_variants_round_trip_without_losing_payload() {
+        let file = File {
+            filename: "学习笔记.md".to_string(),
+            filepath: "/workspace/学习笔记.md".to_string(),
+            size: 128,
+            ..File::default()
+        };
+        let step = Step {
+            result: Some("读取完成".to_string()),
+            attachments: vec![file.id.clone()],
+            ..Step::new("读取课程资料")
+        };
+        let events = [
+            (
+                "plan",
+                Event::Plan(PlanEvent {
+                    plan: Plan {
+                        steps: vec![step.clone()],
+                        ..Plan::new("学习上下文工程", "整理设计思路")
+                    },
+                    status: PlanEventStatus::Updated,
+                    ..PlanEvent::default()
+                }),
+            ),
+            (
+                "title",
+                Event::Title(TitleEvent {
+                    title: "课程学习笔记".to_string(),
+                    ..TitleEvent::default()
+                }),
+            ),
+            (
+                "step",
+                Event::Step(StepEvent {
+                    step,
+                    status: StepEventStatus::Completed,
+                    ..StepEvent::default()
+                }),
+            ),
+            (
+                "message",
+                Event::Message(MessageEvent {
+                    role: MessageRole::User,
+                    message: "请整理这份资料".to_string(),
+                    attachments: vec![file],
+                    ..MessageEvent::default()
+                }),
+            ),
+            (
+                "tool",
+                Event::Tool(ToolEvent {
+                    tool_call_id: "call-1".to_string(),
+                    tool_name: "filesystem".to_string(),
+                    tool_content: Some(ToolContent::Mcp(McpToolContent {
+                        result: json!({"contents": "课程内容"}),
+                    })),
+                    function_name: "read_file".to_string(),
+                    function_args: serde_json::from_value(json!({
+                        "path": "/workspace/学习笔记.md",
+                        "options": {"encoding": "utf-8"}
+                    }))
+                    .unwrap(),
+                    function_result: Some(ToolResult {
+                        success: true,
+                        message: Some("读取成功".to_string()),
+                        data: Some(json!({"contents": "课程内容", "bytes": 128})),
+                    }),
+                    status: ToolEventStatus::Called,
+                    ..ToolEvent::default()
+                }),
+            ),
+            ("wait", Event::Wait(WaitEvent::default())),
+            (
+                "error",
+                Event::Error(ErrorEvent {
+                    error: "文件读取失败".to_string(),
+                    ..ErrorEvent::default()
+                }),
+            ),
+            ("done", Event::Done(DoneEvent::default())),
+        ];
+
+        for (expected_type, event) in events {
+            // 验证数据库 JSON 往返同时保留具体变体、业务内容、id 和创建时间。
+            let value = serde_json::to_value(&event).unwrap();
+            assert_eq!(value["type"], expected_type);
+            assert!(value.get("base").is_none());
+            assert!(value.get("id").is_some());
+            assert!(value.get("created_at").is_some());
+            let restored: Event = serde_json::from_value(value).unwrap();
+            assert_eq!(restored, event, "{expected_type} event lost data");
+
+            let text = serde_json::to_string(&event).unwrap();
+            let restored: Event = serde_json::from_str(&text).unwrap();
+            assert_eq!(restored, event, "{expected_type} event lost data");
+        }
+    }
+
+    #[test]
+    fn event_rejects_unknown_type() {
+        let error = serde_json::from_value::<Event>(json!({"type": "future_event"}))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("unknown variant"), "{error}");
+        assert!(error.contains("future_event"), "{error}");
+    }
+
+    #[test]
+    fn event_requires_type_even_when_other_fields_match() {
+        let error = serde_json::from_value::<Event>(json!({"title": "缺少类型"}))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("missing field `type`"), "{error}");
+    }
+
+    #[test]
+    fn event_rejects_empty_base_event_type() {
+        let error = serde_json::from_value::<Event>(json!({"type": ""}))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("type must not be empty"), "{error}");
+    }
+
+    #[test]
+    fn malformed_tool_event_does_not_fall_back_to_title() {
+        let error = serde_json::from_value::<Event>(json!({
+            "type": "tool",
+            "title": "不能作为标题事件读取"
+        }))
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("tool_call_id"), "{error}");
+    }
+
+    #[test]
+    fn event_serialization_rejects_mismatched_variant_and_type() {
+        let event = Event::Message(MessageEvent {
+            base: BaseEvent {
+                event_type: EventType::Title,
+                ..BaseEvent::default()
+            },
+            message: "消息不能持久化为标题".to_string(),
+            ..MessageEvent::default()
+        });
+        let error = serde_json::to_value(event).unwrap_err().to_string();
+
+        assert!(error.contains("event type mismatch"), "{error}");
+        assert!(error.contains("expected Message, found Title"), "{error}");
     }
 
     #[test]
