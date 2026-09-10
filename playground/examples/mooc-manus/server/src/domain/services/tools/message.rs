@@ -50,7 +50,8 @@ impl MessageTool {
                                         "type": "array",
                                         "items": {"type": "string"}
                                     }
-                                ]
+                                ],
+                                "description": "(可选)与问题相关的文件或参考资料"
                             }),
                         ),
                         (
@@ -175,6 +176,10 @@ mod tests {
                 {"type": "string"},
                 {"type": "array", "items": {"type": "string"}}
             ])
+        );
+        assert_eq!(
+            ask["parameters"]["properties"]["attachments"]["description"],
+            "(可选)与问题相关的文件或参考资料"
         );
         assert_eq!(
             ask["parameters"]["properties"]["suggest_user_takeover"]["enum"],

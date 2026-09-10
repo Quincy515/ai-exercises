@@ -7,8 +7,8 @@ use tracing::{debug, info};
 use crate::domain::{
     external::{Browser, JsonParser, Llm, Sandbox, SearchEngine},
     models::{
-        AgentConfig, Event, ExecutionStatus, Message, MessageEvent, MessageRole, Plan,
-        PlanEventStatus, SessionStatus, TitleEvent,
+        AgentConfig, DoneEvent, Event, ExecutionStatus, Message, MessageEvent, MessageRole, Plan,
+        PlanEvent, PlanEventStatus, SessionStatus, Step, TitleEvent,
     },
     repositories::SessionRepository,
     services::{
@@ -179,9 +179,11 @@ impl BaseFlow for PlannerReActFlow {
         );
 
         let mut output = Vec::new();
+        // 更新计划发生在下一次状态循环中，因此保留刚执行步骤的快照。
+        // 这里持有 Step 的所有权，避免跨 `.await` 保存对 Plan 内部字段的借用。
+        let mut current_step: Option<Step> = None;
 
-        // 7. 状态机控制规划与执行。当前阶段到达 Updating 后交还控制权，
-        // 后续更新、汇总和完成分支会继续扩展这一循环。
+        // 7. 使用状态机控制规划、执行、更新、总结和完成的完整生命周期。
         loop {
             match self.status {
                 // 8. 空闲状态只负责进入规划阶段。
@@ -245,22 +247,74 @@ impl BaseFlow for PlannerReActFlow {
                     let plan_context = plan.clone();
                     let step = &mut plan.steps[step_index];
                     info!(step_id = step.id, description = %step.description.chars().take(50).collect::<String>(), "Planner&ReAct流开始执行步骤");
-                    output.extend(
-                        self.react
-                            .execute_step(&plan_context, step, &message)
-                            .await?,
-                    );
+                    let step_events = self
+                        .react
+                        .execute_step(&plan_context, step, &message)
+                        .await?;
+                    let waiting_for_user = step_events
+                        .iter()
+                        .any(|event| matches!(event, Event::Wait(_)));
+                    output.extend(step_events);
+
+                    // Vec<Event> 无法像异步事件流一样停在一次 yield 上。
+                    // 遇到 WaitEvent 时主动结束本轮调用，等待用户回复后从 Executing 恢复。
+                    if waiting_for_user {
+                        info!("Planner&ReAct流等待用户回复");
+                        return Ok(output);
+                    }
+                    current_step = Some(step.clone());
 
                     // 13. 步骤结束后压缩工具结果，控制上下文长度。
                     info!("压缩react Agent记忆/上下文");
                     self.react.compact_memory().await?;
                     self.status = FlowStatus::Updating;
                 }
-                // 本节只实现规划和执行分支，到达后续状态时停止本轮驱动，避免循环空转。
-                FlowStatus::Updating | FlowStatus::Summarizing | FlowStatus::Completed => break,
+                FlowStatus::Updating => {
+                    // 23. 流状态为更新，表示需要根据刚执行的步骤调整后续计划。
+                    info!("Planner&ReAct流开始更新计划");
+                    let step = current_step
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("规划与执行流缺少待更新步骤"))?;
+                    let plan = self
+                        .plan
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("规划与执行流缺少可更新计划"))?;
+                    output.extend(self.planner.update_plan(plan, step).await?);
+
+                    // 24. 更新完成后重新进入执行状态，读取新的首个未完成步骤。
+                    info!("Planner&ReAct流状态从updating变成executing");
+                    self.status = FlowStatus::Executing;
+                }
+                FlowStatus::Summarizing => {
+                    // 25. 流状态为总结中，表示全部子步骤已经执行完成。
+                    info!("Planner&ReAct流开始总结");
+                    output.extend(self.react.summarize().await?);
+
+                    // 26. 总结完成，流进入完成状态。
+                    info!("Planner&ReAct流状态从summarizing变成completed");
+                    self.status = FlowStatus::Completed;
+                }
+                FlowStatus::Completed => {
+                    // 27. 同步计划状态，并发送完成事件通知上层应用。
+                    if let Some(plan) = self.plan.as_mut() {
+                        plan.status = ExecutionStatus::Completed;
+                        output.push(Event::Plan(PlanEvent {
+                            plan: plan.clone(),
+                            status: PlanEventStatus::Completed,
+                            ..PlanEvent::default()
+                        }));
+                    }
+
+                    // 本次任务已经结束，回到空闲状态并跳出控制循环。
+                    self.status = FlowStatus::Idle;
+                    break;
+                }
             }
         }
 
+        // 28. DoneEvent 是整条事件流的结束标记，必须在退出控制循环后发送。
+        output.push(Event::Done(DoneEvent::default()));
+        info!("Planner&ReAct流处理任务消息已完毕");
         Ok(output)
     }
 
@@ -361,6 +415,13 @@ mod tests {
         }))
     }
 
+    fn summary_response(message: &str) -> Response {
+        assistant_json(json!({
+            "message": message,
+            "attachments": [],
+        }))
+    }
+
     fn ask_user_tool_call() -> LlmMessage {
         LlmMessage::from_iter([
             ("role".to_string(), json!("assistant")),
@@ -406,7 +467,7 @@ mod tests {
             config,
             llm,
             json_parser,
-            Vec::new(),
+            vec![Box::new(MessageTool::new())],
         );
 
         (
@@ -428,7 +489,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plans_and_executes_one_step_then_stops_at_updating() {
+    async fn runs_update_summary_and_completion_to_idle() {
         let repository = Arc::new(MemoryRepository::default());
         repository.insert_session(Session {
             id: "session-1".to_string(),
@@ -439,6 +500,8 @@ mod tests {
             vec![
                 plan_response(vec![Step::new("检查项目结构")]),
                 step_response("检查完成"),
+                plan_response(Vec::new()),
+                summary_response("项目整理完成。"),
             ],
         );
 
@@ -450,33 +513,97 @@ mod tests {
             }),
         )
         .await
-        .expect("状态机不应在 Updating 状态空转")
+        .expect("完整状态机应在完成后退出")
         .unwrap();
 
-        assert_eq!(flow.status(), FlowStatus::Updating);
-        assert!(!flow.done());
-        assert_eq!(events.len(), 6);
+        assert_eq!(flow.status(), FlowStatus::Idle);
+        assert!(flow.done());
+        assert_eq!(events.len(), 10);
         assert!(matches!(events[0], Event::Title(_)));
         assert!(matches!(events[1], Event::Message(_)));
-        assert!(matches!(events[2], Event::Plan(_)));
+        assert!(matches!(
+            events[2],
+            Event::Plan(PlanEvent {
+                status: PlanEventStatus::Created,
+                ..
+            })
+        ));
         assert!(matches!(events[3], Event::Step(_)));
         assert!(matches!(events[4], Event::Step(_)));
         assert!(matches!(events[5], Event::Message(_)));
-        assert!(!events.iter().any(|event| matches!(event, Event::Done(_))));
+        assert!(matches!(
+            events[6],
+            Event::Plan(PlanEvent {
+                status: PlanEventStatus::Updated,
+                ..
+            })
+        ));
+        assert!(matches!(events[7], Event::Message(_)));
+        assert!(matches!(
+            events[8],
+            Event::Plan(PlanEvent {
+                status: PlanEventStatus::Completed,
+                ..
+            })
+        ));
+        assert!(matches!(events[9], Event::Done(_)));
 
         let plan = flow.plan().unwrap();
-        assert_eq!(plan.status, ExecutionStatus::Running);
+        assert_eq!(plan.status, ExecutionStatus::Completed);
         assert_eq!(plan.steps[0].status, ExecutionStatus::Completed);
         assert_eq!(plan.steps[0].result.as_deref(), Some("检查完成"));
         assert_eq!(
             repository.session("session-1").unwrap().status,
             SessionStatus::Running
         );
-        assert_eq!(requests.lock().unwrap().len(), 2);
+        assert_eq!(requests.lock().unwrap().len(), 4);
     }
 
     #[tokio::test]
-    async fn empty_plan_moves_to_completed_without_running_react() {
+    async fn wait_event_pauses_before_updating_the_plan() {
+        let repository = Arc::new(MemoryRepository::default());
+        repository.insert_session(Session {
+            id: "session-1".to_string(),
+            ..Session::default()
+        });
+        let (mut flow, requests) = flow(
+            repository,
+            vec![
+                plan_response(vec![Step::new("等待用户确认")]),
+                ask_user_tool_call(),
+            ],
+        );
+
+        let events = flow
+            .invoke(Message {
+                message: "执行前请确认".to_string(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(flow.status(), FlowStatus::Executing);
+        assert!(!flow.done());
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        assert!(matches!(events.last(), Some(Event::Wait(_))));
+        assert!(!events.iter().any(|event| matches!(event, Event::Done(_))));
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event,
+                Event::Plan(PlanEvent {
+                    status: PlanEventStatus::Updated | PlanEventStatus::Completed,
+                    ..
+                })
+            )
+        }));
+        assert_eq!(
+            flow.plan().unwrap().steps[0].status,
+            ExecutionStatus::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_plan_completes_without_running_react() {
         let repository = Arc::new(MemoryRepository::default());
         repository.insert_session(Session {
             id: "session-1".to_string(),
@@ -486,13 +613,22 @@ mod tests {
 
         let events = flow.invoke(Message::default()).await.unwrap();
 
-        assert_eq!(flow.status(), FlowStatus::Completed);
+        assert_eq!(flow.status(), FlowStatus::Idle);
+        assert!(flow.done());
         assert_eq!(requests.lock().unwrap().len(), 1);
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 5);
         let Event::Plan(PlanEvent { plan, .. }) = &events[2] else {
             panic!("第三个事件必须是计划事件");
         };
         assert!(plan.steps.is_empty());
+        assert!(matches!(
+            events[3],
+            Event::Plan(PlanEvent {
+                status: PlanEventStatus::Completed,
+                ..
+            })
+        ));
+        assert!(matches!(events[4], Event::Done(_)));
     }
 
     #[tokio::test]
@@ -523,7 +659,14 @@ mod tests {
             })],
             ..Session::default()
         });
-        let (mut flow, requests) = flow(repository, vec![step_response("继续完成")]);
+        let (mut flow, requests) = flow(
+            repository,
+            vec![
+                step_response("继续完成"),
+                plan_response(Vec::new()),
+                summary_response("继续执行的任务已完成。"),
+            ],
+        );
 
         let events = flow
             .invoke(Message {
@@ -533,9 +676,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(flow.status(), FlowStatus::Updating);
+        assert_eq!(flow.status(), FlowStatus::Idle);
+        assert!(flow.done());
         let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 1);
+        assert_eq!(requests.len(), 3);
         assert_eq!(Memory::get_message_role(&requests[0][2]), Some("tool"));
         assert!(requests[0][2]
             .get("content")
@@ -546,5 +690,7 @@ mod tests {
             flow.plan().unwrap().steps[0].result.as_deref(),
             Some("继续完成")
         );
+        assert_eq!(flow.plan().unwrap().status, ExecutionStatus::Completed);
+        assert!(matches!(events.last(), Some(Event::Done(_))));
     }
 }
