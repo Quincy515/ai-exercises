@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -14,6 +14,7 @@ use crate::domain::{
         AgentConfig, ErrorEvent, Event, Memory, Message, MessageEvent, ToolEvent, ToolEventStatus,
         ToolResult,
     },
+    repositories::SessionRepository,
     services::tools::{BaseTool, ToolArguments, ToolSchema},
 };
 
@@ -58,12 +59,16 @@ impl Default for AgentOptions {
 /// 基础 Agent 智能体，保存每个 Agent 实例的选项、状态和运行依赖。
 pub struct BaseAgent {
     options: AgentOptions,
+    /// 当前 Agent 所属的会话 id
+    session_id: String,
+    /// 会话数据仓库，负责读写 Agent 记忆
+    session_repository: Arc<dyn SessionRepository>,
     /// Agent 通用配置
     agent_config: AgentConfig,
     /// 语言模型协议
     llm: Box<dyn Llm>,
-    /// Agent 记忆
-    memory: Memory,
+    /// Agent 记忆；构造函数不能异步读取，因此第一次使用时再加载
+    memory: Option<Memory>,
     /// JSON 输出解析器
     json_parser: Box<dyn JsonParser>,
     /// 工具集
@@ -74,17 +79,20 @@ impl BaseAgent {
     /// 构造函数，完成 Agent 的初始化。
     pub fn new(
         options: AgentOptions,
+        session_id: impl Into<String>,
+        session_repository: Arc<dyn SessionRepository>,
         agent_config: AgentConfig,
         llm: Box<dyn Llm>,
-        memory: Memory,
         json_parser: Box<dyn JsonParser>,
         tools: Vec<Box<dyn BaseTool>>,
     ) -> Self {
         Self {
             options,
+            session_id: session_id.into(),
+            session_repository,
             agent_config,
             llm,
-            memory,
+            memory: None,
             json_parser,
             tools,
         }
@@ -100,34 +108,35 @@ impl BaseAgent {
         &self.agent_config
     }
 
-    /// 返回记忆。
-    pub fn memory(&self) -> &Memory {
-        &self.memory
-    }
-
     /// 返回 JSON 输出解析器。
     pub fn json_parser(&self) -> &dyn JsonParser {
         self.json_parser.as_ref()
     }
 
     /// 压缩 Agent 的记忆。
-    pub fn compact_memory(&mut self) {
-        self.memory.compact();
+    pub async fn compact_memory(&mut self) -> Result<()> {
+        // 1. 先从仓库加载当前 Agent 的记忆
+        let mut memory = self.ensure_memory().await?.clone();
+        // 2. 压缩后立即持久化，避免重启后恢复出未压缩的数据
+        memory.compact();
+        self.persist_memory(memory).await
     }
 
     /// Agent 的状态回滚，该函数用于确保 Agent 的消息列表状态是正确的，用于发送新消息、暂停/停止任务、通知用户
-    pub fn roll_back(&mut self, message: Message) -> Result<()> {
-        // 1. 取出记忆中的最后一条消息，检查是否是工具调用
-        let Some(tool_call) = self
-            .memory
+    pub async fn roll_back(&mut self, message: Message) -> Result<()> {
+        // 1. 回滚前必须先取得数据库中的完整记忆
+        let mut memory = self.ensure_memory().await?.clone();
+        // 2. 取出记忆中的最后一条消息，检查是否是工具调用
+        let Some(tool_call) = memory
             .get_last_message()
             .and_then(get_tool_calls)
             .and_then(|tool_calls| tool_calls.first())
+            .cloned()
         else {
             return Ok(());
         };
 
-        // 2. 取出消息中的工具调用参数，并提取工具名字
+        // 3. 取出消息中的工具调用参数，并提取工具名字
         let function_name = tool_call
             .get("function")
             .and_then(Value::as_object)
@@ -136,7 +145,7 @@ impl BaseAgent {
 
         // 4. 判断当前的工具是不是通知用户（message_ask_user)
         if function_name == Some("message_ask_user") {
-            self.memory.add_message(LlmMessage::from_iter([
+            memory.add_message(LlmMessage::from_iter([
                 ("role".to_string(), Value::String("tool".to_string())),
                 (
                     "tool_call_id".to_string(),
@@ -153,10 +162,11 @@ impl BaseAgent {
             ]));
         } else {
             // 5. 否则直接删除最后一条消息
-            self.memory.roll_back();
+            memory.roll_back();
         }
 
-        Ok(())
+        // 6. 回滚会改变对话状态，必须同步到数据仓库
+        self.persist_memory(memory).await
     }
 
     /// 传递消息和响应格式调用 Agent，返回本轮依次产生的事件。
@@ -252,7 +262,7 @@ impl BaseAgent {
                 tool_messages.push(tool_message(
                     tool_call_id,
                     function_name,
-                    serde_json::to_value(result)?,
+                    serde_json::to_string(&result)?,
                 ));
             }
 
@@ -312,7 +322,7 @@ impl BaseAgent {
         format: Option<&str>,
     ) -> Result<LlmMessage> {
         // 1. 将消息添加到记忆中
-        self.add_to_memory(messages);
+        self.add_to_memory(messages).await?;
 
         // 2. 组装语言模型的响应格式
         let response_format = format.map(|format| {
@@ -325,10 +335,12 @@ impl BaseAgent {
         // 3. 循环向 LLM 发起提问直到最大重试次数
         for _ in 0..self.agent_config.max_retries {
             // 4. 调用语言模型获取响应内容
+            // 每次请求都传递完整记忆，使模型能够理解历史上下文。
+            let memory_messages = self.ensure_memory().await?.get_messages().to_vec();
             match self
                 .llm
                 .invoke(
-                    self.memory.get_messages().to_vec(),
+                    memory_messages,
                     tools.clone(),
                     response_format.clone(),
                     self.options.tool_choice.clone(),
@@ -341,14 +353,15 @@ impl BaseAgent {
                     self.add_to_memory(vec![
                         text_message("assistant", ""),
                         text_message("user", "AI无响应内容，请继续。"),
-                    ]);
+                    ])
+                    .await?;
                     sleep(self.options.retry_interval).await;
                 }
                 // 6. 取出非空消息并处理工具调用
                 Ok(message) => {
                     let filtered_message = filter_llm_message(message);
                     // 9. 将消息添加到记忆中
-                    self.add_to_memory(vec![filtered_message.clone()]);
+                    self.add_to_memory(vec![filtered_message.clone()]).await?;
                     return Ok(filtered_message);
                 }
                 Err(err) => {
@@ -392,16 +405,52 @@ impl BaseAgent {
         }
     }
 
-    /// 将对应的信息添加到记忆中。
-    fn add_to_memory(&mut self, messages: Vec<LlmMessage>) {
-        // 1. 检查记忆的消息列表是否为空，如果为空则需要添加预设 Prompt 作为初始记忆
-        if self.memory.empty() {
-            self.memory
-                .add_message(text_message("system", &self.options.system_prompt));
+    /// 确保当前 Agent 的记忆已经从会话仓库加载。
+    async fn ensure_memory(&mut self) -> Result<&Memory> {
+        if self.memory.is_none() {
+            let memory = self
+                .session_repository
+                .get_memory(&self.session_id, &self.options.name)
+                .await?;
+            self.memory = Some(memory);
         }
 
-        // 2. 将正常消息添加到记忆中
-        self.memory.add_messages(messages);
+        self.memory
+            .as_ref()
+            .ok_or_else(|| anyhow!("Agent记忆加载失败"))
+    }
+
+    /// 保存记忆，并且只在仓库保存成功后更新本地缓存。
+    async fn persist_memory(&mut self, memory: Memory) -> Result<()> {
+        if let Err(error) = self
+            .session_repository
+            .save_memory(&self.session_id, &self.options.name, memory.clone())
+            .await
+        {
+            // 保存结果不确定时清空缓存，下次操作重新以仓库数据为准。
+            self.memory = None;
+            return Err(error);
+        }
+
+        self.memory = Some(memory);
+        Ok(())
+    }
+
+    /// 将对应的信息添加到记忆中。
+    async fn add_to_memory(&mut self, messages: Vec<LlmMessage>) -> Result<()> {
+        // 1. 先检查并确保记忆存在
+        let mut memory = self.ensure_memory().await?.clone();
+
+        // 2. 空记忆先添加系统提示词，只在首次写入时执行
+        if memory.empty() {
+            memory.add_message(text_message("system", &self.options.system_prompt));
+        }
+
+        // 3. 添加本轮消息
+        memory.add_messages(messages);
+
+        // 4. 每次修改后都持久化
+        self.persist_memory(memory).await
     }
 }
 
@@ -426,19 +475,14 @@ pub trait Agent: Send + Sync {
         self.base().agent_config()
     }
 
-    /// 返回记忆。
-    fn memory(&self) -> &Memory {
-        self.base().memory()
-    }
-
     /// 压缩 Agent 的记忆。
-    fn compact_memory(&mut self) {
-        self.base_mut().compact_memory();
+    async fn compact_memory(&mut self) -> Result<()> {
+        self.base_mut().compact_memory().await
     }
 
     /// 回滚 Agent 末尾尚未闭合的工具调用。
-    fn roll_back(&mut self, message: Message) -> Result<()> {
-        self.base_mut().roll_back(message)
+    async fn roll_back(&mut self, message: Message) -> Result<()> {
+        self.base_mut().roll_back(message).await
     }
 
     /// 传递消息和响应格式调用 Agent，返回本轮依次产生的事件。
@@ -464,12 +508,12 @@ fn text_message(role: &str, content: &str) -> LlmMessage {
     ])
 }
 
-fn tool_message(tool_call_id: String, function_name: String, content: Value) -> LlmMessage {
+fn tool_message(tool_call_id: String, function_name: String, content: String) -> LlmMessage {
     LlmMessage::from_iter([
         ("role".to_string(), Value::String("tool".to_string())),
         ("tool_call_id".to_string(), Value::String(tool_call_id)),
         ("function_name".to_string(), Value::String(function_name)),
-        ("content".to_string(), content),
+        ("content".to_string(), Value::String(content)),
     ])
 }
 
@@ -538,11 +582,15 @@ mod tests {
     use super::*;
     use crate::domain::{
         external::{Response, Tool, ToolChoice},
-        services::tools::{tool, ToolDefinition},
+        services::{
+            agents::test_support::MemoryRepository,
+            tools::{tool, ToolDefinition},
+        },
     };
 
     type Requests = Arc<Mutex<Vec<Vec<LlmMessage>>>>;
     type ToolCounts = Arc<Mutex<Vec<usize>>>;
+    const SESSION_ID: &str = "session-1";
 
     struct MockLlm {
         responses: Mutex<VecDeque<Response>>,
@@ -672,6 +720,17 @@ mod tests {
     fn agent(
         responses: Vec<Response>,
         tools: Vec<Box<dyn BaseTool>>,
+    ) -> (BaseAgent, Requests, ToolCounts, Arc<MemoryRepository>) {
+        let repository = Arc::new(MemoryRepository::default());
+        let (agent, requests, tool_counts) =
+            agent_with_repository(responses, tools, repository.clone());
+        (agent, requests, tool_counts, repository)
+    }
+
+    fn agent_with_repository(
+        responses: Vec<Response>,
+        tools: Vec<Box<dyn BaseTool>>,
+        repository: Arc<MemoryRepository>,
     ) -> (BaseAgent, Requests, ToolCounts) {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let tool_counts = Arc::new(Mutex::new(Vec::new()));
@@ -680,21 +739,22 @@ mod tests {
             requests: Arc::clone(&requests),
             tool_counts: Arc::clone(&tool_counts),
         };
-
         (
             BaseAgent::new(
                 AgentOptions {
+                    name: "base".to_string(),
                     system_prompt: "system prompt".to_string(),
                     retry_interval: Duration::ZERO,
                     ..AgentOptions::default()
                 },
+                SESSION_ID,
+                repository,
                 AgentConfig {
                     max_iterations: 3,
                     max_retries: 2,
                     max_search_results: 10,
                 },
                 Box::new(llm),
-                Memory::new(),
                 Box::new(MockJsonParser),
                 tools,
             ),
@@ -705,7 +765,7 @@ mod tests {
 
     #[tokio::test]
     async fn invoke_runs_tool_and_records_complete_memory() {
-        let (mut agent, requests, tool_counts) = agent(
+        let (mut agent, requests, tool_counts, repository) = agent(
             vec![
                 tool_call_message(),
                 assistant_message(json!("final answer")),
@@ -740,8 +800,8 @@ mod tests {
         };
         assert_eq!(message.message, "final answer");
 
-        let roles = agent
-            .memory()
+        let memory = repository.memory(SESSION_ID, "base");
+        let roles = memory
             .get_messages()
             .iter()
             .filter_map(Memory::get_message_role)
@@ -752,12 +812,25 @@ mod tests {
         );
         assert_eq!(requests.lock().unwrap()[0].len(), 2);
         assert_eq!(requests.lock().unwrap()[1].len(), 4);
+        let tool_content = requests.lock().unwrap()[1][3]
+            .get("content")
+            .and_then(Value::as_str)
+            .expect("工具消息 content 必须是 JSON 字符串")
+            .to_owned();
+        assert_eq!(
+            serde_json::from_str::<Value>(&tool_content).unwrap()["success"],
+            true
+        );
         assert_eq!(*tool_counts.lock().unwrap(), vec![1, 1]);
+        assert_eq!(
+            repository.reads.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 
     #[tokio::test]
     async fn invoke_retries_empty_assistant_message() {
-        let (mut agent, requests, _) = agent(
+        let (mut agent, requests, _, repository) = agent(
             vec![
                 assistant_message(Value::Null),
                 assistant_message(json!("continue")),
@@ -773,8 +846,8 @@ mod tests {
         };
         assert_eq!(message.message, "continue");
         assert_eq!(requests.lock().unwrap().len(), 2);
-        let roles = agent
-            .memory()
+        let memory = repository.memory(SESSION_ID, "base");
+        let roles = memory
             .get_messages()
             .iter()
             .filter_map(Memory::get_message_role)
@@ -787,7 +860,7 @@ mod tests {
 
     #[tokio::test]
     async fn invoke_converts_tool_failure_into_called_event() {
-        let (mut agent, _, _) = agent(
+        let (mut agent, _, _, _) = agent(
             vec![
                 tool_call_message(),
                 assistant_message(json!("handled failure")),
@@ -807,7 +880,7 @@ mod tests {
 
     #[tokio::test]
     async fn invoke_reports_iteration_limit_before_returning_last_message() {
-        let (mut agent, _, _) = agent(
+        let (mut agent, _, _, _) = agent(
             vec![
                 tool_call_message(),
                 tool_call_message(),
@@ -832,7 +905,7 @@ mod tests {
 
     #[tokio::test]
     async fn invoke_reports_missing_final_content() {
-        let (mut agent, _, _) = agent(
+        let (mut agent, _, _, _) = agent(
             vec![
                 tool_call_message(),
                 tool_call_message(),
@@ -851,45 +924,52 @@ mod tests {
         assert_eq!(error.error, "Agent未能生成有效回复内容");
     }
 
-    #[test]
-    fn compact_memory_forwards_to_memory() {
-        let (mut agent, _, _) = agent(Vec::new(), Vec::new());
-        agent.memory.add_message(LlmMessage::from_iter([
+    #[tokio::test]
+    async fn compact_memory_is_persisted() {
+        let (mut agent, _, _, repository) = agent(Vec::new(), Vec::new());
+        let mut memory = Memory::new();
+        memory.add_message(LlmMessage::from_iter([
             ("role".to_string(), json!("assistant")),
             ("content".to_string(), json!("answer")),
             ("reasoning_content".to_string(), json!("hidden")),
         ]));
+        repository.insert(SESSION_ID, "base", memory);
 
-        agent.compact_memory();
+        agent.compact_memory().await.unwrap();
 
-        assert!(!agent.memory().get_messages()[0].contains_key("reasoning_content"));
+        assert!(!repository.memory(SESSION_ID, "base").get_messages()[0]
+            .contains_key("reasoning_content"));
     }
 
-    #[test]
-    fn roll_back_removes_unfinished_tool_call() {
-        let (mut agent, _, _) = agent(Vec::new(), Vec::new());
-        agent.memory.add_message(tool_call_message());
+    #[tokio::test]
+    async fn roll_back_removes_and_persists_unfinished_tool_call() {
+        let (mut agent, _, _, repository) = agent(Vec::new(), Vec::new());
+        let mut memory = Memory::new();
+        memory.add_message(tool_call_message());
+        repository.insert(SESSION_ID, "base", memory);
 
-        agent.roll_back(Message::default()).unwrap();
+        agent.roll_back(Message::default()).await.unwrap();
 
-        assert!(agent.memory().empty());
+        assert!(repository.memory(SESSION_ID, "base").empty());
     }
 
-    #[test]
-    fn roll_back_closes_message_ask_user_tool_call() {
-        let (mut agent, _, _) = agent(Vec::new(), Vec::new());
-        agent
-            .memory
-            .add_message(tool_call_message_named("message_ask_user"));
+    #[tokio::test]
+    async fn roll_back_closes_and_persists_message_ask_user_tool_call() {
+        let (mut agent, _, _, repository) = agent(Vec::new(), Vec::new());
+        let mut memory = Memory::new();
+        memory.add_message(tool_call_message_named("message_ask_user"));
+        repository.insert(SESSION_ID, "base", memory);
 
         agent
             .roll_back(Message {
                 message: "继续执行".to_string(),
                 attachments: vec!["/tmp/report.pdf".to_string()],
             })
+            .await
             .unwrap();
 
-        let messages = agent.memory().get_messages();
+        let memory = repository.memory(SESSION_ID, "base");
+        let messages = memory.get_messages();
         assert_eq!(messages.len(), 2);
         assert_eq!(Memory::get_message_role(&messages[1]), Some("tool"));
         assert_eq!(messages[1].get("tool_call_id"), Some(&json!("call-1")));
@@ -905,15 +985,88 @@ mod tests {
         );
     }
 
-    #[test]
-    fn roll_back_keeps_memory_without_pending_tool_call() {
-        let (mut agent, _, _) = agent(Vec::new(), Vec::new());
-        agent
-            .memory
-            .add_message(text_message("assistant", "completed"));
+    #[tokio::test]
+    async fn roll_back_keeps_memory_without_pending_tool_call() {
+        let (mut agent, _, _, repository) = agent(Vec::new(), Vec::new());
+        let mut memory = Memory::new();
+        memory.add_message(text_message("assistant", "completed"));
+        repository.insert(SESSION_ID, "base", memory);
 
-        agent.roll_back(Message::default()).unwrap();
+        agent.roll_back(Message::default()).await.unwrap();
 
-        assert_eq!(agent.memory().get_messages().len(), 1);
+        assert_eq!(
+            repository.memory(SESSION_ID, "base").get_messages().len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn new_agent_restores_history_before_calling_llm() {
+        let repository = Arc::new(MemoryRepository::default());
+        let mut old_memory = Memory::new();
+        old_memory.add_messages(vec![
+            text_message("system", "system prompt"),
+            text_message("user", "old question"),
+            text_message("assistant", "old answer"),
+        ]);
+        repository.insert(SESSION_ID, "base", old_memory);
+        let (mut agent, requests, _) = agent_with_repository(
+            vec![assistant_message(json!("new answer"))],
+            Vec::new(),
+            repository.clone(),
+        );
+
+        agent.invoke("new question", None).await.unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests[0].len(), 4);
+        assert_eq!(requests[0][1].get("content"), Some(&json!("old question")));
+        let memory = repository.memory(SESSION_ID, "base");
+        let system_message_count = memory
+            .get_messages()
+            .iter()
+            .filter(|message| Memory::get_message_role(message) == Some("system"))
+            .count();
+        assert_eq!(system_message_count, 1);
+    }
+
+    #[tokio::test]
+    async fn repository_errors_stop_the_llm_call_and_allow_reload() {
+        let (mut agent, requests, _, repository) =
+            agent(vec![assistant_message(json!("answer"))], Vec::new());
+        repository
+            .fail_save
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let error = agent.invoke("hello", None).await.unwrap_err();
+
+        assert!(error.to_string().contains("模拟保存记忆失败"));
+        assert!(requests.lock().unwrap().is_empty());
+
+        // 保存失败会清空缓存，重试时重新读取仓库并可以继续执行。
+        let events = agent.invoke("hello again", None).await.unwrap();
+        assert!(matches!(events[0], Event::Message(_)));
+        assert_eq!(
+            repository.reads.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_read_error_stops_before_calling_llm() {
+        let (mut agent, requests, _, repository) =
+            agent(vec![assistant_message(json!("answer"))], Vec::new());
+        repository
+            .fail_read
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let error = agent.invoke("hello", None).await.unwrap_err();
+
+        assert!(error.to_string().contains("模拟读取记忆失败"));
+        assert!(requests.lock().unwrap().is_empty());
+        assert_eq!(
+            repository.writes.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
     }
 }

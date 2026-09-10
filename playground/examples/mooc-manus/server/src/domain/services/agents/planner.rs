@@ -15,12 +15,15 @@
 //! ReActAgent：
 //! - 功能：迭代执行完每一个子任务、汇总所有的子任务进行总结
 //! - 提示词：执行任务的 prompt、汇总总结 prompt
+use std::sync::Arc;
+
 use anyhow::Result;
 use tracing::info;
 
 use crate::domain::{
     external::{JsonParser, Llm},
-    models::{AgentConfig, Event, Memory, Message, Plan, PlanEvent, PlanEventStatus, Step},
+    models::{AgentConfig, Event, Message, Plan, PlanEvent, PlanEventStatus, Step},
+    repositories::SessionRepository,
     services::prompts::{
         CREATE_PLAN_PROMPT, PLANNER_SYSTEM_PROMPT, SYSTEM_PROMPT, UPDATE_PLAN_PROMPT,
     },
@@ -36,17 +39,19 @@ pub struct PlannerAgent {
 impl PlannerAgent {
     /// 创建规划 Agent，并固定规划场景使用的选项。
     pub fn new(
+        session_id: impl Into<String>,
+        session_repository: Arc<dyn SessionRepository>,
         agent_config: AgentConfig,
         llm: Box<dyn Llm>,
-        memory: Memory,
         json_parser: Box<dyn JsonParser>,
     ) -> Self {
         Self {
             base: BaseAgent::new(
                 planner_options(),
+                session_id,
+                session_repository,
                 agent_config,
                 llm,
-                memory,
                 json_parser,
                 Vec::new(),
             ),
@@ -184,7 +189,10 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
-    use crate::domain::external::{LlmMessage, Response, ResponseFormat, Tool, ToolChoice};
+    use crate::domain::{
+        external::{LlmMessage, Response, ResponseFormat, Tool, ToolChoice},
+        services::agents::test_support::MemoryRepository,
+    };
 
     type Requests = Arc<Mutex<Vec<LlmRequest>>>;
 
@@ -259,13 +267,14 @@ mod tests {
             requests: Arc::clone(&requests),
         };
         let planner = PlannerAgent::new(
+            "session-1",
+            Arc::new(MemoryRepository::default()),
             AgentConfig {
                 max_iterations: 3,
                 max_retries: 1,
                 max_search_results: 10,
             },
             Box::new(llm),
-            Memory::new(),
             Box::new(MockJsonParser),
         );
         (planner, requests)

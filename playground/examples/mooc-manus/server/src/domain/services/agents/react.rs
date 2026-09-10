@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use serde_json::Value;
 use tracing::info;
@@ -5,9 +7,10 @@ use tracing::info;
 use crate::domain::{
     external::{JsonParser, Llm},
     models::{
-        AgentConfig, Event, ExecutionStatus, File, Memory, Message, MessageEvent, MessageRole,
-        Plan, Step, StepEvent, StepEventStatus, ToolEventStatus, WaitEvent,
+        AgentConfig, Event, ExecutionStatus, File, Message, MessageEvent, MessageRole, Plan, Step,
+        StepEvent, StepEventStatus, ToolEventStatus, WaitEvent,
     },
+    repositories::SessionRepository,
     services::{
         prompts::{EXECUTION_PROMPT, REACT_SYSTEM_PROMPT, SUMMARIZE_PROMPT, SYSTEM_PROMPT},
         tools::BaseTool,
@@ -24,18 +27,20 @@ pub struct ReActAgent {
 impl ReActAgent {
     /// 创建 ReAct Agent，并固定执行场景使用的选项。
     pub fn new(
+        session_id: impl Into<String>,
+        session_repository: Arc<dyn SessionRepository>,
         agent_config: AgentConfig,
         llm: Box<dyn Llm>,
-        memory: Memory,
         json_parser: Box<dyn JsonParser>,
         tools: Vec<Box<dyn BaseTool>>,
     ) -> Self {
         Self {
             base: BaseAgent::new(
                 react_options(),
+                session_id,
+                session_repository,
                 agent_config,
                 llm,
-                memory,
                 json_parser,
                 tools,
             ),
@@ -233,7 +238,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         external::{LlmMessage, Response, ResponseFormat, Tool, ToolChoice},
-        services::tools::MessageTool,
+        services::{agents::test_support::MemoryRepository, tools::MessageTool},
     };
 
     type Requests = Arc<Mutex<Vec<LlmRequest>>>;
@@ -319,24 +324,29 @@ mod tests {
         ])
     }
 
-    fn react(responses: Vec<Response>, tools: Vec<Box<dyn BaseTool>>) -> (ReActAgent, Requests) {
+    fn react(
+        responses: Vec<Response>,
+        tools: Vec<Box<dyn BaseTool>>,
+    ) -> (ReActAgent, Requests, Arc<MemoryRepository>) {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let llm = MockLlm {
             responses: Mutex::new(VecDeque::from(responses)),
             requests: Arc::clone(&requests),
         };
+        let repository = Arc::new(MemoryRepository::default());
         let react = ReActAgent::new(
+            "session-1",
+            repository.clone(),
             AgentConfig {
                 max_iterations: 3,
                 max_retries: 1,
                 max_search_results: 10,
             },
             Box::new(llm),
-            Memory::new(),
             Box::new(MockJsonParser),
             tools,
         );
-        (react, requests)
+        (react, requests, repository)
     }
 
     #[test]
@@ -352,7 +362,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_step_updates_step_and_returns_result_message() {
-        let (mut react, requests) = react(
+        let (mut react, requests, _) = react(
             vec![assistant_message(json!(
                 r#"{
                     "success":true,
@@ -437,7 +447,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_step_converts_message_ask_user_into_message_and_wait_events() {
-        let (mut react, requests) = react(
+        let (mut react, requests, repository) = react(
             vec![message_ask_user_call("请提供登录验证码")],
             vec![Box::new(MessageTool::new())],
         );
@@ -460,9 +470,8 @@ mod tests {
         assert_eq!(question.message, "请提供登录验证码");
         assert!(matches!(events[2], Event::Wait(_)));
         assert_eq!(step.status, ExecutionStatus::Running);
-        assert!(react
-            .base
-            .memory()
+        assert!(repository
+            .memory("session-1", "react")
             .get_last_message()
             .is_some_and(|message| message.contains_key("tool_calls")));
 
@@ -474,7 +483,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_step_marks_failed_step_before_passing_error_event() {
-        let (mut react, _) = react(vec![assistant_message(json!(123))], Vec::new());
+        let (mut react, _, _) = react(vec![assistant_message(json!(123))], Vec::new());
         let plan = Plan::default();
         let mut step = Step::new("执行失败步骤");
 
@@ -503,7 +512,7 @@ mod tests {
 
     #[tokio::test]
     async fn summarize_converts_file_paths_into_message_attachments() {
-        let (mut react, requests) = react(
+        let (mut react, requests, _) = react(
             vec![assistant_message(json!(
                 r#"{
                     "message":"任务已完成，请查看报告。",
