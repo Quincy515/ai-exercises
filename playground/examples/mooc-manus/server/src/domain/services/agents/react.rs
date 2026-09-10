@@ -75,7 +75,7 @@ impl ReActAgent {
                 Event::Tool(tool_event) if tool_event.function_name == "message_ask_user" => {
                     // 6. 工具如果在调用中，我们需要返回一条消息告知用户需要让用户处理什么
                     if tool_event.status == ToolEventStatus::Calling {
-                        // todo: 由于 message_ask_user 工具还未实现，所以参数未定，暂时定为 text
+                        // message_ask_user 的问题文本记录在 text 参数中。
                         let message = tool_event
                             .function_args
                             .get("text")
@@ -233,8 +233,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         external::{LlmMessage, Response, ResponseFormat, Tool, ToolChoice},
-        models::ToolResult,
-        services::tools::{tool, ToolArguments, ToolDefinition},
+        services::tools::MessageTool,
     };
 
     type Requests = Arc<Mutex<Vec<LlmRequest>>>;
@@ -293,45 +292,6 @@ mod tests {
     impl JsonParser for MockJsonParser {
         async fn invoke(&self, text: &str, _default_value: Option<Value>) -> Result<Value> {
             Ok(serde_json::from_str(text)?)
-        }
-    }
-
-    struct MessageAskUserTool {
-        definitions: Vec<ToolDefinition>,
-    }
-
-    impl MessageAskUserTool {
-        fn new() -> Self {
-            Self {
-                definitions: vec![tool(
-                    "message_ask_user",
-                    "向用户提问并等待回复",
-                    ToolArguments::from_iter([("text".to_string(), json!({"type": "string"}))]),
-                    vec!["text".to_string()],
-                )],
-            }
-        }
-    }
-
-    #[async_trait]
-    impl BaseTool for MessageAskUserTool {
-        fn name(&self) -> &str {
-            "message"
-        }
-
-        fn tool_definitions(&self) -> &[ToolDefinition] {
-            &self.definitions
-        }
-
-        async fn call_tool(
-            &self,
-            tool_name: &str,
-            _kwargs: ToolArguments,
-        ) -> Result<ToolResult<Value>> {
-            match tool_name {
-                "message_ask_user" => Ok(ToolResult::default()),
-                _ => Err(anyhow!("工具[{tool_name}]未找到")),
-            }
         }
     }
 
@@ -479,7 +439,7 @@ mod tests {
     async fn execute_step_converts_message_ask_user_into_message_and_wait_events() {
         let (mut react, requests) = react(
             vec![message_ask_user_call("请提供登录验证码")],
-            vec![Box::new(MessageAskUserTool::new())],
+            vec![Box::new(MessageTool::new())],
         );
         let plan = Plan {
             language: "中文".to_string(),
@@ -508,7 +468,7 @@ mod tests {
 
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].tools.as_ref().map(Vec::len), Some(1));
+        assert_eq!(requests[0].tools.as_ref().map(Vec::len), Some(2));
         assert!(requests[0].tool_choice.is_none());
     }
 
