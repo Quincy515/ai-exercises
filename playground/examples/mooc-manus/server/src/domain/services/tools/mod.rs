@@ -9,6 +9,7 @@ pub mod message;
 pub mod search;
 pub mod shell;
 
+pub use a2a::*;
 pub use base::*;
 pub use browser::*;
 pub use file::*;

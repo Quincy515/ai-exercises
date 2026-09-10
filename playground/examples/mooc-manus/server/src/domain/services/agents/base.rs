@@ -66,11 +66,11 @@ pub struct BaseAgent {
     /// Agent 通用配置
     agent_config: AgentConfig,
     /// 语言模型协议
-    llm: Box<dyn Llm>,
+    llm: Arc<dyn Llm>,
     /// Agent 记忆；构造函数不能异步读取，因此第一次使用时再加载
     memory: Option<Memory>,
     /// JSON 输出解析器
-    json_parser: Box<dyn JsonParser>,
+    json_parser: Arc<dyn JsonParser>,
     /// 工具集
     tools: Vec<Box<dyn BaseTool>>,
 }
@@ -82,8 +82,8 @@ impl BaseAgent {
         session_id: impl Into<String>,
         session_repository: Arc<dyn SessionRepository>,
         agent_config: AgentConfig,
-        llm: Box<dyn Llm>,
-        json_parser: Box<dyn JsonParser>,
+        llm: Arc<dyn Llm>,
+        json_parser: Arc<dyn JsonParser>,
         tools: Vec<Box<dyn BaseTool>>,
     ) -> Self {
         Self {
@@ -754,8 +754,8 @@ mod tests {
                     max_retries: 2,
                     max_search_results: 10,
                 },
-                Box::new(llm),
-                Box::new(MockJsonParser),
+                Arc::new(llm),
+                Arc::new(MockJsonParser),
                 tools,
             ),
             requests,

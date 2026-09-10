@@ -15,9 +15,10 @@ use crate::domain::{
     repositories::SessionRepository,
 };
 
-/// Agent 单元测试使用的内存仓库，只实现记忆相关能力。
+/// Agent 与 Flow 单元测试使用的内存仓库。
 #[derive(Default)]
 pub struct MemoryRepository {
+    pub sessions: Mutex<HashMap<String, Session>>,
     pub memories: Mutex<HashMap<(String, String), Memory>>,
     pub reads: AtomicUsize,
     pub writes: AtomicUsize,
@@ -26,6 +27,17 @@ pub struct MemoryRepository {
 }
 
 impl MemoryRepository {
+    pub fn insert_session(&self, session: Session) {
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(session.id.clone(), session);
+    }
+
+    pub fn session(&self, session_id: &str) -> Option<Session> {
+        self.sessions.lock().unwrap().get(session_id).cloned()
+    }
+
     pub fn memory(&self, session_id: &str, agent_name: &str) -> Memory {
         self.memories
             .lock()
@@ -45,16 +57,17 @@ impl MemoryRepository {
 
 #[async_trait]
 impl SessionRepository for MemoryRepository {
-    async fn save(&self, _session: Session) -> Result<()> {
-        bail!("测试中不应调用 save")
+    async fn save(&self, session: Session) -> Result<()> {
+        self.insert_session(session);
+        Ok(())
     }
 
     async fn get_all(&self) -> Result<Vec<Session>> {
         bail!("测试中不应调用 get_all")
     }
 
-    async fn get_by_id(&self, _session_id: &str) -> Result<Option<Session>> {
-        bail!("测试中不应调用 get_by_id")
+    async fn get_by_id(&self, session_id: &str) -> Result<Option<Session>> {
+        Ok(self.session(session_id))
     }
 
     async fn delete_by_id(&self, _session_id: &str) -> Result<()> {
@@ -86,8 +99,13 @@ impl SessionRepository for MemoryRepository {
         bail!("测试中不应调用 decrement_unread_message_count")
     }
 
-    async fn update_status(&self, _session_id: &str, _status: SessionStatus) -> Result<()> {
-        bail!("测试中不应调用 update_status")
+    async fn update_status(&self, session_id: &str, status: SessionStatus) -> Result<()> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow::anyhow!("会话[{session_id}]不存在"))?;
+        session.status = status;
+        Ok(())
     }
 
     async fn add_event(&self, _session_id: &str, _event: Event) -> Result<()> {

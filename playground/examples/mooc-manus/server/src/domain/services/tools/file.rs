@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde::Serialize;
@@ -15,13 +17,13 @@ const DEFAULT_MAX_LENGTH: usize = 10_000;
 /// 文件工具箱：负责声明、校验并分发 Agent 可以调用的文件操作。
 pub struct FileTool {
     name: String,
-    sandbox: Box<dyn Sandbox>,
+    sandbox: Arc<dyn Sandbox>,
     definitions: Vec<ToolDefinition>,
 }
 
 impl FileTool {
     /// 创建文件工具箱，并注册允许 Agent 使用的五个文件工具。
-    pub fn new(sandbox: Box<dyn Sandbox>) -> Self {
+    pub fn new(sandbox: Arc<dyn Sandbox>) -> Self {
         Self {
             name: "file".to_string(),
             sandbox,
@@ -619,7 +621,7 @@ mod tests {
         let sandbox = MockSandbox {
             calls: Arc::clone(&calls),
         };
-        (FileTool::new(Box::new(sandbox)), calls)
+        (FileTool::new(Arc::new(sandbox)), calls)
     }
 
     #[test]

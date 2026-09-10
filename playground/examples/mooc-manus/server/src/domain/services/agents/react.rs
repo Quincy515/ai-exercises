@@ -30,8 +30,8 @@ impl ReActAgent {
         session_id: impl Into<String>,
         session_repository: Arc<dyn SessionRepository>,
         agent_config: AgentConfig,
-        llm: Box<dyn Llm>,
-        json_parser: Box<dyn JsonParser>,
+        llm: Arc<dyn Llm>,
+        json_parser: Arc<dyn JsonParser>,
         tools: Vec<Box<dyn BaseTool>>,
     ) -> Self {
         Self {
@@ -342,8 +342,8 @@ mod tests {
                 max_retries: 1,
                 max_search_results: 10,
             },
-            Box::new(llm),
-            Box::new(MockJsonParser),
+            Arc::new(llm),
+            Arc::new(MockJsonParser),
             tools,
         );
         (react, requests, repository)

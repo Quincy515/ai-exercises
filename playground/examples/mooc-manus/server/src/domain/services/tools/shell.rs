@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -14,14 +16,14 @@ use super::arguments::{optional_usize, required_bool, required_non_empty_str};
 /// Shell toolbox for executing and interacting with sandbox shell sessions.
 pub struct ShellTool {
     name: String,
-    sandbox: Box<dyn Sandbox>,
+    sandbox: Arc<dyn Sandbox>,
     definitions: Vec<ToolDefinition>,
 }
 
 impl ShellTool {
     /// 构造函数，完成 Shell 工具箱初始化。
     /// Create a shell tool collection with a sandbox backend.
-    pub fn new(sandbox: Box<dyn Sandbox>) -> Self {
+    pub fn new(sandbox: Arc<dyn Sandbox>) -> Self {
         Self {
             name: "shell".to_string(),
             sandbox,
@@ -463,7 +465,7 @@ mod tests {
             calls: Arc::clone(&calls),
         };
 
-        (ShellTool::new(Box::new(sandbox)), calls)
+        (ShellTool::new(Arc::new(sandbox)), calls)
     }
 
     #[test]
