@@ -4,8 +4,8 @@ use loco_rs::app::AppContext;
 use tracing::info;
 
 use crate::{
-    application::services::{AppConfigService, StatusService},
-    domain::external::HealthChecker,
+    application::services::{AppConfigService, FileService, StatusService},
+    domain::{external::HealthChecker, repositories::FileRepository},
     infrastructure::{
         external::{LocoFileStorage, PostgresHealthChecker, RedisHealthChecker},
         repositories::SeaOrmAppConfigRepository,
@@ -18,6 +18,19 @@ use super::repository_dependencies::get_db_file_repository;
 pub fn get_file_storage(ctx: &AppContext) -> LocoFileStorage {
     let file_repository = Arc::new(get_db_file_repository(ctx));
     LocoFileStorage::new(Arc::clone(&ctx.storage), file_repository)
+}
+
+/// 获取文件服务，复用 Loco 上下文的存储驱动和数据库连接池。
+pub fn get_file_service(ctx: &AppContext) -> FileService {
+    // 1.初始化文件仓库和文件存储桶；两者共享同一个仓库实例。
+    let file_repository: Arc<dyn FileRepository> = Arc::new(get_db_file_repository(ctx));
+    let file_storage = Arc::new(LocoFileStorage::new(
+        Arc::clone(&ctx.storage),
+        Arc::clone(&file_repository),
+    ));
+
+    // 2.构建服务并返回。
+    FileService::new(file_storage, file_repository)
 }
 
 /// 获取应用配置服务。

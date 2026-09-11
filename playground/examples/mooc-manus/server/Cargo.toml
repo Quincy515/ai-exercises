@@ -31,7 +31,8 @@ tokio = { version = "1.45", default-features = false, features = [
     "time",
 ] }
 async-trait = { version = "0.1" }
-axum = { version = "0.8" }
+axum = { version = "0.8", features = ["multipart"] }
+percent-encoding = "2"
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 regex = { version = "1.11" }
@@ -79,6 +80,7 @@ path = "src/bin/tool.rs"
 required-features = []
 
 [dev-dependencies]
+axum-test = "17.3"
 loco-rs = { workspace = true, features = ["testing"] }
 serial_test = { version = "3.1.1" }
 rstest = { version = "0.25" }

@@ -12,7 +12,7 @@ use futures::TryStreamExt;
 use loco_rs::storage::{drivers, Storage};
 use server::{
     domain::{
-        external::{FileStorage, FileStream, UploadFile},
+        external::{FileNotFound, FileStorage, FileStream, InvalidFileUpload, UploadFile},
         models::File,
         repositories::FileRepository,
     },
@@ -56,11 +56,13 @@ async fn uploads_and_downloads_binary_files_through_database_and_local_storage()
     source.mime_type = Some("application/pdf".to_string());
     let mut file = service.upload_file(source).await?;
     assert_eq!(file.filename, "学习资料.pdf");
-    assert_eq!(file.extension, "pdf");
+    assert_eq!(file.extension, ".pdf");
     assert_eq!(file.mime_type, "application/pdf");
     assert_eq!(file.size, 9);
     assert_eq!(file.filepath, "");
-    assert_eq!(file.key, format!("uploads/{}", file.id));
+    let (date_path, object_name) = file.key.rsplit_once('/').unwrap();
+    assert!(chrono::NaiveDate::parse_from_str(date_path, "%Y/%m/%d").is_ok());
+    assert_eq!(object_name, format!("{}.pdf", file.id));
     assert_eq!(repository.get_by_id(&file.id).await?, Some(file.clone()));
     assert_eq!(
         std::fs::read(directory.path().join(&file.key))?,
@@ -81,10 +83,12 @@ async fn uploads_and_downloads_binary_files_through_database_and_local_storage()
     let (stream, _) = service.download_file(&second.id).await?;
     assert_eq!(read_all(stream).await?, b"second");
 
-    assert!(service
+    let missing_error = service
         .download_file(&uuid::Uuid::new_v4().to_string())
         .await
-        .is_err());
+        .err()
+        .unwrap();
+    assert!(missing_error.is::<FileNotFound>());
     assert!(service.download_file("invalid-uuid").await.is_err());
     // 对象缺失可能在打开流或消费流时暴露，两种错误都不能当成空文件。
     storage.delete(Path::new(&file.key)).await?;
@@ -167,10 +171,11 @@ async fn validates_names_and_preserves_empty_and_extensionless_files() -> Result
     let repository = Arc::new(RecordingRepository::default());
     let service = LocoFileStorage::new(storage, repository.clone());
     for filename in ["", " ", ".", "..", "../", "bad\nname"] {
-        assert!(service
+        let error = service
             .upload_file(upload(filename, b"data"))
             .await
-            .is_err());
+            .unwrap_err();
+        assert!(error.is::<InvalidFileUpload>());
     }
     assert!(service
         .upload_file(upload(&"a".repeat(256), b"data"))
@@ -184,10 +189,72 @@ async fn validates_names_and_preserves_empty_and_extensionless_files() -> Result
     let file = service.upload_file(upload("../../README", b"")).await?;
     assert_eq!(file.filename, "README");
     assert_eq!(file.extension, "");
-    assert_eq!(file.mime_type, "application/octet-stream");
+    assert_eq!(file.mime_type, "");
     assert_eq!(file.size, 0);
     assert!(!file.key.contains(".."));
     let (stream, _) = service.download_file(&file.id).await?;
     assert!(read_all(stream).await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn preserves_dotted_extensions_and_checks_the_complete_key_length() -> Result<()> {
+    let storage = Arc::new(Storage::single(drivers::mem::new()));
+    let repository = Arc::new(RecordingRepository::default());
+    let service = LocoFileStorage::new(storage.clone(), repository.clone());
+
+    for (filename, extension) in [
+        (".env", ""),
+        ("..hidden", ""),
+        ("archive.tar.gz", ".gz"),
+        ("trailing.", "."),
+        ("报告.文档", ".文档"),
+    ] {
+        let file = service.upload_file(upload(filename, b"content")).await?;
+        assert_eq!(file.extension, extension);
+        assert!(file.key.ends_with(&format!("{}{extension}", file.id)));
+        assert_eq!(
+            storage.download::<Vec<u8>>(Path::new(&file.key)).await?,
+            b"content"
+        );
+    }
+
+    // 文件名未超长，但日期 + UUID + 扩展名已超过 key 列的上限；上传前就应拒绝。
+    let attempted_before = repository.attempted.lock().await.len();
+    let error = service
+        .upload_file(upload(&format!("a.{}", "x".repeat(208)), b"data"))
+        .await
+        .unwrap_err();
+    assert!(error.is::<InvalidFileUpload>());
+    assert_eq!(repository.attempted.lock().await.len(), attempted_before);
+
+    let file = service
+        .upload_file(upload(&format!("a.{}", "x".repeat(207)), b"data"))
+        .await?;
+    assert_eq!(file.key.chars().count(), 255);
+    Ok(())
+}
+
+#[tokio::test]
+async fn downloads_existing_files_with_legacy_keys() -> Result<()> {
+    let storage = Arc::new(Storage::single(drivers::mem::new()));
+    let repository = Arc::new(RecordingRepository::default());
+    let service = LocoFileStorage::new(storage.clone(), repository.clone());
+    let mut legacy = File {
+        filename: "legacy.txt".to_string(),
+        extension: "txt".to_string(),
+        mime_type: "text/plain".to_string(),
+        size: 6,
+        ..Default::default()
+    };
+    legacy.key = format!("uploads/{}", legacy.id);
+    storage
+        .upload(Path::new(&legacy.key), &Bytes::from_static(b"legacy"))
+        .await?;
+    repository.save(legacy.clone()).await?;
+
+    let (stream, file) = service.download_file(&legacy.id).await?;
+    assert_eq!(file, legacy);
+    assert_eq!(read_all(stream).await?, b"legacy");
     Ok(())
 }
