@@ -4996,6 +4996,7 @@ dependencies = [
  "async-trait",
  "axum",
  "bollard",
+ "bytes",
  "chromiumoxide",
  "chrono",
  "futures",

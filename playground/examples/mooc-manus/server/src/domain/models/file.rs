@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-///文件信息 Domian 模型，用于记录 Manus/Human 上传 or 生成的文件
+/// 文件信息 Domain 模型，用于记录 Manus/Human 上传或生成的文件。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct File {
     /// 文件 ID

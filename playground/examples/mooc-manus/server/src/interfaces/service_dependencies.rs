@@ -7,10 +7,18 @@ use crate::{
     application::services::{AppConfigService, StatusService},
     domain::external::HealthChecker,
     infrastructure::{
-        external::{PostgresHealthChecker, RedisHealthChecker},
+        external::{LocoFileStorage, PostgresHealthChecker, RedisHealthChecker},
         repositories::SeaOrmAppConfigRepository,
     },
 };
+
+use super::repository_dependencies::get_db_file_repository;
+
+/// 获取文件存储桶，复用 Loco 的存储驱动和数据库连接池。
+pub fn get_file_storage(ctx: &AppContext) -> LocoFileStorage {
+    let file_repository = Arc::new(get_db_file_repository(ctx));
+    LocoFileStorage::new(Arc::clone(&ctx.storage), file_repository)
+}
 
 /// 获取应用配置服务。
 /// Build the application config service.

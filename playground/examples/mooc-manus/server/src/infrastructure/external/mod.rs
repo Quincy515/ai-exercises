@@ -1,6 +1,7 @@
 pub mod bing_search;
 pub mod browser;
 pub mod health_checker;
+pub mod loco_file_storage;
 pub mod openai_llm;
 pub mod redis_stream_message_queue;
 pub mod redis_stream_task;
@@ -10,6 +11,7 @@ pub mod sandbox;
 pub use bing_search::*;
 pub use browser::*;
 pub use health_checker::*;
+pub use loco_file_storage::*;
 pub use openai_llm::*;
 pub use redis_stream_message_queue::*;
 pub use redis_stream_task::*;
