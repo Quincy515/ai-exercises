@@ -5,3 +5,4 @@ pub mod llm_configs;
 pub mod mcp_servers;
 pub mod sessions;
 pub mod users;
+pub mod files;

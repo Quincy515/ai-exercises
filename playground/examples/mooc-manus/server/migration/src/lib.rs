@@ -12,6 +12,8 @@ mod m20260717_191151_a2a_servers;
 mod m20260718_113716_fix_a2a_servers_table;
 mod m20260720_184611_sessions;
 mod m20260720_191303_fix_sessions_table;
+mod m20260911_140128_files;
+mod m20260911_141144_fix_files_table;
 pub struct Migrator;
 
 #[async_trait::async_trait]
@@ -28,6 +30,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260718_113716_fix_a2a_servers_table::Migration),
             Box::new(m20260720_184611_sessions::Migration),
             Box::new(m20260720_191303_fix_sessions_table::Migration),
+            Box::new(m20260911_140128_files::Migration),
+            Box::new(m20260911_141144_fix_files_table::Migration),
             // inject-above (do not remove this comment)
         ]
     }

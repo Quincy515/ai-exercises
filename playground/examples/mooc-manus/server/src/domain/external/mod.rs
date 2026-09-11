@@ -1,4 +1,5 @@
 pub mod browser;
+pub mod file_storage;
 pub mod health_checker;
 pub mod json_parser;
 pub mod llm;
@@ -8,6 +9,7 @@ pub mod search;
 pub mod task;
 
 pub use browser::*;
+pub use file_storage::*;
 pub use health_checker::*;
 pub use json_parser::*;
 pub use llm::*;

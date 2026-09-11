@@ -4,19 +4,21 @@ use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
-#[sea_orm(table_name = "a2a_servers")]
+#[sea_orm(table_name = "files")]
 pub struct Model {
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
     #[sea_orm(primary_key)]
     pub id: i32,
     #[sea_orm(unique)]
-    pub uuid: Uuid,
-    pub base_url: Option<String>,
-    pub enabled: Option<bool>,
-    pub agent_card: Option<Json>,
+    pub uuid: Option<Uuid>,
+    pub filename: Option<String>,
+    pub filepath: Option<String>,
+    pub key: Option<String>,
+    pub extension: Option<String>,
+    pub mime_type: Option<String>,
+    pub size: Option<i32>,
     pub user_id: Option<Uuid>,
-    pub status: Option<String>,
     pub is_deleted: Option<bool>,
     #[sea_orm(column_type = "Text", nullable)]
     pub remark: Option<String>,

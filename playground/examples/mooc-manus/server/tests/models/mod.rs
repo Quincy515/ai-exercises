@@ -9,3 +9,5 @@ mod mcp_servers;
 mod a2a_servers;
 
 mod sessions;
+
+mod files;
