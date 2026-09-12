@@ -3,7 +3,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use crate::domain::models::{File, Plan, Step, ToolResult};
+use crate::domain::models::{File, Plan, SearchResultItem, Step, ToolResult};
 
 /// 事件类型
 /// Event type.
@@ -254,6 +254,33 @@ pub struct BrowserToolContent {
     pub screenshot: String,
 }
 
+/// 搜索工具内容
+/// Search tool content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchToolContent {
+    /// 搜索结果列表
+    /// Search result list.
+    pub results: Vec<SearchResultItem>,
+}
+
+/// Shell 工具内容
+/// Shell tool content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShellToolContent {
+    /// 控制台内容
+    /// Console content.
+    pub console: Value,
+}
+
+/// 文件工具内容
+/// File tool content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileToolContent {
+    /// 文件内容
+    /// File content.
+    pub content: String,
+}
+
 /// MCP 工具内容
 /// MCP tool content.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -263,13 +290,26 @@ pub struct McpToolContent {
     pub result: Value,
 }
 
+/// A2A 智能体工具内容
+/// A2A agent tool content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct A2aToolContent {
+    /// A2A 智能体调用结果
+    /// A2A agent invocation result.
+    pub a2a_result: Value,
+}
+
 /// 工具扩展内容
 /// Extended tool content.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum ToolContent {
     Browser(BrowserToolContent),
+    Search(SearchToolContent),
+    Shell(ShellToolContent),
+    File(FileToolContent),
     Mcp(McpToolContent),
+    A2a(A2aToolContent),
 }
 
 /// 工具事件
@@ -495,11 +535,12 @@ fn event_now() -> DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BaseEvent, BrowserToolContent, DoneEvent, ErrorEvent, Event, EventType, McpToolContent,
-        MessageEvent, MessageRole, PlanEvent, PlanEventStatus, StepEvent, StepEventStatus,
-        TitleEvent, ToolContent, ToolEvent, ToolEventStatus, WaitEvent,
+        A2aToolContent, BaseEvent, BrowserToolContent, DoneEvent, ErrorEvent, Event, EventType,
+        FileToolContent, McpToolContent, MessageEvent, MessageRole, PlanEvent, PlanEventStatus,
+        SearchToolContent, ShellToolContent, StepEvent, StepEventStatus, TitleEvent, ToolContent,
+        ToolEvent, ToolEventStatus, WaitEvent,
     };
-    use crate::domain::models::{File, Plan, Step, ToolResult};
+    use crate::domain::models::{File, Plan, SearchResultItem, Step, ToolResult};
     use serde_json::{json, Value};
     use uuid::Uuid;
 
@@ -747,22 +788,128 @@ mod tests {
     }
 
     #[test]
-    fn tool_content_matches_python_union_shape() {
-        let browser = ToolContent::Browser(BrowserToolContent {
-            screenshot: "snapshot.png".to_string(),
-        });
-        assert_eq!(
-            serde_json::to_value(browser).unwrap(),
-            json!({ "screenshot": "snapshot.png" })
-        );
+    fn tool_content_preserves_json_shape_and_event_round_trip() {
+        let cases = [
+            (
+                ToolContent::Browser(BrowserToolContent {
+                    screenshot: "snapshot.png".to_string(),
+                }),
+                json!({"screenshot": "snapshot.png"}),
+            ),
+            (
+                ToolContent::Search(SearchToolContent {
+                    results: vec![SearchResultItem {
+                        url: "https://example.com".to_string(),
+                        title: "课程资料".to_string(),
+                        snippet: "工具内容设计".to_string(),
+                    }],
+                }),
+                json!({"results": [{
+                    "url": "https://example.com",
+                    "title": "课程资料",
+                    "snippet": "工具内容设计"
+                }]}),
+            ),
+            (
+                ToolContent::Shell(ShellToolContent {
+                    console: json!([{"output": "执行完成", "exit_code": 0}]),
+                }),
+                json!({"console": [{"output": "执行完成", "exit_code": 0}]}),
+            ),
+            (
+                ToolContent::File(FileToolContent {
+                    content: "# 学习笔记\n工具内容\n".to_string(),
+                }),
+                json!({"content": "# 学习笔记\n工具内容\n"}),
+            ),
+            (
+                ToolContent::Mcp(McpToolContent {
+                    result: json!({"answer": 42}),
+                }),
+                json!({"result": {"answer": 42}}),
+            ),
+            (
+                ToolContent::A2a(A2aToolContent {
+                    a2a_result: json!({"artifacts": [{"text": "分析完成"}]}),
+                }),
+                json!({"a2a_result": {"artifacts": [{"text": "分析完成"}]}}),
+            ),
+        ];
 
-        let mcp = ToolContent::Mcp(McpToolContent {
-            result: json!({ "answer": 42 }),
-        });
-        assert_eq!(
-            serde_json::to_value(mcp).unwrap(),
-            json!({ "result": { "answer": 42 } })
-        );
+        for (content, expected) in cases {
+            // 保持各工具原有的 JSON 字段，并确保反序列化选择正确的枚举变体。
+            assert_eq!(serde_json::to_value(&content).unwrap(), expected);
+            let restored: ToolContent = serde_json::from_value(expected.clone()).unwrap();
+            assert_eq!(restored, content);
+
+            // 工具内容随事件保存和读取时，嵌套数据与具体类型都应完整保留。
+            let event = Event::Tool(ToolEvent {
+                tool_content: Some(content),
+                ..ToolEvent::default()
+            });
+            let value = serde_json::to_value(&event).unwrap();
+            assert_eq!(value["tool_content"], expected);
+            assert_eq!(serde_json::from_value::<Event>(value).unwrap(), event);
+            let text = serde_json::to_string(&event).unwrap();
+            assert_eq!(serde_json::from_str::<Event>(&text).unwrap(), event);
+        }
+    }
+
+    #[test]
+    fn tool_content_preserves_arbitrary_json_results() {
+        for payload in [
+            Value::Null,
+            json!(true),
+            json!(42),
+            json!("执行完成"),
+            json!(["日志", null, 1]),
+            json!({"nested": {"status": "done"}}),
+        ] {
+            let cases = [
+                (
+                    "console",
+                    ToolContent::Shell(ShellToolContent {
+                        console: payload.clone(),
+                    }),
+                ),
+                (
+                    "result",
+                    ToolContent::Mcp(McpToolContent {
+                        result: payload.clone(),
+                    }),
+                ),
+                (
+                    "a2a_result",
+                    ToolContent::A2a(A2aToolContent {
+                        a2a_result: payload.clone(),
+                    }),
+                ),
+            ];
+            for (field, expected) in cases {
+                let value = json!({(field): payload});
+                assert_eq!(serde_json::to_value(&expected).unwrap(), value);
+                assert_eq!(
+                    serde_json::from_value::<ToolContent>(value).unwrap(),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tool_content_requires_its_payload_field_and_type() {
+        for invalid in [
+            json!({}),
+            json!({"screenshot": null}),
+            json!({"results": null}),
+            json!({"results": {}}),
+            json!({"content": 123}),
+        ] {
+            assert!(
+                serde_json::from_value::<ToolContent>(invalid.clone()).is_err(),
+                "{invalid}"
+            );
+        }
     }
 
     #[test]

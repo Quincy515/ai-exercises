@@ -14,9 +14,10 @@ pub use app_config::{
     McpTransport,
 };
 pub use event::{
-    BaseEvent, BrowserToolContent, DoneEvent, ErrorEvent, Event, EventType, McpToolContent,
-    MessageEvent, MessageRole, PlanEvent, PlanEventStatus, StepEvent, StepEventStatus, TitleEvent,
-    ToolContent, ToolEvent, ToolEventStatus, WaitEvent,
+    A2aToolContent, BaseEvent, BrowserToolContent, DoneEvent, ErrorEvent, Event, EventType,
+    FileToolContent, McpToolContent, MessageEvent, MessageRole, PlanEvent, PlanEventStatus,
+    SearchToolContent, ShellToolContent, StepEvent, StepEventStatus, TitleEvent, ToolContent,
+    ToolEvent, ToolEventStatus, WaitEvent,
 };
 pub use file::File;
 pub use health_status::HealthStatus;
