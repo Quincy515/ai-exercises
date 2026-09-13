@@ -1,18 +1,23 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use async_trait::async_trait;
+use futures::TryStreamExt;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use crate::domain::{
     external::{
         Browser, FileStorage, JsonParser, Llm, Sandbox, SearchEngine, SharedTask, Task, TaskRunner,
+        UploadFile,
     },
-    models::{A2aConfig, AgentConfig, ErrorEvent, Event, McpConfig, SessionStatus},
+    models::{
+        A2aConfig, AgentConfig, ErrorEvent, Event, File, McpConfig, Message, MessageEvent,
+        SessionStatus,
+    },
     repositories::{FileRepository, SessionRepository},
     services::{
-        flows::PlannerReActFlow,
+        flows::{BaseFlow, PlannerReActFlow},
         tools::{A2ATool, McpTool},
     },
 };
@@ -25,10 +30,10 @@ pub struct AgentTaskRunner {
     session_repository: Arc<dyn SessionRepository>,
     /// 沙箱
     sandbox: Arc<dyn Sandbox>,
-    /// 文件存储桶，供后续附件同步使用
-    _file_storage: Arc<dyn FileStorage>,
-    /// 文件数据仓库，供后续附件同步使用
-    _file_repository: Arc<dyn FileRepository>,
+    /// 文件存储桶
+    file_storage: Arc<dyn FileStorage>,
+    /// 文件数据仓库
+    file_repository: Arc<dyn FileRepository>,
     /// 规划与执行流；异步锁协调任务调用和资源销毁。
     flow: Mutex<PlannerReActFlow>,
 }
@@ -69,8 +74,8 @@ impl AgentTaskRunner {
             session_id,
             session_repository,
             sandbox,
-            _file_storage: file_storage,
-            _file_repository: file_repository,
+            file_storage,
+            file_repository,
             flow: Mutex::new(flow),
         }
     }
@@ -104,6 +109,174 @@ impl AgentTaskRunner {
         event.set_id(event_id);
         Ok(Some(event))
     }
+
+    /// 根据文件 id 将文件同步到沙箱中。
+    async fn sync_file_to_sandbox(&self, file_id: &str) -> Option<File> {
+        let result: Result<Option<File>> = async {
+            // 1.调用文件存储下载文件信息。
+            let (mut file_data, mut file) = self.file_storage.download_file(file_id).await?;
+
+            // 2.组装沙箱文件路径。
+            let filepath = format!("/home/ubuntu/upload/{}", file.filename);
+
+            // 3.调用沙箱将文件上传至沙箱。
+            // 存储返回异步字节流，沙箱上传接口接收完整的 Vec<u8>。
+            let mut content = Vec::new();
+            while let Some(chunk) = file_data.try_next().await? {
+                content.extend_from_slice(&chunk);
+            }
+            let tool_result = self
+                .sandbox
+                .upload_file(content, &filepath, Some(&file.filename))
+                .await?;
+
+            // 4.判断是否上传成功。
+            if tool_result.success {
+                file.filepath = filepath;
+                // 可以更新也可以不更新；这里保存沙箱路径，保持文件元数据同步。
+                self.file_repository.save(file.clone()).await?;
+                return Ok(Some(file));
+            }
+            Ok(None)
+        }
+        .await;
+
+        match result {
+            Ok(file) => file,
+            Err(error) => {
+                error!(file_id, error = %error, "AgentTaskRunner同步文件到沙箱失败");
+                None
+            }
+        }
+    }
+
+    /// 将消息事件中的附件同步到沙箱中。
+    async fn sync_message_attachments_to_sandbox(&self, event: &mut MessageEvent) {
+        // 1.定义附件列表。
+        let mut attachments = Vec::new();
+        let result: Result<()> = async {
+            // 2.判断消息中是否存在附件。
+            if !event.attachments.is_empty() {
+                // 3.循环遍历所有的消息附件。
+                for attachment in &event.attachments {
+                    // 4.根据同步文件的 id 将数据同步到沙箱中。
+                    // 5.文件是否同步成功。
+                    if let Some(file) = self.sync_file_to_sandbox(&attachment.id).await {
+                        attachments.push(file.clone());
+                        self.session_repository
+                            .add_file(&self.session_id, file)
+                            .await?;
+                    }
+                }
+
+                // 6.更新消息事件中的 attachments。
+                event.attachments = attachments;
+            }
+            Ok(())
+        }
+        .await;
+
+        if let Err(error) = result {
+            error!(error = %error, "AgentTaskRunner同步消息附件到沙箱失败");
+        }
+    }
+
+    /// 将沙箱中指定的文件路径数据同步到存储桶中。
+    async fn sync_file_to_storage(&self, filepath: &str) -> Option<File> {
+        let result: Result<File> = async {
+            // 1.根据文件路径从会话中查找文件数据。
+            let existing_file = self
+                .session_repository
+                .get_file_by_path(&self.session_id, filepath)
+                .await?;
+
+            // 2.从沙箱中下载文件。
+            let file_data = self.sandbox.download_file(filepath).await?;
+
+            // 3.判断会话中的文件是否存在。
+            if let Some(file) = existing_file {
+                // 当前仓库按文件 id 移除记录，路径用于上一步查找。
+                self.session_repository
+                    .remove_file(&self.session_id, &file.id)
+                    .await?;
+            }
+
+            // 4.提取文件名字、文件信息并更新文件路径。
+            // UploadFile.mime_type 为 Option，允许不填写，沿用存储层的默认处理。
+            let upload_file = UploadFile {
+                filename: filepath.rsplit('/').next().unwrap_or_default().to_string(),
+                mime_type: None,
+                content: file_data.into(),
+            };
+
+            // 5.上传文件到文件存储桶。
+            let mut file = self.file_storage.upload_file(upload_file).await?;
+            file.filepath = filepath.to_string();
+
+            // 6.往会话中新增一个文件信息。
+            self.session_repository
+                .add_file(&self.session_id, file.clone())
+                .await?;
+            Ok(file)
+        }
+        .await;
+
+        match result {
+            Ok(file) => Some(file),
+            Err(error) => {
+                error!(filepath, error = %error, "AgentTaskRunner同步消息附件到文件存储桶失败");
+                None
+            }
+        }
+    }
+
+    /// 将消息事件的附件同步到文件存储桶中。
+    async fn sync_message_attachments_to_storage(&self, event: &mut MessageEvent) {
+        // 1.定义附件列表存储数据。
+        let mut attachments = Vec::new();
+
+        // 2.判断消息中是否存在附件；3.循环遍历所有附件。
+        for attachment in &event.attachments {
+            // 4.根据文件路径将数据同步到文件存储桶。
+            // 单个文件的失败已记录日志，继续同步其余附件。
+            if let Some(file) = self.sync_file_to_storage(&attachment.filepath).await {
+                attachments.push(file);
+            }
+        }
+
+        // 5.更新事件中的附件列表资源。
+        event.attachments = attachments;
+    }
+
+    /// 根据消息对象运行 PlannerReActFlow。
+    async fn run_flow(&self, flow: &mut dyn BaseFlow, message: Message) -> Result<Vec<Event>> {
+        // 1.判断传递的消息是否为空。
+        if message.message.is_empty() {
+            warn!("AgentTaskRunner接收了一条空消息");
+            return Ok(vec![Event::Error(ErrorEvent {
+                error: "空消息错误".to_string(),
+                ..ErrorEvent::default()
+            })]);
+        }
+
+        // 2.调用流并运行获取事件信息。
+        // 复用现有批量事件接口；flow 由调用方持锁后借入，避免重复锁定同一实例。
+        let mut events = flow.invoke(message).await?;
+        for event in &mut events {
+            match event {
+                // 3.判断是否为工具事件，如果是则额外处理。
+                Event::Tool(_) => {
+                    // todo:工具事件额外处理。
+                }
+                // 4.如果是消息事件则将 AI 消息事件中的附件同步到存储中。
+                Event::Message(event) => self.sync_message_attachments_to_storage(event).await,
+                _ => {}
+            }
+        }
+
+        // 5.将事件直接返回。
+        Ok(events)
+    }
 }
 
 #[async_trait]
@@ -122,12 +295,32 @@ impl TaskRunner for AgentTaskRunner {
             // 2.循环读取任务中的输入消息队列。
             while !task.input_stream().is_empty().await? {
                 // 3.从输入流中获取数据。
-                let Some(_event) = Self::pop_event(task.as_ref()).await? else {
+                let Some(event) = Self::pop_event(task.as_ref()).await? else {
                     continue;
                 };
-                let _message = String::new();
 
-                // todo:后续的逻辑待实现（附件同步、消息转换、调用流和事件处理）。
+                // 4.判断事件类型是否为消息事件，如果是则处理消息并将附件同步到沙箱中。
+                let Event::Message(mut event) = event else {
+                    bail!("任务输入事件必须是消息事件");
+                };
+                self.sync_message_attachments_to_sandbox(&mut event).await;
+                info!(message = %event.message.chars().take(50).collect::<String>(),
+                    "AgentTaskRunner接收到新消息");
+
+                // 5.将消息事件转换成消息对象。
+                let message_obj = Message {
+                    message: event.message,
+                    attachments: event
+                        .attachments
+                        .into_iter()
+                        .map(|file| file.filepath)
+                        .collect(),
+                };
+
+                // 6.传递消息对象并运行 PlannerReActFlow。
+                for _event in self.run_flow(&mut *flow, message_obj).await? {
+                    // todo:后续处理流产生的事件（写入输出队列、持久化和更新会话状态）。
+                }
             }
 
             Ok(())

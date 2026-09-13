@@ -24,6 +24,7 @@ pub struct MemoryRepository {
     pub writes: AtomicUsize,
     pub fail_read: AtomicBool,
     pub fail_save: AtomicBool,
+    pub fail_add_file: AtomicBool,
 }
 
 impl MemoryRepository {
@@ -117,16 +118,35 @@ impl SessionRepository for MemoryRepository {
         Ok(())
     }
 
-    async fn add_file(&self, _session_id: &str, _file: File) -> Result<()> {
-        bail!("测试中不应调用 add_file")
+    async fn add_file(&self, session_id: &str, file: File) -> Result<()> {
+        if self.fail_add_file.load(Ordering::SeqCst) {
+            bail!("模拟添加会话文件失败");
+        }
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow::anyhow!("会话[{session_id}]不存在"))?;
+        session.files.push(file);
+        Ok(())
     }
 
-    async fn remove_file(&self, _session_id: &str, _file_id: &str) -> Result<()> {
-        bail!("测试中不应调用 remove_file")
+    async fn remove_file(&self, session_id: &str, file_id: &str) -> Result<()> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow::anyhow!("会话[{session_id}]不存在"))?;
+        session.files.retain(|file| file.id != file_id);
+        Ok(())
     }
 
-    async fn get_file_by_path(&self, _session_id: &str, _filepath: &str) -> Result<Option<File>> {
-        bail!("测试中不应调用 get_file_by_path")
+    async fn get_file_by_path(&self, session_id: &str, filepath: &str) -> Result<Option<File>> {
+        let session = self
+            .session(session_id)
+            .ok_or_else(|| anyhow::anyhow!("会话[{session_id}]不存在"))?;
+        Ok(session
+            .files
+            .into_iter()
+            .find(|file| file.filepath == filepath))
     }
 
     async fn save_memory(&self, session_id: &str, agent_name: &str, memory: Memory) -> Result<()> {
