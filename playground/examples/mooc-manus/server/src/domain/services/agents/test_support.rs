@@ -108,8 +108,13 @@ impl SessionRepository for MemoryRepository {
         Ok(())
     }
 
-    async fn add_event(&self, _session_id: &str, _event: Event) -> Result<()> {
-        bail!("测试中不应调用 add_event")
+    async fn add_event(&self, session_id: &str, event: Event) -> Result<()> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow::anyhow!("会话[{session_id}]不存在"))?;
+        session.events.push(event);
+        Ok(())
     }
 
     async fn add_file(&self, _session_id: &str, _file: File) -> Result<()> {

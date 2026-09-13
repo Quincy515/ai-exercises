@@ -421,6 +421,8 @@ impl McpClientManager {
 /// MCP 工具包，包含所有已配置并已启动的 MCP 工具。
 /// MCP tool collection containing configured and connected MCP tools.
 pub struct McpTool {
+    /// 保存 MCP 配置，首次运行时初始化连接。
+    config: Option<McpConfig>,
     /// MCP 客户端管理器。
     /// MCP client manager.
     manager: Option<McpClientManager>,
@@ -437,9 +439,18 @@ impl McpTool {
     /// Create an empty MCP tool collection.
     pub fn new() -> Self {
         Self {
+            config: None,
             manager: None,
             definitions: Vec::new(),
             initialized: false,
+        }
+    }
+
+    /// 保存 MCP 配置，连接和工具声明在初始化时加载。
+    pub fn with_config(config: Option<McpConfig>) -> Self {
+        Self {
+            config,
+            ..Self::new()
         }
     }
 
@@ -452,6 +463,7 @@ impl McpTool {
         }
 
         // 2.初始化 MCP 客户端管理器
+        self.config = mcp_config.clone();
         let mut manager = McpClientManager::new(mcp_config);
         manager.initialize().await;
 
@@ -492,6 +504,11 @@ impl BaseTool for McpTool {
 
     fn tool_definitions(&self) -> &[ToolDefinition] {
         &self.definitions
+    }
+
+    async fn initialize(&mut self) -> Result<()> {
+        let config = self.config.clone();
+        McpTool::initialize(self, config).await
     }
 
     async fn call_tool(&self, tool_name: &str, kwargs: ToolArguments) -> Result<ToolResult<Value>> {
@@ -714,6 +731,31 @@ mod tests {
         assert!(!tool.initialized);
         assert!(tool.manager.is_none());
         assert!(tool.tool_definitions().is_empty());
+    }
+
+    #[tokio::test]
+    async fn initializes_configured_mcp_tool_through_base_tool() {
+        let config = McpConfig {
+            mcp_servers: HashMap::from_iter([(
+                "disabled".to_string(),
+                McpServerConfig {
+                    enabled: false,
+                    ..McpServerConfig::default()
+                },
+            )]),
+        };
+        let mut tool = McpTool::with_config(Some(config.clone()));
+        assert!(tool.manager.is_none());
+
+        for _ in 0..2 {
+            BaseTool::initialize(&mut tool).await.unwrap();
+            assert!(tool.initialized);
+            assert_eq!(
+                tool.manager.as_ref().unwrap().mcp_config,
+                Some(config.clone())
+            );
+            tool.cleanup().await.unwrap();
+        }
     }
 
     #[tokio::test]

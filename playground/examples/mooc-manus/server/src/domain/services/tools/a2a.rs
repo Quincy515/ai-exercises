@@ -217,6 +217,8 @@ impl A2AClientManager {
 /// A2A 工具包，根据传递的配置完成 A2A 工具包的初始化
 pub struct A2ATool {
     name: String,
+    /// 保存 A2A 配置，首次运行时初始化远程 Agent。
+    config: Option<A2aConfig>,
     manager: Option<A2AClientManager>,
     definitions: Vec<ToolDefinition>,
     initialized: bool,
@@ -227,6 +229,7 @@ impl A2ATool {
     pub fn new() -> Self {
         Self {
             name: "a2a".to_string(),
+            config: None,
             manager: None,
             definitions: vec![
                 tool(
@@ -261,11 +264,20 @@ impl A2ATool {
         }
     }
 
+    /// 保存 A2A 配置，远程 Agent 卡片在初始化时加载。
+    pub fn with_config(config: Option<A2aConfig>) -> Self {
+        Self {
+            config,
+            ..Self::new()
+        }
+    }
+
     /// 初始化 A2A 工具包
     pub async fn initialize(&mut self, a2a_config: Option<A2aConfig>) -> Result<()> {
         // 1.判断下是否已初始化
         if !self.initialized {
             // 2.初始化 A2A 客户端管理器
+            self.config = a2a_config.clone();
             let mut manager = A2AClientManager::new(a2a_config);
             manager.initialize().await?;
             self.manager = Some(manager);
@@ -326,6 +338,11 @@ impl BaseTool for A2ATool {
 
     fn tool_definitions(&self) -> &[ToolDefinition] {
         &self.definitions
+    }
+
+    async fn initialize(&mut self) -> Result<()> {
+        let config = self.config.clone();
+        A2ATool::initialize(self, config).await
     }
 
     async fn call_tool(&self, tool_name: &str, kwargs: ToolArguments) -> Result<ToolResult<Value>> {
@@ -598,5 +615,26 @@ mod tests {
         tool.cleanup().await.unwrap();
         assert!(!tool.initialized);
         assert!(tool.manager.is_none());
+    }
+
+    #[tokio::test]
+    async fn initializes_configured_a2a_tool_through_base_tool() {
+        let server = TestServer::start().await;
+        let mut tool: Box<dyn BaseTool> =
+            Box::new(A2ATool::with_config(Some(server.config("remote"))));
+
+        assert!(tool
+            .call_tool("get_remote_agent_cards", Map::new())
+            .await
+            .is_err());
+        for _ in 0..2 {
+            tool.initialize().await.unwrap();
+            let cards = tool
+                .invoke("get_remote_agent_cards", Map::new())
+                .await
+                .unwrap();
+            assert_eq!(cards.data.unwrap()[0]["id"], "remote");
+            tool.cleanup().await.unwrap();
+        }
     }
 }

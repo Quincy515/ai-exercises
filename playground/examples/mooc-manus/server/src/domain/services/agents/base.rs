@@ -113,6 +113,24 @@ impl BaseAgent {
         self.json_parser.as_ref()
     }
 
+    /// 按注册顺序初始化工具，使执行 Agent 直接使用初始化后的工具声明和连接。
+    pub(crate) async fn initialize_tools(&mut self) -> Result<()> {
+        for tool in &mut self.tools {
+            tool.initialize().await?;
+        }
+        Ok(())
+    }
+
+    /// 按指定工具集名称及顺序释放长期资源。
+    pub(crate) async fn cleanup_tools(&mut self, names: &[&str]) -> Result<()> {
+        for name in names {
+            if let Some(tool) = self.tools.iter_mut().find(|tool| tool.name() == *name) {
+                tool.cleanup().await?;
+            }
+        }
+        Ok(())
+    }
+
     /// 压缩 Agent 的记忆。
     pub async fn compact_memory(&mut self) -> Result<()> {
         // 1. 先从仓库加载当前 Agent 的记忆
@@ -689,6 +707,71 @@ mod tests {
         }
     }
 
+    struct LifecycleTool {
+        name: &'static str,
+        definitions: Vec<ToolDefinition>,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl LifecycleTool {
+        fn new(name: &'static str, calls: Arc<Mutex<Vec<String>>>) -> Self {
+            Self {
+                name,
+                definitions: Vec::new(),
+                calls,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BaseTool for LifecycleTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn tool_definitions(&self) -> &[ToolDefinition] {
+            &self.definitions
+        }
+
+        async fn initialize(&mut self) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("initialize:{}", self.name));
+            self.definitions = vec![tool(
+                format!("{}_call", self.name),
+                "初始化后加载的工具",
+                ToolArguments::new(),
+                Vec::new(),
+            )];
+            Ok(())
+        }
+
+        async fn call_tool(
+            &self,
+            _tool_name: &str,
+            _kwargs: ToolArguments,
+        ) -> Result<ToolResult<Value>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("call:{}", self.name));
+            Ok(ToolResult {
+                data: Some(json!(self.name)),
+                ..ToolResult::default()
+            })
+        }
+
+        async fn cleanup(&mut self) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("cleanup:{}", self.name));
+            self.definitions.clear();
+            Ok(())
+        }
+    }
+
     fn assistant_message(content: Value) -> LlmMessage {
         LlmMessage::from_iter([
             ("role".to_string(), json!("assistant")),
@@ -761,6 +844,46 @@ mod tests {
             requests,
             tool_counts,
         )
+    }
+
+    #[tokio::test]
+    async fn initialized_tool_definitions_are_available_to_the_same_agent() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let (mut agent, _, _, _) = agent(
+            Vec::new(),
+            vec![Box::new(LifecycleTool::new("mcp", calls.clone()))],
+        );
+        assert!(agent.get_available_tools().is_empty());
+        assert!(agent.get_tool("mcp_call").is_err());
+
+        agent.initialize_tools().await.unwrap();
+
+        assert_eq!(
+            agent.get_available_tools()[0]["function"]["name"],
+            "mcp_call"
+        );
+        let result = agent
+            .get_tool("mcp_call")
+            .unwrap()
+            .invoke("mcp_call", ToolArguments::new())
+            .await
+            .unwrap();
+        assert_eq!(result.data, Some(json!("mcp")));
+        assert_eq!(*calls.lock().unwrap(), ["initialize:mcp", "call:mcp"]);
+    }
+
+    #[tokio::test]
+    async fn tool_cleanup_follows_requested_order_and_scope() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let tools = ["a2a", "browser", "mcp"]
+            .into_iter()
+            .map(|name| Box::new(LifecycleTool::new(name, calls.clone())) as Box<dyn BaseTool>)
+            .collect();
+        let (mut agent, _, _, _) = agent(Vec::new(), tools);
+
+        agent.cleanup_tools(&["mcp", "a2a"]).await.unwrap();
+
+        assert_eq!(*calls.lock().unwrap(), ["cleanup:mcp", "cleanup:a2a"]);
     }
 
     #[tokio::test]

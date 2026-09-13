@@ -436,6 +436,23 @@ pub enum Event {
     Done(DoneEvent),
 }
 
+impl Event {
+    /// 使用消息队列返回的 id 更新事件，便于关联队列消息和会话历史。
+    pub fn set_id(&mut self, id: impl Into<String>) {
+        let base = match self {
+            Self::Plan(event) => &mut event.base,
+            Self::Title(event) => &mut event.base,
+            Self::Step(event) => &mut event.base,
+            Self::Message(event) => &mut event.base,
+            Self::Tool(event) => &mut event.base,
+            Self::Wait(event) => &mut event.base,
+            Self::Error(event) => &mut event.base,
+            Self::Done(event) => &mut event.base,
+        };
+        base.id = id.into();
+    }
+}
+
 impl Serialize for Event {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -693,6 +710,13 @@ mod tests {
             let text = serde_json::to_string(&event).unwrap();
             let restored: Event = serde_json::from_str(&text).unwrap();
             assert_eq!(restored, event, "{expected_type} event lost data");
+
+            // 队列 id 替换初始 id 时，保留原有类型、时间和业务内容。
+            let mut expected = serde_json::to_value(&event).unwrap();
+            expected["id"] = json!("1750000000000-0");
+            let mut event = event;
+            event.set_id("1750000000000-0");
+            assert_eq!(serde_json::to_value(event).unwrap(), expected);
         }
     }
 

@@ -123,6 +123,22 @@ impl PlannerReActFlow {
     pub fn plan(&self) -> Option<&Plan> {
         self.plan.as_ref()
     }
+
+    /// 初始化执行 Agent 独占的工具，确保后续调用使用同一实例。
+    pub(crate) async fn initialize_tools(&mut self) -> Result<()> {
+        self.react.base_mut().initialize_tools().await
+    }
+
+    /// 按任务运行器的顺序清理远程工具资源。
+    pub(crate) async fn cleanup_tools(&mut self) -> Result<()> {
+        // 2.清除 mcp 工具
+        info!("销毁AgentTaskRunner中的mcp工具");
+        self.react.base_mut().cleanup_tools(&["mcp"]).await?;
+
+        // 3.清除 a2a 工具
+        info!("销毁AgentTaskRunner中的a2a工具");
+        self.react.base_mut().cleanup_tools(&["a2a"]).await
+    }
 }
 
 #[async_trait]

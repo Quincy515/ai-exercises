@@ -263,6 +263,12 @@ pub trait BaseTool: Send + Sync {
     /// Return tool declarations for this tool collection.
     fn tool_definitions(&self) -> &[ToolDefinition];
 
+    /// 初始化工具持有的长期资源；普通工具使用默认空实现。
+    /// Initialize long-lived resources; stateless tools use the default no-op implementation.
+    async fn initialize(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     /// 调用已过滤参数后的具体工具。
     /// Dispatch the concrete tool with filtered arguments.
     async fn call_tool(&self, tool_name: &str, kwargs: ToolArguments) -> Result<ToolResult<Value>>;
