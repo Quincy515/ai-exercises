@@ -10,7 +10,7 @@ default-run = "server-cli"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [workspace.dependencies]
-loco-rs = { version = "0.16" }
+loco-rs = { version = "1.1" }
 
 [dependencies]
 anyhow = "1"
@@ -18,10 +18,6 @@ bytes = "1"
 bollard = "0.21"
 thiserror = "2"
 loco-rs = { workspace = true, features = ["cache_redis", "storage_aws_s3"] }
-loco-openapi = { version = "0.1.2", default-features = false, features = [
-    "swagger",
-    "redoc",
-] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 tokio = { version = "1.45", default-features = false, features = [
@@ -38,7 +34,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 regex = { version = "1.11" }
 redis = { version = "1", features = ["tokio-rustls-comp"] }
 migration = { path = "migration" }
-sea-orm = { version = "1.1", features = [
+sea-orm = { version = "2.0", features = [
     "sqlx-sqlite",
     "sqlx-postgres",
     "runtime-tokio-rustls",
@@ -48,7 +44,10 @@ chrono = { version = "0.4" }
 validator = { version = "0.20" }
 uuid = { version = "1.6", features = ["v4"] }
 include_dir = { version = "0.7" }
-utoipa = { version = "5.5" }
+utoipa = { version = "5.5", features = ["yaml"] }
+utoipa-axum = "0.2"
+utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
+utoipa-redoc = { version = "6", features = ["axum"] }
 async-openai = { version = "0.40", features = ["full"] }
 llm_json = "1"
 reqwest = { version = "0.13", features = [

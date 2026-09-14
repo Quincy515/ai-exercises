@@ -5,7 +5,7 @@ use server::app::App;
 #[tokio::test]
 #[serial]
 async fn exposes_openapi_json_for_auth_routes() {
-    request_with_create_db::<App, _, _>(|request, _ctx| async move {
+    request_with_create_db::<App, _, _>(|request, ctx| async move {
         for endpoint in ["/api-docs/openapi.json", "/redoc/openapi.json"] {
             let response = request.get(endpoint).await;
 
@@ -15,6 +15,14 @@ async fn exposes_openapi_json_for_auth_routes() {
                 .unwrap_or_else(|err| panic!("{endpoint} should return OpenAPI JSON: {err}"));
 
             assert_eq!(document["openapi"], "3.1.0");
+            assert_eq!(
+                document["components"]["securitySchemes"]["jwt_token"]["scheme"],
+                "bearer"
+            );
+            assert_eq!(
+                document["components"]["securitySchemes"]["api_key"]["name"],
+                "apikey"
+            );
             assert!(document["paths"].get("/api/auth/login").is_some());
             assert_eq!(
                 document["paths"]["/api/auth/login"]["post"]["summary"],
@@ -30,18 +38,30 @@ async fn exposes_openapi_json_for_auth_routes() {
                 "系统健康检查"
             );
         }
+        request.get("/swagger/").await.assert_status_ok();
+        request.get("/redoc").await.assert_status_ok();
+        // 先关闭共享连接池，再让 Loco 删除临时数据库。
+        ctx.db.close().await.expect("close test database pool");
     })
     .await;
 }
 
 #[test]
+#[serial]
 fn auth_openapi_uses_automatic_route_collection() {
-    let app_source = include_str!("../../src/app.rs");
-    let auth_source = include_str!("../../src/controllers/auth.rs");
+    use server::{controllers, openapi};
 
-    assert!(app_source.contains("None,"));
-    assert!(!app_source.contains("controllers::auth::openapi_routes"));
-    assert!(!auth_source.contains("pub fn openapi_routes"));
-    assert!(auth_source.contains("openapi(post(register), routes!(register))"));
-    assert!(auth_source.contains("openapi(get(current), routes!(current))"));
+    openapi::clear_routes();
+    controllers::auth::routes();
+    let auth = openapi::document();
+    assert!(auth.paths.paths.contains_key("/api/auth/login"));
+    assert!(!auth.paths.paths.contains_key("/api/files"));
+
+    controllers::files::routes();
+    let combined = openapi::document();
+    assert!(combined.paths.paths.contains_key("/api/auth/login"));
+    assert!(combined.paths.paths.contains_key("/api/files"));
+
+    openapi::clear_routes();
+    assert!(openapi::document().paths.paths.is_empty());
 }

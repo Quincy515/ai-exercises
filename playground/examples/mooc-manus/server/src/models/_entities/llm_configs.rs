@@ -9,7 +9,7 @@ pub struct Model {
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
     #[sea_orm(primary_key)]
-    pub id: i32,
+    pub id: i64,
     pub base_url: Option<String>,
     pub api_key: Option<String>,
     pub model_name: Option<String>,

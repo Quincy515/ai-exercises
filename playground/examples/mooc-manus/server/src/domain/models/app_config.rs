@@ -35,13 +35,13 @@ impl Default for LlmConfig {
 pub struct AgentConfig {
     /// 最大迭代次数
     #[validate(range(min = 1, max = 999, message = "max_iterations 必须在 1 到 999 之间"))]
-    pub max_iterations: usize,
+    pub max_iterations: i64,
     /// LLM / 工具最大重试次数
     #[validate(range(min = 2, max = 9, message = "max_retries 必须在 2 到 9 之间"))]
-    pub max_retries: usize,
+    pub max_retries: i64,
     /// 最大搜索结果数
     #[validate(range(min = 2, max = 29, message = "max_search_results 必须在 2 到 29 之间"))]
-    pub max_search_results: usize,
+    pub max_search_results: i64,
 }
 
 impl Default for AgentConfig {
@@ -234,6 +234,18 @@ mod tests {
         .is_ok());
 
         for invalid_config in [
+            AgentConfig {
+                max_iterations: -1,
+                ..AgentConfig::default()
+            },
+            AgentConfig {
+                max_retries: -1,
+                ..AgentConfig::default()
+            },
+            AgentConfig {
+                max_search_results: -1,
+                ..AgentConfig::default()
+            },
             AgentConfig {
                 max_iterations: 0,
                 ..AgentConfig::default()

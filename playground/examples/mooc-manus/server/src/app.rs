@@ -1,9 +1,4 @@
 use async_trait::async_trait;
-use loco_openapi::{
-    openapi::clear_routes,
-    prelude::{set_jwt_location, OpenApi},
-    OpenapiInitializerWithSetup,
-};
 use loco_rs::{
     app::{AppContext, Hooks, Initializer},
     bgworker::{BackgroundWorker, Queue},
@@ -20,8 +15,9 @@ use std::path::Path;
 
 #[allow(unused_imports)]
 use crate::{
-    controllers, infrastructure::storage::configure_storage, models::_entities::users,
-    openapi::ApiDoc, tasks, workers::downloader::DownloadWorker,
+    controllers, infrastructure::storage::configure_storage,
+    initializers::openapi::OpenApiInitializer, models::_entities::users, openapi::clear_routes,
+    tasks, workers::downloader::DownloadWorker,
 };
 
 pub struct App;
@@ -50,13 +46,7 @@ impl Hooks for App {
     }
 
     async fn initializers(_ctx: &AppContext) -> Result<Vec<Box<dyn Initializer>>> {
-        Ok(vec![Box::new(OpenapiInitializerWithSetup::new(
-            |ctx| {
-                set_jwt_location(ctx.into());
-                ApiDoc::openapi()
-            },
-            None,
-        ))])
+        Ok(vec![Box::new(OpenApiInitializer)])
     }
 
     async fn after_context(ctx: AppContext) -> Result<AppContext> {

@@ -1,7 +1,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::unnecessary_struct_initialization)]
 #![allow(clippy::unused_async)]
-use loco_openapi::prelude::{openapi, routes};
+use crate::openapi::{openapi, routes};
 use loco_rs::prelude::*;
 
 use crate::{interfaces::service_dependencies, views::HealthStatusResponse};

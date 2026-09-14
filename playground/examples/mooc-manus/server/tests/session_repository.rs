@@ -97,7 +97,7 @@ impl TestDatabase {
 
     async fn execute(&self, sql: &str, values: Vec<sea_orm::Value>) -> Result<()> {
         self.db
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
                 sql,
                 values,

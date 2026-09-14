@@ -30,9 +30,10 @@ async fn persists_agent_config_through_model_facade() {
     );
 
     let updated = AgentConfig {
-        max_iterations: 240,
-        max_retries: 6,
-        max_search_results: 24,
+        // 直接验证持久化层的 BIGINT 存取；业务范围由服务层校验。
+        max_iterations: 3_000_000_000,
+        max_retries: 3_000_000_000,
+        max_search_results: 3_000_000_000,
     };
     AgentConfigs::save_agent_config(db, updated.clone())
         .await

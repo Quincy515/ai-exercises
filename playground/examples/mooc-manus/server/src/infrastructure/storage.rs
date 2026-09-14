@@ -45,10 +45,7 @@ pub async fn configure_storage(ctx: AppContext) -> Result<AppContext> {
     let settings = AppSettings::from_config(&ctx.config)?;
     let storage = settings.storage.build()?;
 
-    Ok(AppContext {
-        storage: storage.into(),
-        ..ctx
-    })
+    Ok(ctx.into_builder().storage(storage.into()).build())
 }
 
 fn require_field(name: &str, value: &str) -> Result<()> {

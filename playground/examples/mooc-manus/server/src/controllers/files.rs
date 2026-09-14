@@ -1,3 +1,4 @@
+use crate::openapi::{openapi, routes};
 use axum::{
     body::Body,
     extract::{
@@ -7,7 +8,6 @@ use axum::{
     http::{header, StatusCode},
 };
 use futures::{StreamExt, TryStreamExt};
-use loco_openapi::prelude::{openapi, routes};
 use loco_rs::prelude::*;
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 

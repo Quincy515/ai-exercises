@@ -1,3 +1,4 @@
+use crate::openapi::{openapi, routes};
 use crate::{
     mailers::auth::AuthMailer,
     models::{
@@ -6,7 +7,6 @@ use crate::{
     },
     views::auth::{CurrentResponse, LoginResponse},
 };
-use loco_openapi::prelude::{openapi, routes};
 use loco_rs::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};

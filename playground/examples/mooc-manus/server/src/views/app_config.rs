@@ -60,9 +60,9 @@ impl From<LlmConfig> for LlmConfigResponse {
 /// Request payload for updating Agent config.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AgentConfigRequest {
-    pub max_iterations: usize,
-    pub max_retries: usize,
-    pub max_search_results: usize,
+    pub max_iterations: i64,
+    pub max_retries: i64,
+    pub max_search_results: i64,
 }
 
 impl From<AgentConfigRequest> for AgentConfig {
@@ -79,9 +79,9 @@ impl From<AgentConfigRequest> for AgentConfig {
 /// Response payload for Agent config.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AgentConfigResponse {
-    pub max_iterations: usize,
-    pub max_retries: usize,
-    pub max_search_results: usize,
+    pub max_iterations: i64,
+    pub max_retries: i64,
+    pub max_search_results: i64,
 }
 
 impl From<AgentConfig> for AgentConfigResponse {

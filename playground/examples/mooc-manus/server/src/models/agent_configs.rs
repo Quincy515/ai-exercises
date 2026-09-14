@@ -11,7 +11,7 @@
 //! `Entity` owns system-level Agent config queries and persistence.
 
 pub use super::_entities::agent_configs::{ActiveModel, Column, Entity, Model};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use sea_orm::entity::prelude::*;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, EntityTrait, IntoActiveModel,
@@ -66,22 +66,16 @@ impl Model {
 
     /// 将数据库行转换成领域层 Agent 配置。
     /// Convert a database row into the domain Agent config.
-    pub fn into_agent_config(self) -> Result<AgentConfig> {
+    pub fn into_agent_config(self) -> AgentConfig {
         let defaults = AgentConfig::default();
 
-        Ok(AgentConfig {
-            max_iterations: db_value_to_domain(
-                self.max_iterations,
-                defaults.max_iterations,
-                "max_iterations",
-            )?,
-            max_retries: db_value_to_domain(self.max_retries, defaults.max_retries, "max_retries")?,
-            max_search_results: db_value_to_domain(
-                self.max_search_results,
-                defaults.max_search_results,
-                "max_search_results",
-            )?,
-        })
+        AgentConfig {
+            max_iterations: self.max_iterations.unwrap_or(defaults.max_iterations),
+            max_retries: self.max_retries.unwrap_or(defaults.max_retries),
+            max_search_results: self
+                .max_search_results
+                .unwrap_or(defaults.max_search_results),
+        }
     }
 }
 
@@ -90,45 +84,26 @@ impl Model {
 impl ActiveModel {
     /// 从领域层 Agent 配置构造新的数据库记录。
     /// Build a new database row from the domain Agent config.
-    pub fn from_agent_config(agent_config: AgentConfig) -> Result<Self> {
-        Ok(Self {
-            max_iterations: Set(Some(domain_value_to_db(
-                agent_config.max_iterations,
-                "max_iterations",
-            )?)),
-            max_retries: Set(Some(domain_value_to_db(
-                agent_config.max_retries,
-                "max_retries",
-            )?)),
-            max_search_results: Set(Some(domain_value_to_db(
-                agent_config.max_search_results,
-                "max_search_results",
-            )?)),
+    pub fn from_agent_config(agent_config: AgentConfig) -> Self {
+        Self {
+            max_iterations: Set(Some(agent_config.max_iterations)),
+            max_retries: Set(Some(agent_config.max_retries)),
+            max_search_results: Set(Some(agent_config.max_search_results)),
             uuid: Set(Uuid::new_v4()),
             user_id: Set(None),
             status: Set(Some(STATUS_ENABLED.to_string())),
             is_deleted: Set(Some(false)),
             remark: Set(None),
             ..Default::default()
-        })
+        }
     }
 
     /// 将领域层 Agent 配置应用到已有数据库记录。
     /// Apply the domain Agent config to an existing database row.
-    pub fn apply_agent_config(&mut self, agent_config: AgentConfig) -> Result<()> {
-        self.max_iterations = Set(Some(domain_value_to_db(
-            agent_config.max_iterations,
-            "max_iterations",
-        )?));
-        self.max_retries = Set(Some(domain_value_to_db(
-            agent_config.max_retries,
-            "max_retries",
-        )?));
-        self.max_search_results = Set(Some(domain_value_to_db(
-            agent_config.max_search_results,
-            "max_search_results",
-        )?));
-        Ok(())
+    pub fn apply_agent_config(&mut self, agent_config: AgentConfig) {
+        self.max_iterations = Set(Some(agent_config.max_iterations));
+        self.max_retries = Set(Some(agent_config.max_retries));
+        self.max_search_results = Set(Some(agent_config.max_search_results));
     }
 }
 
@@ -141,10 +116,9 @@ impl Entity {
     where
         C: ConnectionTrait,
     {
-        Model::find_system_config(db)
+        Ok(Model::find_system_config(db)
             .await?
-            .map(Model::into_agent_config)
-            .transpose()
+            .map(Model::into_agent_config))
     }
 
     /// 保存 Agent 配置。
@@ -159,11 +133,11 @@ impl Entity {
         match Model::find_system_config(db).await? {
             Some(model) => {
                 let mut active_model = model.into_active_model();
-                active_model.apply_agent_config(agent_config)?;
+                active_model.apply_agent_config(agent_config);
                 active_model.update(db).await?;
             }
             None => {
-                ActiveModel::from_agent_config(agent_config)?
+                ActiveModel::from_agent_config(agent_config)
                     .insert(db)
                     .await?;
             }
@@ -181,21 +155,4 @@ fn system_agent_config_condition() -> Condition {
             .add(Column::IsDeleted.is_null())
             .add(Column::IsDeleted.eq(false)),
     )
-}
-
-/// 将数据库的小整数转成领域层 `usize`。
-/// Convert a database small integer into the domain `usize`.
-fn db_value_to_domain(value: Option<i16>, default: usize, field: &str) -> Result<usize> {
-    value.map_or(Ok(default), |value| {
-        usize::try_from(value).with_context(|| {
-            format!("agent_configs.{field} must be greater than or equal to 0: {value}")
-        })
-    })
-}
-
-/// 将领域层 `usize` 转成数据库的小整数。
-/// Convert a domain `usize` into the database small integer.
-fn domain_value_to_db(value: usize, field: &str) -> Result<i16> {
-    i16::try_from(value)
-        .with_context(|| format!("agent_config.{field} is larger than database i16 range: {value}"))
 }

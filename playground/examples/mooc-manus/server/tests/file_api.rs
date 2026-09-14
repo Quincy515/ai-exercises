@@ -16,8 +16,7 @@ use axum_test::{
 };
 use bytes::Bytes;
 use loco_rs::{
-    app::{AppContext, Hooks, SharedStore},
-    cache::{self, Cache},
+    app::{AppContext, Hooks},
     config::Config,
     environment::Environment,
     storage::{drivers, Storage},
@@ -47,16 +46,9 @@ impl TestApp {
             }
         }))?;
         let storage = Arc::new(storage);
-        let ctx = AppContext {
-            environment: Environment::Test,
-            db: database.db.clone(),
-            config,
-            queue_provider: None,
-            mailer: None,
-            storage: Arc::clone(&storage),
-            cache: Arc::new(Cache::new(cache::drivers::null::new())),
-            shared_store: Arc::new(SharedStore::default()),
-        };
+        let ctx = AppContext::builder(Environment::Test, database.db.clone(), config)
+            .storage(Arc::clone(&storage))
+            .build();
         // 使用真实应用路由及 Loco 默认中间件，覆盖路由注册和上传限制的组合行为。
         let router = App::routes(&ctx).to_router::<App>(ctx, Router::new())?;
         let server = TestServer::new(router)?;
@@ -286,7 +278,7 @@ async fn accepts_lesson_sized_files_and_enforces_the_upload_limit() -> Result<()
 #[serial]
 async fn collects_upload_and_download_openapi_schemas_from_registered_routes() -> Result<()> {
     let _app = TestApp::new(Storage::single(drivers::mem::new())).await?;
-    let (_, document) = loco_openapi::openapi::get_merged_router().split_for_parts();
+    let document = server::openapi::document();
     let document = serde_json::to_value(document)?;
     assert!(
         document["paths"]["/api/files"]["post"]["requestBody"]["content"]

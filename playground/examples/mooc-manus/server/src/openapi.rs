@@ -1,8 +1,46 @@
-use loco_openapi::prelude::{OpenApi, SecurityAddon};
+use std::sync::{LazyLock, Mutex};
+
+use axum::routing::MethodRouter;
+use loco_rs::app::AppContext;
+use utoipa::{openapi::OpenApi as OpenApiDocument, OpenApi};
+use utoipa_axum::router::{OpenApiRouter, UtoipaMethodRouter};
+
+pub use utoipa_axum::routes;
+
+// 只收集文档，不保留路由和应用上下文中的数据库连接。
+static ROUTE_DOCUMENT: LazyLock<Mutex<OpenApiDocument>> =
+    LazyLock::new(|| Mutex::new(OpenApiDocument::default()));
+
+pub fn clear_routes() {
+    *ROUTE_DOCUMENT.lock().expect("OpenAPI document lock") = OpenApiDocument::default();
+}
+
+/// 注册 Loco 路由时自动收集 Utoipa 的路径和请求、响应 schema。
+pub fn openapi(
+    method: MethodRouter<AppContext>,
+    metadata: UtoipaMethodRouter<AppContext>,
+) -> MethodRouter<AppContext> {
+    let (_, document) = OpenApiRouter::new().routes(metadata).split_for_parts();
+    ROUTE_DOCUMENT
+        .lock()
+        .expect("OpenAPI document lock")
+        .merge(document);
+    method
+}
+
+pub fn document() -> OpenApiDocument {
+    let mut document = ApiDoc::openapi();
+    document.merge(
+        ROUTE_DOCUMENT
+            .lock()
+            .expect("OpenAPI document lock")
+            .clone(),
+    );
+    document
+}
 
 #[derive(OpenApi)]
 #[openapi(
-    modifiers(&SecurityAddon),
     info(
         title = "MoocManus 通用智能体",
         version = env!("CARGO_PKG_VERSION"),

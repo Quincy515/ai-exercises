@@ -23,7 +23,7 @@ impl HealthChecker for PostgresHealthChecker {
     async fn check(&self) -> anyhow::Result<HealthStatus> {
         let statement = Statement::from_string(self.db.get_database_backend(), "SELECT 1");
 
-        match self.db.execute(statement).await {
+        match self.db.execute_raw(statement).await {
             Ok(_) => Ok(HealthStatus {
                 service: Some("postgres".to_string()),
                 status: Some("ok".to_string()),

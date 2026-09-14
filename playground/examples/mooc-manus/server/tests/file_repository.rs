@@ -40,7 +40,7 @@ async fn row(fixture: &TestDatabase, file_id: &str) -> Result<Model> {
 async fn execute(fixture: &TestDatabase, sql: &str, values: Vec<Value>) -> Result<()> {
     fixture
         .db
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
             sql,
             values,

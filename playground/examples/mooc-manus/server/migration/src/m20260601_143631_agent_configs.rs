@@ -12,9 +12,9 @@ impl MigrationTrait for Migration {
             "agent_configs",
             &[
                 ("id", ColType::PkAuto),
-                ("max_iterations", ColType::SmallUnsignedNull),
-                ("max_retries", ColType::SmallUnsignedNull),
-                ("max_search_results", ColType::SmallUnsignedNull),
+                ("max_iterations", ColType::BigIntegerNull),
+                ("max_retries", ColType::BigIntegerNull),
+                ("max_search_results", ColType::BigIntegerNull),
                 ("uuid", ColType::Uuid),
                 ("user_id", ColType::UuidNull),
                 ("status", ColType::StringNull),

@@ -2,8 +2,8 @@
 #![allow(clippy::unnecessary_struct_initialization)]
 #![allow(clippy::unused_async)]
 
+use crate::openapi::{openapi, routes};
 use axum::http::StatusCode;
-use loco_openapi::prelude::{openapi, routes};
 use loco_rs::prelude::*;
 use validator::ValidationErrors;
 

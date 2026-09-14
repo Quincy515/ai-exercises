@@ -41,7 +41,7 @@ impl SeaOrmSessionRepository {
         // 2.update_many 不经过 ActiveModel 的保存钩子，需要显式刷新更新时间。
         let result = update
             .filter(Column::Uuid.eq(uuid))
-            .col_expr(Column::UpdatedAt, Expr::current_timestamp().into())
+            .col_expr(Column::UpdatedAt, Expr::current_timestamp())
             .exec(&self.db)
             .await?;
 

@@ -80,17 +80,17 @@ initializers:
 # Database Configuration
 database:
   # Database connection URI
-  uri: {{ get_env(name="DATABASE_URL", default="postgres://loco:loco@localhost:5432/manus") }}
+  uri: <%= get_env(name="DATABASE_URL", default="postgres://loco:loco@localhost:5432/manus") %>
   # When enabled, the sql query will be logged.
   enable_logging: false
   # Set the timeout duration when acquiring a connection.
-  connect_timeout: {{ get_env(name="DB_CONNECT_TIMEOUT", default="500") }}
+  connect_timeout: <%= get_env(name="DB_CONNECT_TIMEOUT", default="500") %>
   # Set the idle duration before closing a connection.
-  idle_timeout: {{ get_env(name="DB_IDLE_TIMEOUT", default="500") }}
+  idle_timeout: <%= get_env(name="DB_IDLE_TIMEOUT", default="500") %>
   # Minimum number of connections for a pool.
-  min_connections: {{ get_env(name="DB_MIN_CONNECTIONS", default="1") }}
+  min_connections: <%= get_env(name="DB_MIN_CONNECTIONS", default="1") %>
   # Maximum number of connections for a pool.
-  max_connections: {{ get_env(name="DB_MAX_CONNECTIONS", default="1") }}
+  max_connections: <%= get_env(name="DB_MAX_CONNECTIONS", default="1") %>
   # Run migration up when application loaded
   auto_migrate: true
   # Truncate database when application loaded. This is a dangerous operation, make sure that you using this flag only on dev environments or test mode
@@ -110,7 +110,7 @@ auth:
 # Redis Cache Configuration
 cache:
   kind: Redis
-  uri: '{{ get_env(name="REDIS_URL", default="redis://localhost:6379") }}'
+  uri: '<%= get_env(name="REDIS_URL", default="redis://localhost:6379") %>'
   max_size: 10 # Maximum number of connections in the pool
 
 # Application Custom Settings / 应用自定义配置
@@ -121,24 +121,24 @@ settings:
     path: ./storage
     # Cloudflare R2 example / Cloudflare R2 示例:
     # kind: r2
-    # bucket: '{{ get_env(name="R2_BUCKET", default="") }}'
-    # account_id: '{{ get_env(name="R2_ACCOUNT_ID", default="") }}'
-    # access_key_id: '{{ get_env(name="R2_ACCESS_KEY_ID", default="") }}'
-    # secret_access_key: '{{ get_env(name="R2_SECRET_ACCESS_KEY", default="") }}'
+    # bucket: '<%= get_env(name="R2_BUCKET", default="") %>'
+    # account_id: '<%= get_env(name="R2_ACCOUNT_ID", default="") %>'
+    # access_key_id: '<%= get_env(name="R2_ACCESS_KEY_ID", default="") %>'
+    # secret_access_key: '<%= get_env(name="R2_SECRET_ACCESS_KEY", default="") %>'
     # region: auto
 
   # Sandbox Configuration / 沙箱配置
   sandbox:
     # 已有沙箱地址；留空时由后续 Docker 适配器创建容器
-    address: '{{ get_env(name="SANDBOX_ADDRESS", default="") }}'
+    address: '<%= get_env(name="SANDBOX_ADDRESS", default="") %>'
     # 创建容器时使用的镜像和容器名前缀
-    image: '{{ get_env(name="SANDBOX_IMAGE", default="lenexus-sandbox") }}'
-    name_prefix: '{{ get_env(name="SANDBOX_NAME_PREFIX", default="lenexus-sandbox") }}'
+    image: '<%= get_env(name="SANDBOX_IMAGE", default="lenexus-sandbox") %>'
+    name_prefix: '<%= get_env(name="SANDBOX_NAME_PREFIX", default="lenexus-sandbox") %>'
     # 沙箱过期时间（分钟）与 Docker 网络
-    ttl_minutes: {{ get_env(name="SANDBOX_TTL_MINUTES", default=60) }}
-    network: '{{ get_env(name="SANDBOX_NETWORK", default="lenexus-network") }}'
+    ttl_minutes: <%= get_env(name="SANDBOX_TTL_MINUTES", default=60) %>
+    network: '<%= get_env(name="SANDBOX_NETWORK", default="lenexus-network") %>'
     # Chrome 启动参数与代理配置
-    chrome_args: '{{ get_env(name="SANDBOX_CHROME_ARGS", default="") }}'
-    https_proxy: '{{ get_env(name="SANDBOX_HTTPS_PROXY", default="") }}'
-    http_proxy: '{{ get_env(name="SANDBOX_HTTP_PROXY", default="") }}'
-    no_proxy: '{{ get_env(name="SANDBOX_NO_PROXY", default="") }}'
+    chrome_args: '<%= get_env(name="SANDBOX_CHROME_ARGS", default="") %>'
+    https_proxy: '<%= get_env(name="SANDBOX_HTTPS_PROXY", default="") %>'
+    http_proxy: '<%= get_env(name="SANDBOX_HTTP_PROXY", default="") %>'
+    no_proxy: '<%= get_env(name="SANDBOX_NO_PROXY", default="") %>'
