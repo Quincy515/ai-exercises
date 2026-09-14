@@ -281,6 +281,7 @@ impl AgentTaskRunner {
         }
 
         let result: Result<()> = async {
+            // 各类工具是平级分支，文件和 MCP/A2A 的处理不依赖 Shell 参数。
             match event.tool_name.as_str() {
                 // 2.工具为浏览器则补全浏览器工具内容。
                 "browser" => {
@@ -290,6 +291,7 @@ impl AgentTaskRunner {
                 }
                 // 3.工具为搜索则添加搜索工具内容。
                 "search" => {
+                    // ToolResult<SearchResults> → data → results，展示内容只保存结果条目列表。
                     let data = event
                         .function_result
                         .as_ref()
@@ -318,7 +320,7 @@ impl AgentTaskRunner {
                         let data: Value = serde_json::from_str(&data)?;
                         data.get("console").cloned().unwrap_or_else(|| json!([]))
                     } else {
-                        json!("(No Console)")
+                        json!("(No console)")
                     };
                     event.tool_content = Some(ToolContent::Shell(ShellToolContent { console }));
                 }

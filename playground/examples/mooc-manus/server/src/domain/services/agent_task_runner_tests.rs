@@ -1355,7 +1355,7 @@ async fn search_shell_and_file_content_follow_existing_tool_contracts() {
     let mut shell = called_tool("shell");
     runner.handle_tool_event(&mut shell).await;
     assert!(
-        matches!(&shell.tool_content, Some(ToolContent::Shell(c)) if c.console == json!("(No Console)"))
+        matches!(&shell.tool_content, Some(ToolContent::Shell(c)) if c.console == json!("(No console)"))
     );
     shell
         .function_args
@@ -1401,6 +1401,85 @@ fn remote_content(event: &ToolEvent) -> &Value {
         ToolContent::A2a(c) => &c.a2a_result,
         _ => panic!("应生成远程工具内容"),
     }
+}
+
+#[tokio::test]
+async fn enriched_tool_content_reaches_output_queue_and_session_history() {
+    let (runner, repository, sandbox, storage) = file_fixture();
+    let task = MemoryTask::default();
+    let filepath = "/tmp/章节总结.md";
+    sandbox
+        .files
+        .lock()
+        .unwrap()
+        .insert(filepath.into(), b"report".to_vec());
+
+    let results = json!([{"url": "https://example.com", "title": "资料", "snippet": "摘要"}]);
+    let mut search = called_tool("search");
+    search.function_result = Some(ToolResult {
+        data: Some(json!({"query": "资料", "total_results": 1, "results": results})),
+        ..ToolResult::default()
+    });
+    let mut file = called_tool("file");
+    file.function_args
+        .insert("filepath".into(), json!(filepath));
+    let mut mcp = called_tool("mcp");
+    mcp.function_result = Some(ToolResult {
+        data: Some(json!({"answer": "完成"})),
+        ..ToolResult::default()
+    });
+
+    // 同一轮包含多种工具：文件和远程工具没有 session_id，仍应生成各自的展示内容。
+    let cases = [
+        (search, json!({"results": results})),
+        (called_tool("shell"), json!({"console": "(No console)"})),
+        (file, json!({"content": "report"})),
+        (mcp, json!({"result": {"answer": "完成"}})),
+        (
+            called_tool("a2a"),
+            json!({"a2a_result": "(A2A智能体无可用结果)"}),
+        ),
+    ];
+    let (events, expected): (Vec<_>, Vec<_>) = cases
+        .into_iter()
+        .map(|(event, content)| (Event::Tool(event), content))
+        .unzip();
+    let mut flow = RecordingFlow {
+        events,
+        ..RecordingFlow::default()
+    };
+    let events = runner
+        .run_flow(
+            &mut flow,
+            Message {
+                message: "生成章节总结".into(),
+                ..Message::default()
+            },
+        )
+        .await
+        .unwrap();
+    for event in events {
+        assert!(!runner.publish_event(&task, event).await.unwrap());
+    }
+
+    let output = task.output.entries();
+    let session = repository.session(SESSION_ID).unwrap();
+    assert_eq!(output.len(), expected.len());
+    assert_eq!(session.events.len(), expected.len());
+    for (index, (queue_id, payload)) in output.iter().enumerate() {
+        let stored = serde_json::to_value(&session.events[index]).unwrap();
+        assert_eq!(payload["tool_content"], expected[index]);
+        assert_eq!(stored["tool_content"], expected[index]);
+        assert_eq!(stored["id"], *queue_id);
+    }
+    // 文件从沙箱上传到存储桶，不把沙箱路径当文件 ID 再下载回沙箱。
+    assert_eq!(
+        storage.uploaded.lock().unwrap()[0].content.as_ref(),
+        b"report"
+    );
+    assert_eq!(session.files[0].filepath, filepath);
+    assert!(sandbox.uploads.lock().unwrap().is_empty());
+    assert!(sandbox.shell_reads.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
