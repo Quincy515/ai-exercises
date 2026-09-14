@@ -12,7 +12,9 @@ use crate::domain::{
     },
     repositories::SessionRepository,
     services::{
-        prompts::{EXECUTION_PROMPT, REACT_SYSTEM_PROMPT, SUMMARIZE_PROMPT, SYSTEM_PROMPT},
+        prompts::{
+            render_prompt, EXECUTION_PROMPT, REACT_SYSTEM_PROMPT, SUMMARIZE_PROMPT, SYSTEM_PROMPT,
+        },
         tools::BaseTool,
     },
 };
@@ -55,11 +57,15 @@ impl ReActAgent {
         message: &Message,
     ) -> Result<Vec<Event>> {
         // 1. 根据传递的内容生成执行消息
-        let query = EXECUTION_PROMPT
-            .replace("{message}", &message.message)
-            .replace("{attachments}", &message.attachments.join("\n"))
-            .replace("{language}", &plan.language)
-            .replace("{step}", &step.description);
+        let query = render_prompt(
+            EXECUTION_PROMPT,
+            &[
+                ("{message}", &message.message),
+                ("{attachments}", &message.attachments.join("\n")),
+                ("{language}", &plan.language),
+                ("{step}", &step.description),
+            ],
+        );
 
         // 2. 更新步骤的执行状态为运行中并返回 Step 事件
         step.status = ExecutionStatus::Running;
@@ -542,5 +548,35 @@ mod tests {
             .and_then(Value::as_str)
             .unwrap();
         assert_eq!(query, SUMMARIZE_PROMPT);
+    }
+
+    #[tokio::test]
+    async fn execute_step_preserves_template_like_user_text_and_attachment_paths() {
+        let (mut react, requests, _) = react(
+            vec![assistant_message(json!(
+                r#"{"success":true,"result":"","attachments":[]}"#
+            ))],
+            Vec::new(),
+        );
+        let message = Message {
+            message: "请解释 {attachments}、{language} 和 {step}".into(),
+            attachments: vec!["/home/ubuntu/{step}.md".into()],
+        };
+        let plan = Plan {
+            language: "中文".into(),
+            ..Plan::default()
+        };
+        let mut step = Step::new("解释 {message}");
+        react
+            .execute_step(&plan, &mut step, &message)
+            .await
+            .unwrap();
+        let requests = requests.lock().unwrap();
+        let query = requests[0].messages.last().unwrap()["content"]
+            .as_str()
+            .unwrap();
+        assert!(query.contains(&message.message));
+        assert!(query.contains(&message.attachments[0]));
+        assert!(query.contains(&step.description));
     }
 }

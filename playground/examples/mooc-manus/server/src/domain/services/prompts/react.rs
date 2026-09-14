@@ -30,25 +30,25 @@ pub const EXECUTION_PROMPT: &str = r#"
 
 TypeScript 接口定义：
 ```typescript
-interface Response {{
+interface Response {
   /** 任务步骤是否成功执行 **/
   success: boolean;
   /** 沙箱中需要交付给用户的生成文件的路径数组 **/
   attachments: string[];
   /** 任务结果文本，如果没有结果需要交付则留空 **/
   result: string;
-}}
+}
 ```
 
 JSON 输出示例：
-{{
+{
     "success": true,
     "result": "我们已经完成了数据清洗任务，并生成了摘要，数据详见附件中",
     "attachments": [
         "/home/ubuntu/file1.md",
         "/home/ubuntu/file2.md"
     ]
-}}
+}
 
 输入信息：
 - message: 用户消息（请在所有文本输出中使用此语言）

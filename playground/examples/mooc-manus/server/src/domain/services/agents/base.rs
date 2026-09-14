@@ -1056,12 +1056,20 @@ mod tests {
             ("content".to_string(), json!("answer")),
             ("reasoning_content".to_string(), json!("hidden")),
         ]));
+        memory.add_message(tool_message(
+            "navigation-1".to_string(),
+            "browser_navigate".to_string(),
+            "large page content".to_string(),
+        ));
         repository.insert(SESSION_ID, "base", memory);
 
         agent.compact_memory().await.unwrap();
 
         assert!(!repository.memory(SESSION_ID, "base").get_messages()[0]
             .contains_key("reasoning_content"));
+        let saved = repository.memory(SESSION_ID, "base");
+        assert_eq!(saved.get_messages()[1]["content"], "(removed)");
+        assert_eq!(saved.get_messages()[1]["tool_call_id"], "navigation-1");
     }
 
     #[tokio::test]

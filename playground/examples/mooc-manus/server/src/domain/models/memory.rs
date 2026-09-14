@@ -202,4 +202,51 @@ mod tests {
         );
         assert!(!messages[2].contains_key("reasoning_content"));
     }
+
+    #[test]
+    fn compact_preserves_tool_call_links_and_only_removes_selected_results() {
+        let mut memory = Memory {
+            messages: vec![
+                message(json!({
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"id": "view-1", "function": {"name": "browser_view", "arguments": "{}"}},
+                        {"id": "navigate-1", "function": {"name": "browser_navigate", "arguments": "{}"}}
+                    ]
+                })),
+                message(json!({
+                    "role": "tool", "tool_call_id": "view-1",
+                    "function_name": "browser_view", "content": "large page"
+                })),
+                message(json!({
+                    "role": "tool", "tool_call_id": "navigate-1",
+                    "function_name": "browser_navigate", "content": "another large page"
+                })),
+                message(json!({
+                    "role": "tool", "tool_call_id": "click-1",
+                    "function_name": "browser_click", "content": "clicked"
+                })),
+                message(json!({
+                    "role": "user", "function_name": "browser_view", "content": "用户原文"
+                })),
+            ],
+        };
+        let original = memory.clone();
+        memory.compact();
+        assert_eq!(memory.messages.len(), original.messages.len());
+        assert_eq!(memory.messages[0], original.messages[0]);
+        for index in [1, 2] {
+            assert_eq!(memory.messages[index]["content"], "(removed)");
+            for field in ["role", "tool_call_id", "function_name"] {
+                assert_eq!(
+                    memory.messages[index][field],
+                    original.messages[index][field]
+                );
+            }
+        }
+        assert_eq!(memory.messages[3..], original.messages[3..]);
+        let compacted = memory.clone();
+        memory.compact();
+        assert_eq!(memory, compacted);
+    }
 }

@@ -25,7 +25,7 @@ use crate::domain::{
     models::{AgentConfig, Event, Message, Plan, PlanEvent, PlanEventStatus, Step},
     repositories::SessionRepository,
     services::prompts::{
-        CREATE_PLAN_PROMPT, PLANNER_SYSTEM_PROMPT, SYSTEM_PROMPT, UPDATE_PLAN_PROMPT,
+        render_prompt, CREATE_PLAN_PROMPT, PLANNER_SYSTEM_PROMPT, SYSTEM_PROMPT, UPDATE_PLAN_PROMPT,
     },
 };
 
@@ -61,9 +61,13 @@ impl PlannerAgent {
     /// 根据用户传递的消息创建计划 / 规划，迭代返回对应事件。
     pub async fn create_plan(&mut self, message: Message) -> Result<Vec<Event>> {
         // 1. 根据用户传递的消息生成创建 Plan 的提示词
-        let query = CREATE_PLAN_PROMPT
-            .replace("{message}", &message.message)
-            .replace("{attachments}", &message.attachments.join("\n"));
+        let query = render_prompt(
+            CREATE_PLAN_PROMPT,
+            &[
+                ("{message}", &message.message),
+                ("{attachments}", &message.attachments.join("\n")),
+            ],
+        );
 
         // 2. 调用 invoke 函数返回迭代事件
         let events = self.base.invoke(&query, None).await?;
@@ -102,9 +106,13 @@ impl PlannerAgent {
     /// 根据传递的原始规划和已执行步骤更新后续规划。
     pub async fn update_plan(&mut self, plan: &mut Plan, step: &Step) -> Result<Vec<Event>> {
         // 1. 使用 Plan 和 Step 创建更新规划提示词
-        let query = UPDATE_PLAN_PROMPT
-            .replace("{plan}", &serde_json::to_string(plan)?)
-            .replace("{step}", &serde_json::to_string(step)?);
+        let query = render_prompt(
+            UPDATE_PLAN_PROMPT,
+            &[
+                ("{plan}", &serde_json::to_string(plan)?),
+                ("{step}", &serde_json::to_string(step)?),
+            ],
+        );
 
         // 2. 调用 invoke() 获取事件
         let events = self.base.invoke(&query, None).await?;
@@ -415,5 +423,42 @@ mod tests {
             panic!("事件必须原样透传");
         };
         assert_eq!(event.error, "Agent未能生成有效回复内容");
+    }
+
+    #[tokio::test]
+    async fn planner_keeps_template_like_text_in_messages_and_serialized_plans() {
+        let (mut planner, requests) = planner(vec![
+            assistant_message(json!(r#"{"steps":[]}"#)),
+            assistant_message(json!(r#"{"steps":[]}"#)),
+        ]);
+        let user_message = "请解释 {attachments} 与 {step}，保留 {{原文}}";
+        planner
+            .create_plan(Message {
+                message: user_message.into(),
+                attachments: vec!["/home/ubuntu/{message}.md".into()],
+            })
+            .await
+            .unwrap();
+        let mut plan = Plan {
+            goal: "解释 {step}".into(),
+            steps: vec![Step::new("分析 {plan}")],
+            ..Plan::default()
+        };
+        let serialized_plan = serde_json::to_string(&plan).unwrap();
+        let step = Step::new("处理 {message}");
+        let serialized_step = serde_json::to_string(&step).unwrap();
+        planner.update_plan(&mut plan, &step).await.unwrap();
+
+        let requests = requests.lock().unwrap();
+        let create_query = requests[0].messages.last().unwrap()["content"]
+            .as_str()
+            .unwrap();
+        assert!(create_query.contains(user_message));
+        assert!(create_query.contains("/home/ubuntu/{message}.md"));
+        let update_query = requests[1].messages.last().unwrap()["content"]
+            .as_str()
+            .unwrap();
+        assert!(update_query.contains(&serialized_plan));
+        assert!(update_query.contains(&serialized_step));
     }
 }
