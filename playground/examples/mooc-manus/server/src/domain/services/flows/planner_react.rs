@@ -52,13 +52,41 @@ impl PlannerReActFlow {
         mcp_tool: McpTool,
         a2a_tool: A2ATool,
     ) -> Self {
+        Self::with_shared_browser(
+            llm,
+            agent_config,
+            session_id,
+            session_repository,
+            json_parser,
+            Arc::from(browser),
+            sandbox,
+            search_engine,
+            mcp_tool,
+            a2a_tool,
+        )
+    }
+
+    /// 与任务运行器共享浏览器，确保工具执行和事件截图访问同一实例。
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_shared_browser(
+        llm: Arc<dyn Llm>,
+        agent_config: AgentConfig,
+        session_id: impl Into<String>,
+        session_repository: Arc<dyn SessionRepository>,
+        json_parser: Arc<dyn JsonParser>,
+        browser: Arc<dyn Browser>,
+        sandbox: Arc<dyn Sandbox>,
+        search_engine: Box<dyn SearchEngine>,
+        mcp_tool: McpTool,
+        a2a_tool: A2ATool,
+    ) -> Self {
         let session_id = session_id.into();
 
         // 1. 初始化 Agent 预设工具列表。沙箱由文件和 Shell 工具共同持有。
         let tools: Vec<Box<dyn BaseTool>> = vec![
             Box::new(FileTool::new(sandbox.clone())),
             Box::new(ShellTool::new(sandbox)),
-            Box::new(BrowserTool::new(browser)),
+            Box::new(BrowserTool::with_shared_browser(browser)),
             Box::new(SearchTool::new(search_engine)),
             Box::new(MessageTool::new()),
             Box::new(mcp_tool),

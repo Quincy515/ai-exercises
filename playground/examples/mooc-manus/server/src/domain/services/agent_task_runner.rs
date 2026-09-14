@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use futures::TryStreamExt;
+use serde_json::{json, Value};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
+use uuid::Uuid;
 
 use crate::domain::{
     external::{
@@ -12,8 +14,10 @@ use crate::domain::{
         UploadFile,
     },
     models::{
-        A2aConfig, AgentConfig, ErrorEvent, Event, File, McpConfig, Message, MessageEvent,
-        SessionStatus,
+        A2aConfig, A2aToolContent, AgentConfig, BrowserToolContent, DoneEvent, ErrorEvent, Event,
+        File, FileToolContent, McpConfig, McpToolContent, Message, MessageEvent, SearchResults,
+        SearchToolContent, SessionStatus, ShellToolContent, ToolContent, ToolEvent,
+        ToolEventStatus,
     },
     repositories::{FileRepository, SessionRepository},
     services::{
@@ -34,6 +38,8 @@ pub struct AgentTaskRunner {
     file_storage: Arc<dyn FileStorage>,
     /// 文件数据仓库
     file_repository: Arc<dyn FileRepository>,
+    /// 与浏览器工具共享的浏览器实例，用于获取当前页面截图。
+    browser: Arc<dyn Browser>,
     /// 规划与执行流；异步锁协调任务调用和资源销毁。
     flow: Mutex<PlannerReActFlow>,
 }
@@ -56,14 +62,15 @@ impl AgentTaskRunner {
         sandbox: Arc<dyn Sandbox>,                      // 沙箱
     ) -> Self {
         let session_id = session_id.into();
-        // 浏览器和远程工具随流持有，运行器通过流初始化、清理同一组工具实例。
-        let flow = PlannerReActFlow::new(
+        // 浏览器共享给流与运行器；远程工具由流持有并统一初始化、清理。
+        let browser: Arc<dyn Browser> = browser.into();
+        let flow = PlannerReActFlow::with_shared_browser(
             llm,
             agent_config,
             session_id.clone(),
             session_repository.clone(),
             json_parser,
-            browser,
+            browser.clone(),
             sandbox.clone(),
             search_engine,
             McpTool::with_config(Some(mcp_config)),
@@ -76,6 +83,7 @@ impl AgentTaskRunner {
             sandbox,
             file_storage,
             file_repository,
+            browser,
             flow: Mutex::new(flow),
         }
     }
@@ -248,6 +256,135 @@ impl AgentTaskRunner {
         event.attachments = attachments;
     }
 
+    /// 获取浏览器截图并返回截图文件对应的 id。
+    async fn get_browser_screenshot(&self) -> Result<String> {
+        // 1.调用浏览器完成截图。
+        let screenshot = self.browser.screenshot(None).await?;
+
+        // 2.将浏览器截图上传到文件存储中。
+        let file = self
+            .file_storage
+            .upload_file(UploadFile {
+                filename: format!("{}.png", Uuid::new_v4()),
+                mime_type: None,
+                content: screenshot.into(),
+            })
+            .await?;
+        Ok(file.id)
+    }
+
+    /// 额外处理工具消息，使其前端交互更友好。
+    async fn handle_tool_event(&self, event: &mut ToolEvent) {
+        // 1.如果事件状态为已调用则执行以下代码。
+        if event.status != ToolEventStatus::Called {
+            return;
+        }
+
+        let result: Result<()> = async {
+            match event.tool_name.as_str() {
+                // 2.工具为浏览器则补全浏览器工具内容。
+                "browser" => {
+                    event.tool_content = Some(ToolContent::Browser(BrowserToolContent {
+                        screenshot: self.get_browser_screenshot().await?,
+                    }));
+                }
+                // 3.工具为搜索则添加搜索工具内容。
+                "search" => {
+                    let data = event
+                        .function_result
+                        .as_ref()
+                        .and_then(|result| result.data.as_ref())
+                        .ok_or_else(|| anyhow!("搜索工具结果缺少 data"))?;
+                    let search_results: SearchResults = serde_json::from_value(data.clone())?;
+                    info!(count = search_results.results.len(), "处理搜索工具结果");
+                    event.tool_content = Some(ToolContent::Search(SearchToolContent {
+                        results: search_results.results,
+                    }));
+                }
+                // 4.工具为 Shell 则生成 Shell 工具内容。
+                "shell" => {
+                    let console = if let Some(session_id) = event.function_args.get("session_id") {
+                        let session_id = session_id
+                            .as_str()
+                            .ok_or_else(|| anyhow!("Shell session_id 必须是字符串"))?;
+                        let shell_result = self
+                            .sandbox
+                            .read_shell_output(session_id, Some(true))
+                            .await?;
+                        // 现有沙箱适配器把 Shell 结构化数据编码为 JSON 字符串。
+                        let data = shell_result
+                            .data
+                            .ok_or_else(|| anyhow!("Shell 工具结果缺少 data"))?;
+                        let data: Value = serde_json::from_str(&data)?;
+                        data.get("console").cloned().unwrap_or_else(|| json!([]))
+                    } else {
+                        json!("(No Console)")
+                    };
+                    event.tool_content = Some(ToolContent::Shell(ShellToolContent { console }));
+                }
+                // 5.工具为文件则读取内容，并将文件同步到对象存储。
+                "file" => {
+                    if let Some(filepath) = event.function_args.get("filepath") {
+                        let filepath = filepath
+                            .as_str()
+                            .ok_or_else(|| anyhow!("文件 filepath 必须是字符串"))?;
+                        // read_file 已由适配器提取 content，data 中直接保存文件文本。
+                        let file_read_result = self
+                            .sandbox
+                            .read_file(filepath, None, None, None, None)
+                            .await?;
+                        event.tool_content = Some(ToolContent::File(FileToolContent {
+                            content: file_read_result.data.unwrap_or_default(),
+                        }));
+                        self.sync_file_to_storage(filepath).await;
+                    } else {
+                        event.tool_content = Some(ToolContent::File(FileToolContent {
+                            content: "(No Content)".to_string(),
+                        }));
+                    }
+                }
+                // 6.工具为 MCP/A2A 则处理调用结果。
+                "mcp" | "a2a" => {
+                    info!(tool_name = event.tool_name, "处理MCP/A2A工具事件");
+                    let result_data = match event.function_result.as_ref() {
+                        // 7.如果结果包含非空 data 则提取 data。
+                        Some(result) if result.data.as_ref().is_some_and(has_tool_data) => {
+                            result.data.clone().unwrap()
+                        }
+                        // 8.MCP/A2A 工具调用正常，但是无结果产生。
+                        Some(result) if result.success => serde_json::to_value(result)?,
+                        // 9.其他情况将结果转换成字符串进行传递。
+                        Some(result) => Value::String(serde_json::to_string(result)?),
+                        None => {
+                            warn!(tool_name = event.tool_name, "MCP/A2A工具调用结果未发现");
+                            if event.tool_name == "mcp" {
+                                json!("(MCP工具无可用结果)")
+                            } else {
+                                json!("(A2A智能体无可用结果)")
+                            }
+                        }
+                    };
+                    event.tool_content = Some(if event.tool_name == "mcp" {
+                        ToolContent::Mcp(McpToolContent {
+                            result: result_data,
+                        })
+                    } else {
+                        ToolContent::A2a(A2aToolContent {
+                            a2a_result: result_data,
+                        })
+                    });
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+        .await;
+
+        if let Err(error) = result {
+            error!(tool_name = event.tool_name, error = %error, "AgentTaskRunner生成工具内容失败");
+        }
+    }
+
     /// 根据消息对象运行 PlannerReActFlow。
     async fn run_flow(&self, flow: &mut dyn BaseFlow, message: Message) -> Result<Vec<Event>> {
         // 1.判断传递的消息是否为空。
@@ -262,12 +399,17 @@ impl AgentTaskRunner {
         // 2.调用流并运行获取事件信息。
         // 复用现有批量事件接口；flow 由调用方持锁后借入，避免重复锁定同一实例。
         let mut events = flow.invoke(message).await?;
+        // 等待事件结束当前轮次，后续事件留给用户回复后的执行。
+        if let Some(index) = events
+            .iter()
+            .position(|event| matches!(event, Event::Wait(_)))
+        {
+            events.truncate(index + 1);
+        }
         for event in &mut events {
             match event {
                 // 3.判断是否为工具事件，如果是则额外处理。
-                Event::Tool(_) => {
-                    // todo:工具事件额外处理。
-                }
+                Event::Tool(event) => self.handle_tool_event(event).await,
                 // 4.如果是消息事件则将 AI 消息事件中的附件同步到存储中。
                 Event::Message(event) => self.sync_message_attachments_to_storage(event).await,
                 _ => {}
@@ -276,6 +418,50 @@ impl AgentTaskRunner {
 
         // 5.将事件直接返回。
         Ok(events)
+    }
+
+    /// 先写出并保存事件，再更新对应会话信息；返回是否需要等待用户。
+    async fn publish_event(&self, task: &dyn Task, event: Event) -> Result<bool> {
+        // 7.将得到的事件添加到消息队列中。
+        self.put_and_add_event(task, event.clone()).await?;
+        match event {
+            // 8.如果事件类型为标题事件则更新会话标题。
+            Event::Title(event) => {
+                self.session_repository
+                    .update_title(&self.session_id, &event.title)
+                    .await?
+            }
+            // 9.如果事件为消息事件，则更新最新消息并新增未读消息数。
+            Event::Message(event) => {
+                self.session_repository
+                    .update_latest_message(&self.session_id, &event.message, event.base.created_at)
+                    .await?;
+                self.session_repository
+                    .increment_unread_message_count(&self.session_id)
+                    .await?;
+            }
+            // 10.如果事件为等待，则更新会话状态并终止程序。
+            Event::Wait(_) => {
+                self.session_repository
+                    .update_status(&self.session_id, SessionStatus::Waiting)
+                    .await?;
+                return Ok(true);
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+}
+
+/// 工具结果是否包含非空数据；空集合、空文本、零和 false 使用完整结果回退。
+fn has_tool_data(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
     }
 }
 
@@ -318,17 +504,28 @@ impl TaskRunner for AgentTaskRunner {
                 };
 
                 // 6.传递消息对象并运行 PlannerReActFlow。
-                for _event in self.run_flow(&mut *flow, message_obj).await? {
-                    // todo:后续处理流产生的事件（写入输出队列、持久化和更新会话状态）。
+                for event in self.run_flow(&mut *flow, message_obj).await? {
+                    if self.publish_event(task.as_ref(), event).await? {
+                        return Ok(());
+                    }
+                }
+
+                // 11.判断如果输入消息队列为空则跳出循环。
+                if task.input_stream().is_empty().await? {
+                    break;
                 }
             }
 
+            // 12.更新会话状态为已完成。
+            self.session_repository
+                .update_status(&self.session_id, SessionStatus::Completed)
+                .await?;
             Ok(())
         }
         .await;
 
         if let Err(error) = result {
-            // 记录日志并往任务队列/消息队列中写入异常事件并更新会话状态。
+            // 14.记录日志并往任务队列/消息队列中写入异常事件并更新会话状态。
             error!(error = %error, "AgentTaskRunner运行出错");
             self.put_and_add_event(
                 task.as_ref(),
@@ -344,6 +541,17 @@ impl TaskRunner for AgentTaskRunner {
         }
 
         Ok(())
+    }
+
+    /// 异步任务被取消，推送结束事件并更新状态。
+    async fn on_cancel(&self, task: SharedTask) -> Result<()> {
+        // 13.Tokio abort 会丢弃执行 future，由任务监督器等待取消完成后调用此方法。
+        info!("AgentTaskRunner任务运行取消");
+        self.put_and_add_event(task.as_ref(), Event::Done(DoneEvent::default()))
+            .await?;
+        self.session_repository
+            .update_status(&self.session_id, SessionStatus::Completed)
+            .await
     }
 
     /// 销毁任务运行器并释放资源。

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -16,13 +18,18 @@ use super::arguments::{
 /// 浏览器工具
 pub struct BrowserTool {
     name: String,
-    browser: Box<dyn Browser>,
+    browser: Arc<dyn Browser>,
     definitions: Vec<ToolDefinition>,
 }
 
 impl BrowserTool {
     /// 构造函数，完成浏览器工具的初始化
     pub fn new(browser: Box<dyn Browser>) -> Self {
+        Self::with_shared_browser(Arc::from(browser))
+    }
+
+    /// 与任务运行器共享浏览器，让工具操作与事件截图使用同一页面。
+    pub fn with_shared_browser(browser: Arc<dyn Browser>) -> Self {
         Self {
             name: "browser".to_string(),
             browser,
@@ -516,11 +523,19 @@ mod tests {
         }
 
         async fn screenshot(&self, full_page: Option<bool>) -> Result<Vec<u8>> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(BrowserCall::Screenshot(full_page));
-            Ok(vec![1, 2, 3])
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(BrowserCall::Screenshot(full_page));
+            // 用当前页面的 URL 模拟截图，验证外部句柄能看到工具操作后的页面状态。
+            Ok(calls
+                .iter()
+                .rev()
+                .find_map(|call| match call {
+                    BrowserCall::Navigate(url) | BrowserCall::Restart(url) => {
+                        Some(url.as_bytes().to_vec())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| vec![1, 2, 3]))
         }
 
         async fn console_exec(&self, javascript: &str) -> Result<ToolResult<String>> {
@@ -542,6 +557,32 @@ mod tests {
         };
 
         (BrowserTool::new(Box::new(browser)), calls)
+    }
+
+    #[tokio::test]
+    async fn shared_browser_screenshot_observes_tool_navigation() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let browser: Arc<dyn Browser> = Arc::new(MockBrowser {
+            calls: Arc::clone(&calls),
+        });
+        let tool = BrowserTool::with_shared_browser(Arc::clone(&browser));
+        let url = "https://example.com/shared-page";
+
+        tool.invoke(
+            "browser_navigate",
+            Map::from_iter([("url".to_string(), json!(url))]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(browser.screenshot(None).await.unwrap(), url.as_bytes());
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                BrowserCall::Navigate(url.to_string()),
+                BrowserCall::Screenshot(None),
+            ]
+        );
     }
 
     #[tokio::test]

@@ -23,14 +23,16 @@ use crate::domain::{
         Tool, ToolChoice, UploadFile,
     },
     models::{
-        A2aConfig, AgentConfig, DoneEvent, Event, File, McpConfig, Message, MessageEvent,
-        MessageRole, SearchResults, Session, SessionStatus, ToolEvent, ToolResult,
+        A2aConfig, AgentConfig, DoneEvent, Event, File, FileToolContent, McpConfig, Message,
+        MessageEvent, MessageRole, SearchResultItem, SearchResults, Session, SessionStatus, Step,
+        TitleEvent, ToolContent, ToolEvent, ToolEventStatus, ToolResult, WaitEvent,
     },
     repositories::FileRepository,
     services::{agents::test_support::MemoryRepository, flows::BaseFlow},
 };
 
 const SESSION_ID: &str = "runner-session";
+const SCREENSHOT_BYTES: &[u8] = &[137, 80, 78, 71, 13, 10, 26, 10, 0, 255, 128];
 
 #[derive(Default)]
 struct MemoryQueue {
@@ -143,7 +145,7 @@ impl Task for MemoryTask {
     }
 }
 
-// 未参与当前测试的依赖；意外调用时直接使测试失败。
+// 依赖替身只提供固定的二进制截图；其他意外调用直接使测试失败。
 struct UnusedDependency;
 
 #[async_trait]
@@ -269,8 +271,9 @@ impl Browser for UnusedDependency {
         panic!("本节尚未调用浏览器工具");
     }
 
-    async fn screenshot(&self, _full_page: Option<bool>) -> Result<Vec<u8>> {
-        panic!("本节尚未调用浏览器工具");
+    async fn screenshot(&self, full_page: Option<bool>) -> Result<Vec<u8>> {
+        assert_eq!(full_page, None);
+        Ok(SCREENSHOT_BYTES.to_vec())
     }
 
     async fn console_exec(&self, _javascript: &str) -> Result<ToolResult<String>> {
@@ -291,6 +294,10 @@ struct LifecycleSandbox {
     uploads: Mutex<Vec<(String, Option<String>)>>,
     fail_upload: AtomicBool,
     reject_upload: AtomicBool,
+    shell_output: Mutex<Option<String>>,
+    shell_reads: Mutex<Vec<(String, Option<bool>)>>,
+    fail_shell_read: AtomicBool,
+    file_reads: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -306,10 +313,20 @@ impl Sandbox for LifecycleSandbox {
 
     async fn read_shell_output(
         &self,
-        _session_id: &str,
-        _console: Option<bool>,
+        session_id: &str,
+        console: Option<bool>,
     ) -> Result<ToolResult<String>> {
-        panic!("本节尚未读取 Shell 输出");
+        self.shell_reads
+            .lock()
+            .unwrap()
+            .push((session_id.to_string(), console));
+        if self.fail_shell_read.load(Ordering::SeqCst) {
+            bail!("模拟读取 Shell 输出失败");
+        }
+        Ok(ToolResult {
+            data: self.shell_output.lock().unwrap().clone(),
+            ..ToolResult::default()
+        })
     }
 
     async fn wait_process(
@@ -347,13 +364,28 @@ impl Sandbox for LifecycleSandbox {
 
     async fn read_file(
         &self,
-        _file_path: &str,
-        _start_line: Option<usize>,
-        _end_line: Option<usize>,
-        _sudo: Option<bool>,
-        _max_length: Option<usize>,
+        file_path: &str,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+        sudo: Option<bool>,
+        max_length: Option<usize>,
     ) -> Result<ToolResult<String>> {
-        panic!("本节尚未读取沙箱文件");
+        assert_eq!(
+            (start_line, end_line, sudo, max_length),
+            (None, None, None, None)
+        );
+        self.file_reads.lock().unwrap().push(file_path.to_string());
+        let content = self
+            .files
+            .lock()
+            .unwrap()
+            .get(file_path)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("沙箱文件不存在"))?;
+        Ok(ToolResult {
+            data: Some(String::from_utf8(content)?),
+            ..ToolResult::default()
+        })
     }
 
     async fn check_file_exists(&self, _file_path: &str) -> Result<ToolResult<bool>> {
@@ -594,10 +626,14 @@ async fn invoke_consumes_empty_messages_without_calling_llm() {
     assert_eq!(*sandbox.calls.lock().unwrap(), vec!["ensure"]);
     assert_eq!(task.input.pop_calls.load(Ordering::SeqCst), 3);
     assert!(task.input.entries().is_empty());
-    assert!(task.output.entries().is_empty());
+    assert_eq!(task.output.entries().len(), 2);
     let session = repository.session(SESSION_ID).unwrap();
-    assert!(session.events.is_empty());
-    assert_eq!(session.status, SessionStatus::Running);
+    assert_eq!(session.events.len(), 2);
+    assert!(session
+        .events
+        .iter()
+        .all(|event| matches!(event, Event::Error(e) if e.error == "空消息错误")));
+    assert_eq!(session.status, SessionStatus::Completed);
     assert_eq!(repository.reads.load(Ordering::SeqCst), 0);
 }
 
@@ -613,7 +649,7 @@ async fn invoke_with_empty_input_initializes_and_returns() {
     assert!(task.output.entries().is_empty());
     assert_eq!(
         repository.session(SESSION_ID).unwrap().status,
-        SessionStatus::Running
+        SessionStatus::Completed
     );
 }
 
@@ -1240,12 +1276,449 @@ async fn invoke_runs_real_flow_with_synced_attachment_paths_without_deadlock() {
     assert!(prompt.contains("检查我的附件"));
     assert!(prompt.contains("/home/ubuntu/upload/材料.txt"));
     assert!(task.input.entries().is_empty());
-    // 本节输出转发仍留待后续接入，流的正常事件尚未写入任务队列。
-    assert!(task.output.entries().is_empty());
+    let output = task.output.entries();
+    assert_eq!(output.last().unwrap().1["type"], "done");
     let session = repository.session(SESSION_ID).unwrap();
-    assert!(session.events.is_empty());
+    assert_eq!(session.events.len(), output.len());
+    assert_eq!(session.title, "检查附件");
+    assert_eq!(session.latest_message, "附件已接收");
+    assert_eq!(session.unread_message_count, 1);
+    assert_eq!(session.status, SessionStatus::Completed);
     assert_eq!(session.files.len(), 1);
     assert_eq!(session.files[0].filepath, "/home/ubuntu/upload/材料.txt");
     assert_eq!(*sandbox.calls.lock().unwrap(), vec!["ensure"]);
     assert!(repository.writes.load(Ordering::SeqCst) > 0);
+}
+
+fn called_tool(name: &str) -> ToolEvent {
+    ToolEvent {
+        tool_name: name.to_string(),
+        status: ToolEventStatus::Called,
+        ..ToolEvent::default()
+    }
+}
+
+#[tokio::test]
+async fn tool_content_is_added_only_after_call_and_screenshot_is_uploaded() {
+    let (runner, repository, sandbox, storage) = file_fixture();
+    for name in ["browser", "search", "shell", "file", "mcp", "a2a"] {
+        let mut event = ToolEvent {
+            tool_name: name.into(),
+            ..ToolEvent::default()
+        };
+        runner.handle_tool_event(&mut event).await;
+        assert!(event.tool_content.is_none());
+    }
+    assert!(storage.uploaded.lock().unwrap().is_empty());
+    assert!(sandbox.shell_reads.lock().unwrap().is_empty());
+    let mut event = called_tool("browser");
+    runner.handle_tool_event(&mut event).await;
+    let Some(ToolContent::Browser(content)) = event.tool_content else {
+        panic!("应生成浏览器内容")
+    };
+    let uploads = storage.uploaded.lock().unwrap();
+    assert_eq!(uploads.len(), 1);
+    uuid::Uuid::parse_str(uploads[0].filename.strip_suffix(".png").unwrap()).unwrap();
+    assert_eq!(uploads[0].content.as_ref(), SCREENSHOT_BYTES);
+    assert_eq!(uploads[0].mime_type, None);
+    assert_eq!(
+        storage.files.lock().unwrap()[&content.screenshot]
+            .0
+            .filename,
+        uploads[0].filename
+    );
+    assert!(repository.session(SESSION_ID).unwrap().files.is_empty());
+}
+
+#[tokio::test]
+async fn search_shell_and_file_content_follow_existing_tool_contracts() {
+    let (runner, repository, sandbox, storage) = file_fixture();
+    let results = vec![SearchResultItem {
+        url: "https://example.com".into(),
+        title: "资料".into(),
+        snippet: "摘要".into(),
+    }];
+    let mut search = called_tool("search");
+    search.function_result = Some(ToolResult {
+        data: Some(
+            serde_json::to_value(SearchResults {
+                results: results.clone(),
+                ..SearchResults::default()
+            })
+            .unwrap(),
+        ),
+        ..ToolResult::default()
+    });
+    runner.handle_tool_event(&mut search).await;
+    assert!(matches!(search.tool_content, Some(ToolContent::Search(c)) if c.results == results));
+
+    let mut shell = called_tool("shell");
+    runner.handle_tool_event(&mut shell).await;
+    assert!(
+        matches!(&shell.tool_content, Some(ToolContent::Shell(c)) if c.console == json!("(No Console)"))
+    );
+    shell
+        .function_args
+        .insert("session_id".into(), json!("shell-1"));
+    for data in [json!({"console": [{"output": "完成"}]}), json!({})] {
+        *sandbox.shell_output.lock().unwrap() = Some(data.to_string());
+        runner.handle_tool_event(&mut shell).await;
+        let expected = data.get("console").cloned().unwrap_or(json!([]));
+        assert!(
+            matches!(&shell.tool_content, Some(ToolContent::Shell(c)) if c.console == expected)
+        );
+    }
+    assert_eq!(
+        *sandbox.shell_reads.lock().unwrap(),
+        vec![("shell-1".into(), Some(true)); 2]
+    );
+
+    let mut file = called_tool("file");
+    runner.handle_tool_event(&mut file).await;
+    assert!(
+        matches!(&file.tool_content, Some(ToolContent::File(c)) if c.content == "(No Content)")
+    );
+    sandbox
+        .files
+        .lock()
+        .unwrap()
+        .insert("/tmp/结果.txt".into(), "文件正文\n".as_bytes().to_vec());
+    file.function_args
+        .insert("filepath".into(), json!("/tmp/结果.txt"));
+    runner.handle_tool_event(&mut file).await;
+    assert!(matches!(&file.tool_content, Some(ToolContent::File(c)) if c.content == "文件正文\n"));
+    assert_eq!(storage.uploaded.lock().unwrap()[0].filename, "结果.txt");
+    assert_eq!(
+        repository.session(SESSION_ID).unwrap().files[0].filepath,
+        "/tmp/结果.txt"
+    );
+    assert!(sandbox.uploads.lock().unwrap().is_empty());
+}
+
+fn remote_content(event: &ToolEvent) -> &Value {
+    match event.tool_content.as_ref().unwrap() {
+        ToolContent::Mcp(c) => &c.result,
+        ToolContent::A2a(c) => &c.a2a_result,
+        _ => panic!("应生成远程工具内容"),
+    }
+}
+
+#[tokio::test]
+async fn remote_results_cover_data_empty_success_failure_and_missing_result() {
+    let (runner, _, _) = fixture();
+    for name in ["mcp", "a2a"] {
+        for success in [true, false] {
+            for (data, nonempty) in [
+                (Some(json!({"answer": 42})), true),
+                (Some(json!(false)), false),
+                (Some(json!(0)), false),
+                (Some(json!("")), false),
+                (Some(json!([])), false),
+                (Some(json!({})), false),
+                (Some(Value::Null), false),
+                (None, false),
+            ] {
+                let result = ToolResult {
+                    success,
+                    message: Some("执行结果".into()),
+                    data: data.clone(),
+                };
+                let mut event = called_tool(name);
+                event.function_result = Some(result.clone());
+                runner.handle_tool_event(&mut event).await;
+                let content = remote_content(&event);
+                if nonempty {
+                    assert_eq!(content, data.as_ref().unwrap());
+                } else if success {
+                    assert_eq!(*content, serde_json::to_value(&result).unwrap());
+                } else {
+                    assert_eq!(
+                        serde_json::from_str::<Value>(content.as_str().unwrap()).unwrap(),
+                        serde_json::to_value(&result).unwrap()
+                    );
+                }
+            }
+        }
+        let mut missing = called_tool(name);
+        runner.handle_tool_event(&mut missing).await;
+        assert_eq!(
+            *remote_content(&missing),
+            if name == "mcp" {
+                json!("(MCP工具无可用结果)")
+            } else {
+                json!("(A2A智能体无可用结果)")
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn tool_enrichment_failure_keeps_original_payload_and_flow_continues() {
+    for name in ["browser", "search", "shell", "file"] {
+        let (runner, _, sandbox, storage) = file_fixture();
+        let original = Some(ToolContent::File(FileToolContent {
+            content: "原始内容".into(),
+        }));
+        let mut event = called_tool(name);
+        event.tool_content = original.clone();
+        storage.fail_upload.store(true, Ordering::SeqCst);
+        event
+            .function_args
+            .insert("session_id".into(), json!("shell-1"));
+        event
+            .function_args
+            .insert("filepath".into(), json!("/missing.txt"));
+        *sandbox.shell_output.lock().unwrap() = Some("invalid-json".into());
+        event.function_result = Some(ToolResult {
+            data: Some(json!("invalid-search")),
+            ..ToolResult::default()
+        });
+        let mut flow = RecordingFlow {
+            events: vec![Event::Tool(event), Event::Done(DoneEvent::default())],
+            ..RecordingFlow::default()
+        };
+        let events = runner
+            .run_flow(
+                &mut flow,
+                Message {
+                    message: "执行".into(),
+                    ..Message::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], Event::Tool(e) if e.tool_content == original));
+        assert!(matches!(events[1], Event::Done(_)));
+    }
+}
+
+#[tokio::test]
+async fn published_events_persist_before_updating_session_metadata_and_waiting() {
+    let (runner, repository, _) = fixture();
+    let task = MemoryTask::default();
+    let message = MessageEvent {
+        message: "新的消息".into(),
+        ..MessageEvent::default()
+    };
+    let timestamp = message.base.created_at;
+    assert!(!runner
+        .publish_event(
+            &task,
+            Event::Title(TitleEvent {
+                title: "新的标题".into(),
+                ..TitleEvent::default()
+            })
+        )
+        .await
+        .unwrap());
+    assert!(!runner
+        .publish_event(&task, Event::Message(message))
+        .await
+        .unwrap());
+    assert!(runner
+        .publish_event(&task, Event::Wait(WaitEvent::default()))
+        .await
+        .unwrap());
+    let session = repository.session(SESSION_ID).unwrap();
+    assert_eq!(session.title, "新的标题");
+    assert_eq!(session.latest_message, "新的消息");
+    assert_eq!(session.latest_message_at, Some(timestamp));
+    assert_eq!(session.unread_message_count, 1);
+    assert_eq!(session.status, SessionStatus::Waiting);
+    for (event, (id, payload)) in session.events.iter().zip(task.output.entries()) {
+        let mut stored = serde_json::to_value(event).unwrap();
+        assert_eq!(stored["id"], id);
+        stored["id"] = payload["id"].clone();
+        assert_eq!(stored, payload);
+    }
+    assert_eq!(session.events.len(), 3);
+}
+
+#[tokio::test]
+async fn publication_failure_stops_later_metadata_changes() {
+    for failure in ["queue", "persistence", "metadata"] {
+        let (runner, repository, _) = fixture();
+        let task = MemoryTask::default();
+        task.output
+            .fail_put
+            .store(failure == "queue", Ordering::SeqCst);
+        repository
+            .fail_add_event
+            .store(failure == "persistence", Ordering::SeqCst);
+        repository
+            .fail_metadata
+            .store(failure == "metadata", Ordering::SeqCst);
+        assert!(runner
+            .publish_event(
+                &task,
+                Event::Title(TitleEvent {
+                    title: "新标题".into(),
+                    ..TitleEvent::default()
+                })
+            )
+            .await
+            .is_err());
+        let session = repository.session(SESSION_ID).unwrap();
+        assert!(session.title.is_empty());
+        assert_eq!(task.output.entries().len(), usize::from(failure != "queue"));
+        assert_eq!(session.events.len(), usize::from(failure == "metadata"));
+    }
+}
+
+#[tokio::test]
+async fn cancellation_emits_done_and_completes_after_successful_delivery() {
+    let (runner, repository, _) = fixture();
+    let task = Arc::new(MemoryTask::default());
+    runner.on_cancel(task.clone()).await.unwrap();
+    let session = repository.session(SESSION_ID).unwrap();
+    assert_eq!(session.status, SessionStatus::Completed);
+    assert!(matches!(&session.events[..], [Event::Done(e)] if e.base.id == "1-0"));
+    assert_eq!(task.output.entries()[0].1["type"], "done");
+    for failure in ["queue", "persistence", "status"] {
+        let (runner, repository, _) = fixture();
+        let task = Arc::new(MemoryTask::default());
+        task.output
+            .fail_put
+            .store(failure == "queue", Ordering::SeqCst);
+        repository
+            .fail_add_event
+            .store(failure == "persistence", Ordering::SeqCst);
+        repository
+            .fail_update_status
+            .store(failure == "status", Ordering::SeqCst);
+        assert!(runner.on_cancel(task).await.is_err());
+        assert_eq!(
+            repository.session(SESSION_ID).unwrap().status,
+            SessionStatus::Running
+        );
+    }
+}
+
+#[tokio::test]
+async fn wait_stops_enrichment_and_side_effects_of_following_events() {
+    let (runner, _, _, storage) = file_fixture();
+    let mut flow = RecordingFlow {
+        events: vec![
+            Event::Wait(WaitEvent::default()),
+            Event::Tool(called_tool("browser")),
+        ],
+        ..RecordingFlow::default()
+    };
+    let events = runner
+        .run_flow(
+            &mut flow,
+            Message {
+                message: "等待".into(),
+                ..Message::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(&events[..], [Event::Wait(_)]));
+    assert!(storage.uploaded.lock().unwrap().is_empty());
+}
+
+struct WaitingLlm {
+    requests: AtomicUsize,
+}
+
+#[async_trait]
+impl Llm for WaitingLlm {
+    async fn invoke(
+        &self,
+        _messages: Vec<LlmMessage>,
+        _tools: Option<Vec<Tool>>,
+        _format: Option<ResponseFormat>,
+        _choice: Option<ToolChoice>,
+    ) -> Result<Response> {
+        let response = if self.requests.fetch_add(1, Ordering::SeqCst) == 0 {
+            json!({"role":"assistant", "content": json!({"title":"等待确认", "goal":"执行任务", "message":"请确认", "steps":[Step::new("等待用户确认")]}).to_string()})
+        } else {
+            json!({"role":"assistant", "content":null, "tool_calls":[{"id":"ask-1", "function":{"name":"message_ask_user", "arguments":"{\"text\":\"是否继续？\"}"}}]})
+        };
+        Ok(serde_json::from_value(response).unwrap())
+    }
+    fn model_name(&self) -> String {
+        "waiting-test".into()
+    }
+    fn temperature(&self) -> f32 {
+        0.0
+    }
+    fn max_tokens(&self) -> usize {
+        1024
+    }
+}
+
+fn runner_using_llm(
+    llm: Arc<dyn Llm>,
+    repository: Arc<MemoryRepository>,
+    sandbox: Arc<LifecycleSandbox>,
+) -> AgentTaskRunner {
+    AgentTaskRunner::new(
+        llm,
+        AgentConfig {
+            max_retries: 1,
+            max_iterations: 2,
+            ..AgentConfig::default()
+        },
+        McpConfig::default(),
+        A2aConfig::default(),
+        SESSION_ID,
+        repository,
+        Arc::new(UnusedDependency),
+        Arc::new(UnusedDependency),
+        Arc::new(TestJsonParser),
+        Box::new(UnusedDependency),
+        Box::new(UnusedDependency),
+        sandbox,
+    )
+}
+
+#[tokio::test]
+async fn real_flow_wait_keeps_pending_input_and_normal_completion_drains_it() {
+    for waiting in [true, false] {
+        let (_, repository, sandbox) = fixture();
+        let waiting_llm = Arc::new(WaitingLlm {
+            requests: AtomicUsize::new(0),
+        });
+        let planning_llm = Arc::new(PlanningLlm::default());
+        let llm: Arc<dyn Llm> = if waiting {
+            waiting_llm.clone()
+        } else {
+            planning_llm.clone()
+        };
+        let runner = runner_using_llm(llm, repository.clone(), sandbox);
+        let task = Arc::new(MemoryTask::default());
+        for id in ["input-1", "input-2"] {
+            task.input
+                .push(id, serde_json::to_value(message()).unwrap());
+        }
+        timeout(Duration::from_secs(2), runner.invoke(task.clone()))
+            .await
+            .unwrap()
+            .unwrap();
+        let session = repository.session(SESSION_ID).unwrap();
+        let output = task.output.entries();
+        assert_eq!(session.events.len(), output.len());
+        if waiting {
+            assert_eq!(session.status, SessionStatus::Waiting);
+            assert_eq!(task.input.entries().len(), 1);
+            assert_eq!(output.last().unwrap().1["type"], "wait");
+            assert!(output.iter().all(|(_, event)| event["type"] != "done"));
+            assert_eq!(waiting_llm.requests.load(Ordering::SeqCst), 2);
+        } else {
+            assert_eq!(session.status, SessionStatus::Completed);
+            assert!(task.input.entries().is_empty());
+            assert_eq!(
+                output
+                    .iter()
+                    .filter(|(_, event)| event["type"] == "done")
+                    .count(),
+                2
+            );
+            assert_eq!(planning_llm.requests.lock().unwrap().len(), 2);
+            assert_eq!(session.unread_message_count, 2);
+        }
+    }
 }

@@ -25,6 +25,9 @@ pub struct MemoryRepository {
     pub fail_read: AtomicBool,
     pub fail_save: AtomicBool,
     pub fail_add_file: AtomicBool,
+    pub fail_add_event: AtomicBool,
+    pub fail_metadata: AtomicBool,
+    pub fail_update_status: AtomicBool,
 }
 
 impl MemoryRepository {
@@ -75,25 +78,50 @@ impl SessionRepository for MemoryRepository {
         bail!("测试中不应调用 delete_by_id")
     }
 
-    async fn update_title(&self, _session_id: &str, _title: &str) -> Result<()> {
-        bail!("测试中不应调用 update_title")
+    async fn update_title(&self, session_id: &str, title: &str) -> Result<()> {
+        if self.fail_metadata.load(Ordering::SeqCst) {
+            bail!("模拟更新会话元数据失败");
+        }
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow::anyhow!("会话[{session_id}]不存在"))?;
+        session.title = title.to_string();
+        Ok(())
     }
 
     async fn update_latest_message(
         &self,
-        _session_id: &str,
-        _message: &str,
-        _timestamp: DateTime<Utc>,
+        session_id: &str,
+        message: &str,
+        timestamp: DateTime<Utc>,
     ) -> Result<()> {
-        bail!("测试中不应调用 update_latest_message")
+        if self.fail_metadata.load(Ordering::SeqCst) {
+            bail!("模拟更新会话元数据失败");
+        }
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow::anyhow!("会话[{session_id}]不存在"))?;
+        session.latest_message = message.to_string();
+        session.latest_message_at = Some(timestamp);
+        Ok(())
     }
 
     async fn update_unread_message_count(&self, _session_id: &str, _count: usize) -> Result<()> {
         bail!("测试中不应调用 update_unread_message_count")
     }
 
-    async fn increment_unread_message_count(&self, _session_id: &str) -> Result<()> {
-        bail!("测试中不应调用 increment_unread_message_count")
+    async fn increment_unread_message_count(&self, session_id: &str) -> Result<()> {
+        if self.fail_metadata.load(Ordering::SeqCst) {
+            bail!("模拟更新会话元数据失败");
+        }
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow::anyhow!("会话[{session_id}]不存在"))?;
+        session.unread_message_count += 1;
+        Ok(())
     }
 
     async fn decrement_unread_message_count(&self, _session_id: &str) -> Result<()> {
@@ -101,6 +129,9 @@ impl SessionRepository for MemoryRepository {
     }
 
     async fn update_status(&self, session_id: &str, status: SessionStatus) -> Result<()> {
+        if self.fail_update_status.load(Ordering::SeqCst) {
+            bail!("模拟更新会话状态失败");
+        }
         let mut sessions = self.sessions.lock().unwrap();
         let session = sessions
             .get_mut(session_id)
@@ -110,6 +141,9 @@ impl SessionRepository for MemoryRepository {
     }
 
     async fn add_event(&self, session_id: &str, event: Event) -> Result<()> {
+        if self.fail_add_event.load(Ordering::SeqCst) {
+            bail!("模拟保存事件失败");
+        }
         let mut sessions = self.sessions.lock().unwrap();
         let session = sessions
             .get_mut(session_id)

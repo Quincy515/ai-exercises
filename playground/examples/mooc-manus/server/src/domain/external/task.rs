@@ -20,6 +20,12 @@ pub trait TaskRunner: Send + Sync {
     /// Destroy the runner and release resources such as connections, temporary data, and background processes.
     async fn destroy(&self) -> Result<()>;
 
+    /// 执行任务确认取消后触发的回调，用于异步保存结束事件和状态。
+    /// Callback triggered after execution is cancelled, before the completion callback.
+    async fn on_cancel(&self, _task: SharedTask) -> Result<()> {
+        Ok(())
+    }
+
     /// 执行任务完成时触发的回调函数。
     /// Callback triggered after task execution completes.
     async fn on_done(&self, task: SharedTask) -> Result<()>;
