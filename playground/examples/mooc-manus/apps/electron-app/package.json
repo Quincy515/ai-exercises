@@ -7,6 +7,7 @@
 	"private": true,
 	"scripts": {
 		"start": "electron-forge start",
+		"typecheck": "tsc --noEmit",
 		"package": "electron-forge package",
 		"make": "electron-forge make",
 		"publish": "electron-forge publish",
@@ -19,6 +20,8 @@
 	},
 	"license": "MIT",
 	"devDependencies": {
+		"@tailwindcss/vite": "^4.3.3",
+		"@vitejs/plugin-react": "^4.7.0",
 		"@electron-forge/cli": "^7.11.2",
 		"@electron-forge/maker-deb": "^7.11.2",
 		"@electron-forge/maker-rpm": "^7.11.2",
@@ -40,6 +43,7 @@
 		"vite": "^6.4.3"
 	},
 	"dependencies": {
+		"@apps/frontend": "workspace:*",
 		"electron-squirrel-startup": "^1.0.1",
 		"react": "^19.3.0",
 		"react-dom": "^19.3.0"

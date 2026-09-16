@@ -15,5 +15,7 @@
       "node",
       "vite/client"
     ]
-  }
+  },
+  "include": ["src", "*.ts"],
+  "exclude": ["node_modules", ".vite", "out"]
 }

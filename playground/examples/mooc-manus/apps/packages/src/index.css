@@ -3,6 +3,9 @@
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
 
+/* Both hosts compile these shared components from source. */
+@source ".";
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {

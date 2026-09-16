@@ -7,6 +7,7 @@
 	},
 	"scripts": {
 		"dev": "vite dev --port 3000",
+		"typecheck": "tsc --noEmit",
 		"generate-routes": "tsr generate",
 		"build": "vite build",
 		"preview": "vite preview",
@@ -15,6 +16,7 @@
 		"check": "prettier --check ."
 	},
 	"dependencies": {
+		"@apps/frontend": "workspace:*",
 		"@tailwindcss/vite": "^4.1.18",
 		"@tanstack/react-devtools": "latest",
 		"@tanstack/react-query": "latest",

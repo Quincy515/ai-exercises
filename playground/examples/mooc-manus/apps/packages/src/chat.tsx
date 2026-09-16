@@ -1,6 +1,6 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "./components/ui/button";
 
-function App() {
+function Chat() {
   return (
     <div className="flex min-h-svh flex-col items-center justify-center">
       {" "}
@@ -8,4 +8,4 @@ function App() {
     </div>
   );
 }
-export default App;
+export default Chat;

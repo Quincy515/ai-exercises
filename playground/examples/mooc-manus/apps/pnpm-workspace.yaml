@@ -1,0 +1,21 @@
+packages:
+  - electron-app
+  - tanstack-app
+  - packages
+
+nodeLinker: hoisted
+blockExoticSubdeps: false
+
+# Forge 7 imports Vite without declaring a runtime dependency. Keep its
+# build runner on the same Vite 6 version as the Electron project.
+packageExtensions:
+  "@electron-forge/plugin-vite@7.11.2":
+    dependencies:
+      vite: "6.4.3"
+
+allowBuilds:
+  electron: true
+  electron-winstaller: true
+  esbuild: true
+  lightningcss: true
+  unrs-resolver: true
