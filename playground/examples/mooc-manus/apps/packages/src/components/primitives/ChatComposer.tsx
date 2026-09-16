@@ -145,8 +145,15 @@ export default function ChatComposer({
         <div className="flex items-center gap-1">
           {[
             <path key="p" d="M12 5v14M5 12h14" />,
-            <g key="h"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></g>,
-            <g key="e" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="1.8" /><circle cx="12" cy="12" r="1.8" /><circle cx="19" cy="12" r="1.8" /></g>,
+            <g key="h">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 7v5l3 2" />
+            </g>,
+            <g key="e" fill="currentColor" stroke="none">
+              <circle cx="5" cy="12" r="1.8" />
+              <circle cx="12" cy="12" r="1.8" />
+              <circle cx="19" cy="12" r="1.8" />
+            </g>,
           ].map((icon, i) => (
             <button
               key={i}
@@ -155,7 +162,16 @@ export default function ChatComposer({
               className="flex size-6 items-center justify-center rounded-[6px] text-ink-3
                 transition-colors duration-100 hover:bg-hover hover:text-ink-2"
             >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg
+                width="15"
+                height="15"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
                 {icon}
               </svg>
             </button>
@@ -180,7 +196,8 @@ export default function ChatComposer({
           </div>
         </div>
 
-        {messages[0] && (phase === "reply1" || phase === "reply2" || phase === "done") ? (
+        {messages[0] &&
+        (phase === "reply1" || phase === "reply2" || phase === "done") ? (
           <Section
             label={messages[0].label}
             sub={messages[0].sub}
@@ -230,7 +247,16 @@ export default function ChatComposer({
                 color: canSend ? "var(--surface)" : "var(--ink-2)",
               }}
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.4"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
                 <path d="M12 19V5M5 12l7-7 7 7" />
               </svg>
             </button>
