@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["shared"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = "1"
+boltffi = "=0.30.1"
+
+# Crux
+crux_core = "0.20"
+crux_http = "0.20"
+crux_kv = "0.14"
+crux_platform = "0.10"
+crux_time = "0.18"

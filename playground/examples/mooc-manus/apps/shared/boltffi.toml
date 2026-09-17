@@ -1,0 +1,16 @@
+[package]
+name = "shared"
+crate = "shared"
+version = "0.1.0"
+
+[targets.wasm]
+output = "../generated"
+profile = "release"
+# BoltFFI 0.30.1 reads Cargo's target directory, including a custom target-dir.
+
+[targets.wasm.typescript]
+output = "../generated/pkg"
+runtime_version = "0.30.1"
+
+[targets.wasm.npm]
+package_name = "shared"

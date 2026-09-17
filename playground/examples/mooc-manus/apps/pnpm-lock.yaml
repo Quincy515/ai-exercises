@@ -268,6 +268,12 @@ importers:
       shadcn:
         specifier: ^4.21.0
         version: 4.21.0(supports-color@8.1.1)(typescript@7.0.2)
+      shared:
+        specifier: file:../generated/pkg
+        version: file:generated/pkg
+      shared_types:
+        specifier: file:../generated/types
+        version: link:../generated/types
       tailwind-merge:
         specifier: ^3.0.2
         version: 3.7.0
@@ -403,6 +409,12 @@ importers:
       vite:
         specifier: ^8.0.0
         version: 8.3.0(@types/node@22.20.2)(jiti@2.7.0)(terser@5.51.2)
+
+  generated/types:
+    devDependencies:
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
 
 packages:
 
@@ -5951,6 +5963,12 @@ packages:
 
   zod@4.6.5:
     resolution: {integrity: sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q==}
+
+  '@boltffi/runtime@0.30.1':
+    resolution: {integrity: sha512-wTB5vZstjB8LDNjKjv1xkaPL697pJgGTAMv9K5Z99nHpzCrfrE+nBXzvi7PJ0/BavI4sxSIVUVpSzn0XVivZEA==}
+
+  shared@file:generated/pkg:
+    resolution: {directory: generated/pkg, type: directory}
 
 snapshots:
 
@@ -12115,3 +12133,9 @@ snapshots:
   zod@3.25.76: {}
 
   zod@4.6.5: {}
+
+  '@boltffi/runtime@0.30.1': {}
+
+  shared@file:generated/pkg:
+    dependencies:
+      '@boltffi/runtime': 0.30.1

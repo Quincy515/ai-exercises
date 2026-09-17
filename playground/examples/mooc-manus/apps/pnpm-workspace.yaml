@@ -2,6 +2,8 @@ packages:
   - electron-app
   - tanstack-app
   - packages
+  # Crux codegen runs pnpm inside this generated TypeScript package.
+  - generated/types
 
 nodeLinker: hoisted
 blockExoticSubdeps: false

@@ -3,11 +3,14 @@
   "private": true,
   "packageManager": "pnpm@12.4.2",
   "scripts": {
-    "dev:web": "pnpm --filter tanstack-app dev",
-    "dev:desktop": "pnpm --filter electron-app start",
+    "build:shared": "just build-shared",
+    "prepare:shared": "just install",
+    "test:shared": "node --test packages/tests/shared-wasm.test.mjs",
+    "dev:web": "just dev-web",
+    "dev:desktop": "just dev-desktop",
     "typecheck": "pnpm -r typecheck",
-    "build:web": "pnpm --filter tanstack-app build",
-    "build:desktop": "pnpm --filter electron-app package",
-    "build": "pnpm build:web && pnpm build:desktop"
+    "build:web": "just build-web",
+    "build:desktop": "just build-desktop",
+    "build": "just build"
   }
 }

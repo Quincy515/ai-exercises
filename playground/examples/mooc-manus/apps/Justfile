@@ -1,0 +1,56 @@
+default:
+    @just --list
+
+# build the wasm package, using the workspace TypeScript compiler
+[script('bash')]
+[working-directory('shared')]
+wasm:
+    set -euo pipefail
+    export PATH="$PWD/../node_modules/.bin:$PATH"
+    if [ -x ../node_modules/.bin/tsc ]; then
+        boltffi pack wasm -v
+    else
+        # Bootstrap file: dependencies before the first pnpm install.
+        npm exec --yes --package=typescript@5.9.3 -- boltffi pack wasm -v
+    fi
+    # Crux workaround: include the Node entrypoint files in the npm package.
+    node -e "const fs = require('node:fs'); const path = process.argv[1]; const pkg = JSON.parse(fs.readFileSync(path, 'utf8')); const files = new Set(pkg.files ?? []); for (const file of ['shared_node.js', 'shared_node.d.ts', 'shared_node.js.map']) files.add(file); pkg.files = [...files]; fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\n');" ../generated/pkg/package.json
+
+# generate types for TypeScript in the workspace's generated directory
+typegen:
+    RUST_LOG=info cargo run --locked \
+        --package shared --bin codegen \
+        --features codegen,facet_typegen \
+        -- --language typescript --output-dir generated/types
+    # crux_core 0.20 ignores its internal pnpm/tsc exit status; verify explicitly.
+    pnpm --dir generated/types exec tsc --build --force
+
+# generate shared packages before pnpm installs their file: dependencies
+build-shared: wasm typegen
+
+# refresh the generated local packages
+install: build-shared
+    pnpm install --frozen-lockfile
+
+# serve the web shell
+dev-web: install
+    pnpm --filter tanstack-app dev
+
+# serve the desktop shell
+dev-desktop: install
+    pnpm --filter electron-app start
+
+# build the web shell
+build-web: install
+    pnpm --filter tanstack-app build
+
+# package the desktop shell
+build-desktop: install
+    pnpm --filter electron-app package
+
+# shared dependencies run once per just invocation
+build: build-web build-desktop
+
+# run the Rust core tests
+test:
+    cargo test --locked -p shared --lib
