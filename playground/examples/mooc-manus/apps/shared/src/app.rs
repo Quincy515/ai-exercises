@@ -117,7 +117,9 @@ impl App for AppCore {
                 Command::event(Event::Update(count))
             }
             Event::Set(Err(e)) => {
-                panic!("Error getting count: {e}");
+                // Keep the current view usable when the shell reports an HTTP failure.
+                tracing::warn!(error = %e, "Error getting count");
+                render()
             }
             Event::Update(count) => {
                 model.count = count;
@@ -195,6 +197,7 @@ mod tests {
 
     use crux_core::App as _;
     use crux_http::{
+        HttpError,
         protocol::{HttpRequest, HttpResponse, HttpResult},
         testing::ResponseBuilder,
     };
@@ -202,6 +205,21 @@ mod tests {
 
     use super::{AppCore, Event, Model};
     use crate::Count;
+
+    #[test]
+    fn http_failure_preserves_the_current_view() {
+        let app = AppCore::default();
+        let mut model = Model::default();
+        model.count.value = 7;
+        let mut command = app.update(Event::Get, &mut model);
+        let mut request = command.expect_one_effect().expect_http();
+        request
+            .resolve(HttpResult::Err(HttpError::Io("offline".to_string())))
+            .unwrap();
+        let mut command = app.update(command.expect_one_event(), &mut model);
+        command.expect_one_effect().expect_render();
+        assert_eq!(app.view(&model).text, "7 (pending)");
+    }
 
     // ANCHOR: simple_tests
     /// Test that a `Get` event causes the app to fetch the current

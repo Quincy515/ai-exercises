@@ -7,10 +7,15 @@ import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 const config = defineConfig({
+	// Crux typegen emits CommonJS into a linked workspace package.
+	optimizeDeps: {
+		include: ["@apps/frontend > shared_types/app.js", "@apps/frontend > shared_types/bincode/index.js", "@apps/frontend > shared > @boltffi/runtime"],
+		exclude: ["shared"],
+	},
 	resolve: { tsconfigPaths: true, dedupe: ["react", "react-dom"] },
 	// TanStack Devtools already pipes console output between browser and server.
 	server: { forwardConsole: false },
-	plugins: [devtools(), tailwindcss(), tanstackStart(), viteReact()],
+	plugins: [devtools(), tailwindcss(), tanstackStart({ spa: { enabled: true } }), viteReact()],
 });
 
 export default config;

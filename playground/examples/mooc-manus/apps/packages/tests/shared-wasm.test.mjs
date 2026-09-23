@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { CoreFfi, initialized } from "shared";
 import app from "shared_types/app.js";
@@ -17,6 +18,24 @@ const {
   valueNone,
 } = app;
 const { BincodeDeserializer, BincodeSerializer } = bincode;
+
+test("installed bindings include their source maps and mapped sources", () => {
+  const entry = import.meta.resolve("shared");
+  for (const name of ["shared", "shared_node"]) {
+    const js = new URL(`${name}.js`, entry);
+    const reference = readFileSync(js, "utf8").match(/sourceMappingURL=(.+)/);
+    assert.ok(reference, `${name}.js should reference its source map`);
+    const mapUrl = new URL(reference[1].trim(), js);
+    const map = JSON.parse(readFileSync(mapUrl, "utf8"));
+    map.sources.forEach((source, index) => {
+      assert.ok(
+        typeof map.sourcesContent?.[index] === "string" ||
+          existsSync(new URL(`${map.sourceRoot ?? ""}${source}`, mapUrl)),
+        `Missing source for ${name}: ${source}`,
+      );
+    });
+  }
+});
 
 function serialize(event) {
   const serializer = new BincodeSerializer();

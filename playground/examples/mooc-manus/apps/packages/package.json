@@ -4,11 +4,13 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./crux": "./src/lib/crux/index.ts",
     "./chat": "./src/chat.tsx",
     "./styles.css": "./src/index.css"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:crux": "tsc -p tests/tsconfig.json && node --test tests/crux-*.test.mjs"
   },
   "peerDependencies": {
     "react": "^19.3.0",

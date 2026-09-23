@@ -6,6 +6,7 @@
     "build:shared": "just build-shared",
     "prepare:shared": "just install",
     "test:shared": "node --test packages/tests/shared-wasm.test.mjs",
+    "test:crux": "pnpm --filter @apps/frontend test:crux",
     "dev:web": "just dev-web",
     "dev:desktop": "just dev-desktop",
     "typecheck": "pnpm -r typecheck",
