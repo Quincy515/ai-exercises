@@ -44,6 +44,7 @@
 	},
 	"dependencies": {
 		"@apps/frontend": "workspace:*",
+		"@tanstack/react-router": "1.170.36",
 		"electron-squirrel-startup": "^1.0.1",
 		"react": "^19.3.0",
 		"react-dom": "^19.3.0"

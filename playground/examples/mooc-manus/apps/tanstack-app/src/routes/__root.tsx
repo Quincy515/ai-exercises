@@ -1,4 +1,5 @@
 import { TanStackDevtools } from '@tanstack/react-devtools'
+import AppLayout from '@apps/frontend/layout'
 import type { QueryClient } from '@tanstack/react-query'
 import {
   createRootRouteWithContext,
@@ -6,6 +7,8 @@ import {
   HeadContent,
   Outlet,
   Scripts,
+  useNavigate,
+  useParams,
 } from '@tanstack/react-router'
 import { TanStackRouterDevtoolsPanel } from '@tanstack/react-router-devtools'
 import TanStackQueryDevtools from '../integrations/tanstack-query/devtools'
@@ -37,8 +40,23 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
     ],
   }),
   shellComponent: RootDocument,
-  component: () => <ClientOnly><Outlet /></ClientOnly>,
+  component: () => <ClientOnly><AppShell /></ClientOnly>,
 })
+
+function AppShell() {
+  const { id: sessionId } = useParams({ strict: false })
+  const navigate = useNavigate()
+
+  return (
+    <AppLayout
+      sessionId={sessionId}
+      onNewSession={() => void navigate({ to: '/' })}
+      onSelectSession={(id) => void navigate({ to: '/sessions/$id', params: { id } })}
+    >
+      <Outlet />
+    </AppLayout>
+  )
+}
 
 function RootDocument({ children }: { children: React.ReactNode }) {
   return (

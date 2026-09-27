@@ -173,6 +173,9 @@ importers:
       '@apps/frontend':
         specifier: workspace:*
         version: link:../packages
+      '@tanstack/react-router':
+        specifier: 1.170.36
+        version: 1.170.36(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       electron-squirrel-startup:
         specifier: ^1.0.1
         version: 1.0.1(supports-color@7.2.0)
