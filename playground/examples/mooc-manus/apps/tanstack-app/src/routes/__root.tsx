@@ -9,6 +9,7 @@ import {
   Scripts,
   useNavigate,
   useParams,
+  useLocation,
 } from '@tanstack/react-router'
 import { TanStackRouterDevtoolsPanel } from '@tanstack/react-router-devtools'
 import TanStackQueryDevtools from '../integrations/tanstack-query/devtools'
@@ -46,9 +47,11 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
 function AppShell() {
   const { id: sessionId } = useParams({ strict: false })
   const navigate = useNavigate()
+  const pathname = useLocation({ select: (location) => location.pathname })
 
   return (
     <AppLayout
+      showChatHeader={pathname === '/'}
       sessionId={sessionId}
       onNewSession={() => void navigate({ to: '/' })}
       onSelectSession={(id) => void navigate({ to: '/sessions/$id', params: { id } })}

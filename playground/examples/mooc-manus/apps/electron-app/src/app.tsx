@@ -9,15 +9,18 @@ import {
   RouterProvider,
   useNavigate,
   useParams,
+  useLocation,
 } from "@tanstack/react-router";
 import { createRoot } from "react-dom/client";
 
 function AppShell() {
   const { id } = useParams({ strict: false });
   const navigate = useNavigate();
+  const pathname = useLocation({ select: (location) => location.pathname });
 
   return (
     <AppLayout
+      showChatHeader={pathname === "/"}
       sessionId={id}
       onNewSession={() => void navigate({ to: "/" })}
       onSelectSession={(id) =>

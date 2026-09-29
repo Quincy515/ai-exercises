@@ -19,6 +19,29 @@ const {
 } = app;
 const { BincodeDeserializer, BincodeSerializer } = bincode;
 
+test("installed BoltFFI runtime matches the workspace version", () => {
+  const manifest = readFileSync(
+    new URL("../../Cargo.toml", import.meta.url),
+    "utf8",
+  );
+  const expected = manifest.match(/^boltffi\s*=\s*"=([^"]+)"/m)?.[1];
+  assert.ok(expected, "The workspace must pin an exact BoltFFI version");
+  const shared = JSON.parse(
+    readFileSync(
+      new URL("package.json", import.meta.resolve("shared")),
+      "utf8",
+    ),
+  );
+  const runtime = JSON.parse(
+    readFileSync(
+      new URL("../package.json", import.meta.resolve("@boltffi/runtime")),
+      "utf8",
+    ),
+  );
+  assert.equal(shared.dependencies["@boltffi/runtime"], expected);
+  assert.equal(runtime.version, expected);
+});
+
 test("installed bindings include their source maps and mapped sources", () => {
   const entry = import.meta.resolve("shared");
   for (const name of ["shared", "shared_node"]) {

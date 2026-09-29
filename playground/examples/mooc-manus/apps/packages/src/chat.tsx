@@ -10,7 +10,7 @@ function Chat() {
   }, [ready, dispatch, events]);
 
   return (
-    <section className="flex min-h-svh flex-col items-center justify-center gap-6 px-6">
+    <section className="flex flex-1 flex-col items-center justify-center gap-6 px-6">
       <div className="space-y-2 text-center">
         <h1 className="text-2xl font-semibold">共享计数器</h1>
         <p className="text-sm text-muted-foreground">

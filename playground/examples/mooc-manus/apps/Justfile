@@ -1,20 +1,28 @@
 default:
     @just --list
 
-# build the wasm package, using the workspace TypeScript compiler
+# build with one BoltFFI version, derived from the workspace Cargo dependency
 [script('bash')]
 [working-directory('shared')]
 wasm:
     set -euo pipefail
-    export PATH="$PWD/../node_modules/.bin:$PATH"
-    if [ -x ../node_modules/.bin/tsc ]; then
-        boltffi pack wasm -v
-    else
-        # Bootstrap file: dependencies before the first pnpm install.
-        npm exec --yes --package=typescript@5.9.3 -- boltffi pack wasm -v
+    boltffi_version="$(cargo metadata --no-deps --format-version 1 --locked | node -e 'const fs = require("node:fs"); const metadata = JSON.parse(fs.readFileSync(0, "utf8")); const req = metadata.packages.find(p => p.name === "shared").dependencies.find(d => d.name === "boltffi").req; if (!/^=\d+\.\d+\.\d+$/.test(req)) throw new Error("Pin boltffi to an exact stable version in Cargo.toml"); process.stdout.write(req.slice(1));')"
+    if [[ "$(boltffi --version 2>/dev/null || true)" != "boltffi $boltffi_version" ]]; then
+        cargo install boltffi_cli --version "=$boltffi_version" --locked --force
     fi
-    # Include both entrypoints and the files needed by their source maps.
-    node -e "const fs = require('node:fs'); const path = process.argv[1]; const pkg = JSON.parse(fs.readFileSync(path, 'utf8')); const files = new Set(pkg.files ?? []); for (const file of ['shared.js.map', 'shared.ts', 'shared_node.js', 'shared_node.d.ts', 'shared_node.js.map', 'shared_node.ts']) files.add(file); pkg.files = [...files]; fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\n');" ../generated/pkg/package.json
+    if [[ "$(boltffi --version)" != "boltffi $boltffi_version" ]]; then
+        echo "PATH still selects a different BoltFFI; use the cargo-installed boltffi $boltffi_version." >&2
+        exit 1
+    fi
+    # The generator typechecks against this runtime before pnpm installs shared.
+    if ! node -e 'const fs = require("node:fs"); for (const [name, version] of [["@boltffi/runtime", process.argv[1]], ["typescript", "5.9.3"], ["@types/node", "22.20.2"]]) { const p = JSON.parse(fs.readFileSync(`../generated/node_modules/${name}/package.json`, "utf8")); if (p.version !== version) process.exit(1); }' "$boltffi_version" 2>/dev/null; then
+        npm install --prefix ../generated --no-save --package-lock=false --ignore-scripts --no-audit --no-fund "@boltffi/runtime@$boltffi_version" typescript@5.9.3 @types/node@22.20.2
+    fi
+    export PATH="$PWD/../generated/node_modules/.bin:$PATH"
+    runtime_config="$(mktemp)"
+    trap 'rm -f "$runtime_config"' EXIT
+    printf '[targets.wasm.typescript]\nruntime_version = "%s"\n' "$boltffi_version" > "$runtime_config"
+    boltffi --overlay "$runtime_config" pack wasm -v
 
 # generate types for TypeScript in the workspace's generated directory
 typegen:
@@ -29,6 +37,8 @@ build-shared: wasm typegen
 # refresh the generated local packages
 install: build-shared
     pnpm install --frozen-lockfile
+    # pnpm may cache dependencies of file: packages after their manifest changes.
+    @node -e 'const fs = require("node:fs"); const expected = JSON.parse(fs.readFileSync("generated/pkg/package.json", "utf8")).dependencies["@boltffi/runtime"]; const installed = JSON.parse(fs.readFileSync("node_modules/@boltffi/runtime/package.json", "utf8")).version; if (installed !== expected) process.exit(1);' 2>/dev/null || pnpm --filter @apps/frontend update shared
 
 # serve the web shell
 dev-web: install

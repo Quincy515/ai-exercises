@@ -19,13 +19,15 @@ cd apps
 
 ### 1. 首次准备与日常启动
 
-安装好下文列出的 Rust/BoltFFI/Node/pnpm/just 工具后，先生成共享包并安装依赖：
+安装好下文列出的 Rust/Node/pnpm/just 工具后，先生成共享包并安装依赖：
 
 ```sh
 just install
 ```
 
-执行顺序为 `wasm → typegen → pnpm install --frozen-lockfile`。准备完成后，两个终端分别启动：
+执行顺序为 `wasm → typegen → pnpm install --frozen-lockfile`。`wasm` 会自动对齐
+BoltFFI CLI 和编译所需的 runtime；安装后若发现本地 `shared` 的旧依赖缓存，
+会定向刷新该包。准备完成后，两个终端分别启动：
 
 ```sh
 # 终端 A：Web，默认 http://localhost:3000
@@ -186,9 +188,9 @@ Electron 当前使用 `.eslintrc.json`，ESLint 9 通过上述环境变量启用
 `shared.js.map` 用于将 JavaScript 调试位置映射回生成的 TypeScript。该文件缺失会影响
 断点和堆栈定位，WASM 执行依赖的仍是 JavaScript 和 `.wasm`。
 
-当前打包清单已包含 `shared.js.map`、`shared.ts` 和对应 Node 源码；
+BoltFFI 0.31.0 自动收集浏览器与 Node 入口、map 和 WASM 辅助模块，map 中内嵌源码；
 `@boltffi/runtime` 则显式交给两端 Vite 预构建，避免逐模块加载时触发上游缺失源码的告警。
-上游 0.30.1 包没有发布其原始 `src/*.ts`，因此 Electron/Vite 6 内部库的原始 TS 调试仍受此限制。
+上游 runtime 0.31.0 包没有发布其原始 `src/*.ts`，因此 Electron/Vite 6 内部库的原始 TS 调试仍受此限制。
 修复后执行 `just install`，再按第 3 节重启开发服务以重新加载依赖缓存。
 
 依据：[Vite 本地依赖与缓存](https://vite.dev/guide/dep-pre-bundling)、
@@ -241,22 +243,42 @@ HTTP/SSE/KV/Time、初始化与资源释放。
 
 ## Rust / Wasm 与共享类型
 
-当前项目使用 BoltFFI CLI / Rust crate `0.30.1`，
+当前项目统一使用 BoltFFI CLI / Rust crate / `@boltffi/runtime` `0.31.0`，
 Binaryen（`wasm-opt`）使用 `132` 及以上版本。
 
 ```sh
 brew install just
-cargo install boltffi_cli --version '=0.30.1' --locked
 brew install binaryen
 rustup target add wasm32-unknown-unknown
 ```
 
-全部任务集中在 `apps/Justfile`，直接运行 `just` 可查看命令列表。
-其中保留 Crux 官方示例的构建顺序和必要的 WASM npm 包修补。
+**BoltFFI 版本只在 `apps/Cargo.toml` 中维护**：`boltffi = "=0.31.0"`。
+`Justfile` 通过 Cargo metadata 读取精确版本，自动安装相同版本的 CLI，并通过官方
+`--overlay` 临时配置将生成 npm 包的 runtime 固定到相同版本。
+统一使用 `just wasm` / `just install`；直接执行 `boltffi pack wasm` 会绕过这套对齐流程。
 
-`just install` 可以在安装前端依赖之前执行。
-首次构建通过 `npm exec` 临时提供 TypeScript 5.9.3；工作区安装完成后，
-构建使用 `node_modules/.bin/tsc`，避免依赖全局 `tsc`。
+BoltFFI 在生成 npm 包之前调用 TypeScript 检查 runtime。为避免循环依赖和旧包缓存，
+构建会在被忽略的 `generated/node_modules` 中准备匹配的 runtime、TypeScript 5.9.3
+及 Node 类型；已匹配时复用缓存。生成完成后再安装前端工作区依赖。
+
+后续升级时，先将 `Cargo.toml` 的 BoltFFI 精确版本改为三个包均已发布的目标版本，再执行：
+
+```sh
+cargo update -p boltffi
+just install
+pnpm test:shared
+pnpm test:crux
+pnpm typecheck
+pnpm build
+```
+
+提交 `Cargo.toml`、`Cargo.lock`、`pnpm-lock.yaml` 及包管理器产生的相关配置改动。
+`pnpm test:shared` 同时检查生成包与实际安装的 runtime 是否匹配 Cargo 中的版本。
+日常构建遵循已验证的精确版本，升级由上述步骤明确触发。
+
+全部任务集中在 `apps/Justfile`，直接运行 `just` 可查看命令列表。
+其中保留 Crux 官方示例的生成与安装顺序；0.31.0 已由上游正确生成包清单和 source map，
+此前手工添加 Node 文件与映射源码的补丁已移除。首次运行也可以直接执行 `just install`。
 
 日常开发、Rust 改动后的更新和可选监听命令见上面的开发流程。
 
@@ -292,11 +314,10 @@ just typegen
 `just build` 始终构建两端应用；单独编译 Rust 库可执行
 `cargo build -p shared`。
 
-BoltFFI 0.30.1 会通过 Cargo metadata 找到实际 target 目录，因此
+BoltFFI 会通过 Cargo metadata 找到实际 target 目录，因此
 `boltffi.toml` 省略 `artifact_path`，兼容全局 `target-dir` 配置。
-`wasm` 任务补齐生成包的文件清单：Node 入口用于集成测试，浏览器与 Node 的
-source map 及对应 TypeScript 源码一起发布，保证映射文件能够找到原文件。单独打包后，执行
-`just install` 可重新应用该修补并刷新本地依赖。
+Node 入口用于集成测试，浏览器入口交给 Vite；对应 source map 由生成器维护。
+单独打包后执行 `just install`，可以刷新前端使用的本地依赖。
 
 当前 FFI 使用 `CoreFfi.new({ processEffects })`。浏览器使用前需要等待
 `shared` 的 `initialized`，Shell 负责处理 `update` / `resolve` 返回的

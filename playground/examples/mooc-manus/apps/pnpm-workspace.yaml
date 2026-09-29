@@ -21,3 +21,5 @@ allowBuilds:
   esbuild: true
   lightningcss: true
   unrs-resolver: true
+minimumReleaseAgeExclude:
+  - '@boltffi/runtime@0.31.0'

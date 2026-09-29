@@ -5947,8 +5947,8 @@ packages:
   zod@4.6.5:
     resolution: {integrity: sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q==}
 
-  '@boltffi/runtime@0.30.1':
-    resolution: {integrity: sha512-wTB5vZstjB8LDNjKjv1xkaPL697pJgGTAMv9K5Z99nHpzCrfrE+nBXzvi7PJ0/BavI4sxSIVUVpSzn0XVivZEA==}
+  '@boltffi/runtime@0.31.0':
+    resolution: {integrity: sha512-nxht21tsG0KLzkdN2gHqSAZv7Ainht5v/Q6ZGVT8xXAmJKdewk4PwwryLeQR4xrejwDOtuWRD7p7OGkKGw8JIQ==}
 
   shared@file:generated/pkg:
     resolution: {directory: generated/pkg, type: directory}
@@ -12101,8 +12101,8 @@ snapshots:
 
   zod@4.6.5: {}
 
-  '@boltffi/runtime@0.30.1': {}
+  '@boltffi/runtime@0.31.0': {}
 
   shared@file:generated/pkg:
     dependencies:
-      '@boltffi/runtime': 0.30.1
+      '@boltffi/runtime': 0.31.0
