@@ -1,4 +1,3 @@
-import { ManusSettings } from "./manus-settings";
 import { SidebarTrigger, useSidebar } from "./ui/sidebar";
 
 export function ChatHeader({ onNavigateHome }: { onNavigateHome: () => void }) {
@@ -23,8 +22,6 @@ export function ChatHeader({ onNavigateHome }: { onNavigateHome: () => void }) {
           onClick={onNavigateHome}
         />
       </div>
-      {/* 右侧设置模态窗 */}
-      <ManusSettings />
     </header>
   );
 }

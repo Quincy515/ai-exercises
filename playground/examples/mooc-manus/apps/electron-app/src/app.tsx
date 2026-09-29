@@ -1,5 +1,6 @@
 import Chat from "@apps/frontend/chat";
 import AppLayout from "@apps/frontend/layout";
+import SectionPage from "@apps/frontend/section-page";
 import {
   createHashHistory,
   createRootRoute,
@@ -20,7 +21,8 @@ function AppShell() {
 
   return (
     <AppLayout
-      showChatHeader={pathname === "/"}
+      pathname={pathname}
+      onNavigate={(to) => void navigate({ to })}
       sessionId={id}
       onNewSession={() => void navigate({ to: "/" })}
       onSelectSession={(id) =>
@@ -43,10 +45,25 @@ const sessionRoute = createRoute({
   path: "/sessions/$id",
   component: Chat,
 });
+const schedulesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/schedules",
+  component: () => <SectionPage section="schedules" />,
+});
+const libraryRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/library",
+  component: () => <SectionPage section="library" />,
+});
 
 // Hash 路由让打包后的 file:// 页面也能切换会话并刷新。
 const router = createRouter({
-  routeTree: rootRoute.addChildren([indexRoute, sessionRoute]),
+  routeTree: rootRoute.addChildren([
+    indexRoute,
+    sessionRoute,
+    schedulesRoute,
+    libraryRoute,
+  ]),
   history: createHashHistory(),
 });
 

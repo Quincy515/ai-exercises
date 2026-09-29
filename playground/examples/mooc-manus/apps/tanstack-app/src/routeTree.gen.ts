@@ -11,6 +11,8 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AboutRouteImport } from './routes/about'
+import { Route as LibraryRouteImport } from './routes/library'
+import { Route as SchedulesRouteImport } from './routes/schedules'
 import { Route as DemoTanstackQueryRouteImport } from './routes/demo/tanstack-query'
 import { Route as SessionsIdRouteImport } from './routes/sessions/$id'
 
@@ -22,6 +24,16 @@ const IndexRoute = IndexRouteImport.update({
 const AboutRoute = AboutRouteImport.update({
   id: '/about',
   path: '/about',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LibraryRoute = LibraryRouteImport.update({
+  id: '/library',
+  path: '/library',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SchedulesRoute = SchedulesRouteImport.update({
+  id: '/schedules',
+  path: '/schedules',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DemoTanstackQueryRoute = DemoTanstackQueryRouteImport.update({
@@ -38,12 +50,16 @@ const SessionsIdRoute = SessionsIdRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/about': typeof AboutRoute
+  '/library': typeof LibraryRoute
+  '/schedules': typeof SchedulesRoute
   '/demo/tanstack-query': typeof DemoTanstackQueryRoute
   '/sessions/$id': typeof SessionsIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/about': typeof AboutRoute
+  '/library': typeof LibraryRoute
+  '/schedules': typeof SchedulesRoute
   '/demo/tanstack-query': typeof DemoTanstackQueryRoute
   '/sessions/$id': typeof SessionsIdRoute
 }
@@ -51,20 +67,43 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/about': typeof AboutRoute
+  '/library': typeof LibraryRoute
+  '/schedules': typeof SchedulesRoute
   '/demo/tanstack-query': typeof DemoTanstackQueryRoute
   '/sessions/$id': typeof SessionsIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/about' | '/demo/tanstack-query' | '/sessions/$id'
+  fullPaths:
+    | '/'
+    | '/about'
+    | '/library'
+    | '/schedules'
+    | '/demo/tanstack-query'
+    | '/sessions/$id'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/about' | '/demo/tanstack-query' | '/sessions/$id'
-  id: '__root__' | '/' | '/about' | '/demo/tanstack-query' | '/sessions/$id'
+  to:
+    | '/'
+    | '/about'
+    | '/library'
+    | '/schedules'
+    | '/demo/tanstack-query'
+    | '/sessions/$id'
+  id:
+    | '__root__'
+    | '/'
+    | '/about'
+    | '/library'
+    | '/schedules'
+    | '/demo/tanstack-query'
+    | '/sessions/$id'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AboutRoute: typeof AboutRoute
+  LibraryRoute: typeof LibraryRoute
+  SchedulesRoute: typeof SchedulesRoute
   DemoTanstackQueryRoute: typeof DemoTanstackQueryRoute
   SessionsIdRoute: typeof SessionsIdRoute
 }
@@ -83,6 +122,20 @@ declare module '@tanstack/react-router' {
       path: '/about'
       fullPath: '/about'
       preLoaderRoute: typeof AboutRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/library': {
+      id: '/library'
+      path: '/library'
+      fullPath: '/library'
+      preLoaderRoute: typeof LibraryRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/schedules': {
+      id: '/schedules'
+      path: '/schedules'
+      fullPath: '/schedules'
+      preLoaderRoute: typeof SchedulesRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/demo/tanstack-query': {
@@ -105,6 +158,8 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AboutRoute: AboutRoute,
+  LibraryRoute: LibraryRoute,
+  SchedulesRoute: SchedulesRoute,
   DemoTanstackQueryRoute: DemoTanstackQueryRoute,
   SessionsIdRoute: SessionsIdRoute,
 }

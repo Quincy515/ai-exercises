@@ -51,7 +51,8 @@ function AppShell() {
 
   return (
     <AppLayout
-      showChatHeader={pathname === '/'}
+      pathname={pathname}
+      onNavigate={(to) => void navigate({ to })}
       sessionId={sessionId}
       onNewSession={() => void navigate({ to: '/' })}
       onSelectSession={(id) => void navigate({ to: '/sessions/$id', params: { id } })}

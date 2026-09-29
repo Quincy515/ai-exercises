@@ -9,6 +9,14 @@ Web 使用 TanStack Start 官方 SPA 模式，构建时生成静态页面壳；
 部署 `tanstack-app/dist/client`，并将前端路由回退到 `/_shell.html`。
 业务路由设置 `ssr: false`，统一在 `ClientOnly` 内挂载；Query 使用普通客户端 Provider。
 
+共享布局使用三级区域：64px 一级功能栏、可拖动的聊天列表、自动伸展的内容区。
+桌面聊天列表默认 280px，可在 220～420px 之间拖动；内容区至少保留 320px。
+向左拖过最小宽度 40px 后自动收起，边界向右拖动或点击展开按钮可恢复。
+拖动使用 shadcn `Resizable`，实现集中在 `packages/src/app/layout.tsx`，两端共用。
+首页和 `/sessions/$id` 复用聊天列表；收起只影响二级列表，一级导航始终保留。
+`/schedules` 与 `/library` 已接通两端路由，当前显示占位页；设置弹窗复用在一级栏底部，
+账号位置暂作展示。窄屏继续使用聊天列表抽屉，业务核心沿用现有 Crux 接入。
+
 ## 开发、热更新与发布
 
 以下命令均在 `mooc-manus/apps` 目录执行。从 `mooc-manus` 根目录进入：

@@ -7,6 +7,7 @@
     "./crux": "./src/lib/crux/index.ts",
     "./chat": "./src/chat.tsx",
     "./layout": "./src/app/layout.tsx",
+    "./section-page": "./src/section-page.tsx",
     "./styles.css": "./src/index.css"
   },
   "scripts": {
@@ -23,6 +24,8 @@
     "class-variance-authority": "^0.7.1",
     "cn": "^0.3.0",
     "lucide-react": "^1.46.0",
+    "motion": "^13.4.4",
+    "react-resizable-panels": "^4.14.1",
     "shadcn": "^4.21.0",
     "shared": "file:../generated/pkg",
     "shared_types": "file:../generated/types",

@@ -40,34 +40,38 @@ export function LeftPanel({
 }: LeftPanelProps) {
   // 本课使用静态会话，后续再接入业务数据。
   const sessions = ["1", "2", "3"];
-  const { setOpenMobile } = useSidebar();
+  const { setOpenMobile, isMobile } = useSidebar();
 
   return (
-    <Sidebar>
+    <Sidebar
+      collapsible={isMobile ? "offcanvas" : "none"}
+      className="w-full min-w-0"
+    >
       {/* 顶部的切换按钮 */}
-      <SidebarHeader>
+      <SidebarHeader className="flex-row items-center justify-between">
+        <h2 className="px-2 text-sm font-medium">聊天记录</h2>
         <SidebarTrigger className="cursor-pointer" aria-label="收起会话列表" />
       </SidebarHeader>
       {/* 中间内容 */}
       <SidebarContent className="p-2">
-        {/*新建会话按钮*/}
+        {/* 新建会话按钮 */}
         <Button
           variant="outline"
           className="mb-3 cursor-pointer"
-          aria-label="新建任务"
+          aria-label="新聊天"
           onClick={() => {
             onNewSession();
             setOpenMobile(false);
           }}
         >
           <Plus data-icon="inline-start" />
-          新建任务
+          新聊天
           <KbdGroup>
             <Kbd>⌘</Kbd>
             <Kbd>K</Kbd>
           </KbdGroup>
         </Button>
-        {/*会话列表*/}
+        {/* 会话列表 */}
         <ItemGroup className="gap-1" aria-label="会话列表">
           {sessions.map((session) => (
             <Item

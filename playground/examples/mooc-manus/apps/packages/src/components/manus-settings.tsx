@@ -47,9 +47,10 @@ export function ManusSettings() {
       {/* 模态窗触发器 */}
       <DialogTrigger
         render={
-          <Button variant="outline" size="icon-sm" className="cursor-pointer" />
+          <Button variant="ghost" size="icon-lg" className="cursor-pointer" />
         }
         aria-label="打开设置"
+        title="设置"
       >
         <Settings />
       </DialogTrigger>

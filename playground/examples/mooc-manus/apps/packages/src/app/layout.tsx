@@ -1,64 +1,105 @@
-import type { CSSProperties, ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import { usePanelRef } from "react-resizable-panels";
 import { ChatHeader } from "../components/chat-header";
 import { LeftPanel } from "../components/left-panel";
 import type { LeftPanelProps } from "../components/left-panel";
+import { NavigationRail } from "../components/navigation-rail";
+import type { NavigationTarget } from "../components/navigation-rail";
 import {
-  SidebarProvider,
-  SidebarTrigger,
-  useSidebar,
-} from "../components/ui/sidebar";
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "../components/ui/resizable";
+import { SidebarProvider, useSidebar } from "../components/ui/sidebar";
 
-function Content({
+function ChatLayout({
   children,
-  showChatHeader,
-  onNavigateHome,
-}: {
-  children: ReactNode;
-  showChatHeader: boolean;
-  onNavigateHome: () => void;
-}) {
-  const { isMobile, state } = useSidebar();
+  ...navigation
+}: LeftPanelProps & { children: ReactNode }) {
+  const { open, setOpen, isMobile } = useSidebar();
+  const panelRef = usePanelRef();
+  const expandedWidth = useRef(280);
+  // defaultSize 仅用于初始化；固定它，保留组件记住的上次展开宽度。
+  const [defaultSize] = useState(open ? "280px" : "0px");
+
+  // 现有按钮和快捷键继续使用 Sidebar 状态，由面板执行展开与收起。
+  useEffect(() => {
+    // 按像素恢复，避免跨断点后用组件缓存的百分比展开到不同宽度。
+    const panel = panelRef.current;
+    if (open && !isMobile) {
+      if (panel?.isCollapsed()) panel.resize(expandedWidth.current);
+    } else panel?.collapse();
+  }, [open, isMobile, panelRef]);
 
   return (
-    <main className="relative flex min-w-0 flex-1 flex-col bg-chat-background">
-      {/* 顶部header */}
-      {showChatHeader && <ChatHeader onNavigateHome={onNavigateHome} />}
-      {/* 收起后和窄屏下保留展开入口。 */}
-      {!showChatHeader && (isMobile || state === "collapsed") && (
-        <SidebarTrigger
-          className="absolute left-2 top-2 cursor-pointer"
-          aria-label="展开会话列表"
-        />
-      )}
-      {/* 中间对话框 */}
-      {children}
-    </main>
+    // 保持内容组件树稳定，切换窄屏时继续使用同一个 Crux Core。
+    <ResizablePanelGroup
+      orientation="horizontal"
+      disabled={isMobile}
+      className="h-svh min-w-0 flex-1"
+    >
+      {/* 左侧的面板：拖过最小宽度 40px 后，自动收起到 0。 */}
+      <ResizablePanel
+        id="chat-sidebar"
+        panelRef={panelRef}
+        defaultSize={defaultSize}
+        minSize="220px"
+        maxSize="420px"
+        collapsible
+        collapsedSize="0px"
+        collapsedThreshold="40px"
+        groupResizeBehavior="preserve-pixel-size"
+        onResize={(size, _id, previousSize) => {
+          // 拖动结果同步回按钮状态；初次挂载沿用 Sidebar 的状态。
+          const nextOpen = size.inPixels > 0;
+          if (!isMobile) {
+            if (nextOpen) expandedWidth.current = size.inPixels;
+            if (previousSize && nextOpen !== open) setOpen(nextOpen);
+          }
+        }}
+      >
+        <div className="h-full" inert={!open && !isMobile}>
+          <LeftPanel {...navigation} />
+        </div>
+      </ResizablePanel>
+      {!isMobile && <ResizableHandle aria-label="调整会话列表宽度" />}
+      <ResizablePanel
+        minSize={isMobile ? "0px" : "320px"}
+        className="flex min-w-0"
+      >
+        {children}
+      </ResizablePanel>
+    </ResizablePanelGroup>
   );
 }
 
 export default function RootLayout({
   children,
-  showChatHeader = false,
+  pathname,
+  onNavigate,
   ...navigation
-}: LeftPanelProps & { children: ReactNode; showChatHeader?: boolean }) {
+}: LeftPanelProps & {
+  children: ReactNode;
+  pathname: string;
+  onNavigate: (to: NavigationTarget) => void;
+}) {
+  const isChat = pathname === "/" || pathname.startsWith("/sessions/");
+  const content = (
+    // 右侧的内容
+    <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-auto bg-chat-background">
+      {/* 顶部header；收起后和窄屏下保留展开入口。 */}
+      {isChat && <ChatHeader onNavigateHome={navigation.onNewSession} />}
+      {/* 中间对话框 */}
+      {children}
+    </main>
+  );
+
   return (
-    <SidebarProvider
-      style={
-        {
-          "--sidebar-width": "300px",
-          "--sidebar-width-icon": "300px",
-        } as CSSProperties
-      }
-    >
-      {/* 左侧的面板 */}
-      <LeftPanel {...navigation} />
-      {/* 右侧的内容 */}
-      <Content
-        showChatHeader={showChatHeader}
-        onNavigateHome={navigation.onNewSession}
-      >
-        {children}
-      </Content>
+    <SidebarProvider className="h-svh">
+      {/* 一级功能栏常驻，二级列表按当前模块显示。 */}
+      <NavigationRail pathname={pathname} onNavigate={onNavigate} />
+      {isChat ? <ChatLayout {...navigation}>{content}</ChatLayout> : content}
     </SidebarProvider>
   );
 }
