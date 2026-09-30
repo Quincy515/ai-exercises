@@ -4,3 +4,4 @@ pub mod status;
 
 pub mod app_config;
 pub mod files;
+pub mod sessions;

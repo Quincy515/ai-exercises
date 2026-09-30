@@ -4,7 +4,7 @@ use loco_rs::app::AppContext;
 use tracing::info;
 
 use crate::{
-    application::services::{AppConfigService, FileService, StatusService},
+    application::services::{AppConfigService, FileService, SessionService, StatusService},
     domain::{external::HealthChecker, repositories::FileRepository},
     infrastructure::{
         external::{LocoFileStorage, PostgresHealthChecker, RedisHealthChecker},
@@ -12,7 +12,12 @@ use crate::{
     },
 };
 
-use super::repository_dependencies::get_db_file_repository;
+use super::repository_dependencies::{get_db_file_repository, get_db_session_repository};
+
+/// 获取会话服务，复用应用上下文的数据库连接池。
+pub fn get_session_service(ctx: &AppContext) -> SessionService {
+    SessionService::new(Arc::new(get_db_session_repository(ctx)))
+}
 
 /// 获取文件存储桶，复用 Loco 的存储驱动和数据库连接池。
 pub fn get_file_storage(ctx: &AppContext) -> LocoFileStorage {

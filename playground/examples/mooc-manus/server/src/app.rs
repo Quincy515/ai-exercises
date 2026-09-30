@@ -60,6 +60,7 @@ impl Hooks for App {
             .add_route(controllers::app_config::routes())
             .add_route(controllers::status::routes())
             .add_route(controllers::files::routes())
+            .add_route(controllers::sessions::routes())
             .add_route(controllers::auth::routes())
     }
     async fn connect_workers(ctx: &AppContext, queue: &Queue) -> Result<()> {
