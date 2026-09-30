@@ -7,7 +7,9 @@
 本课使用静态附件和问题，上传、移除、发送与推荐问题点击保留为业务入口占位。
 会话详情在 `packages/src/chat.tsx`，组合 `SessionHeader`、可折叠的 `PlanPanel` 和共用输入区。
 详情页当前显示静态标题、7 条模拟消息和演示计划，计划展开/收起由 React 状态控制。
-`components/chat-message.tsx` 按类型展示用户、AI、工具、步骤和附件消息占位，`role` 保留附件来源。
+`components/chat-message.tsx` 展示用户消息气泡、AI 图标与正文，时间在悬停对应消息时显示。
+正文与时间仍使用课程示例，工具、步骤和附件保留占位；`role` 保留附件来源。
+`components/manus-icon.tsx` 保存课程提供的 Manus SVG 标识。
 主题、字体和 Tailwind 样式在 `packages/src/index.css`。
 
 当前采用 Web SPA + Electron CSR，业务界面和 Rust WASM 都在客户端运行。
