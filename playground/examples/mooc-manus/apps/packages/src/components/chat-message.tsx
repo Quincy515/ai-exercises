@@ -1,6 +1,7 @@
 import { Languages } from "lucide-react";
 import { cn } from "../lib/utils";
 import { ManusIcon } from "./manus-icon";
+import { ToolUse } from "./tool-use";
 
 interface ChatMessageProps {
   className?: string;
@@ -52,7 +53,7 @@ export function ChatMessage({ className, message }: ChatMessageProps) {
       </div>
     );
   } else if (message.type === "tool") {
-    return <div className={className}>工具消息</div>;
+    return <ToolUse />;
   } else if (message.type === "step") {
     return <div className={className}>步骤/子任务消息</div>;
   } else if (message.type === "attachments") {
