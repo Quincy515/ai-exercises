@@ -5,7 +5,8 @@
 输入区和推荐问题分别在 `packages/src/components/chat-input.tsx`、
 `packages/src/components/suggested-questions.tsx`。
 本课使用静态附件和问题，上传、移除、发送与推荐问题点击保留为业务入口占位。
-会话详情当前沿用 `packages/src/chat.tsx` 的 Crux 计数器验证页；
+会话详情在 `packages/src/chat.tsx`，组合 `SessionHeader`、可折叠的 `PlanPanel` 和共用输入区。
+详情页当前显示静态标题、对话占位和演示计划，计划展开/收起由 React 状态控制。
 主题、字体和 Tailwind 样式在 `packages/src/index.css`。
 
 当前采用 Web SPA + Electron CSR，业务界面和 Rust WASM 都在客户端运行。
@@ -220,8 +221,8 @@ BoltFFI 0.31.0 自动收集浏览器与 Node 入口、map 和 WASM 辅助模块�
   保留 Forge 对应的 Vite 6，Web 使用 Vite 8。
 - 依赖安装配置和锁文件统一维护在本目录。
 
-当前 Chat 展示最小计数器，两端都通过 `useCrux` 调用同一套 Rust 业务逻辑。
-计数、乐观更新和网络响应处理位于 `shared/src/app.rs`，页面发送事件并显示 ViewModel。
+当前首页与会话详情属于课程基础 UI，后续业务通过 `useCrux` 接入同一套 Rust 逻辑。
+`shared/src/app.rs` 仍保留计数器业务示例，现有 WASM 和 Crux 测试继续验证桥接层。
 
 ## 在组件中使用 Crux
 
@@ -246,7 +247,7 @@ Hook 每次挂载创建独立 Core，卸载时取消请求、清除定时器并�
 `useCrux()` 从空展示状态开始，WASM 就绪后以 Rust 的 `view()` 为准。
 
 示例 API 使用 Rust 中配置的 `https://crux-counter.fly.dev`。
-HTTP/SSE 验证使用模拟响应；计数器界面提供加减、重置和同步。
+HTTP/SSE 验证使用模拟响应；上方示例展示组件如何发送 Rust 事件。
 SSE 可通过 `dispatch(events.StartWatch())` 发起，并在组件卸载时取消。
 KV 适配支持完整字节存储；当前业务通过 `LoadState` 读取状态，自动保存需要 Rust 发出 `Set`。
 

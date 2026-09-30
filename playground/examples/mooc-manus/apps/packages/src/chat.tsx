@@ -1,58 +1,29 @@
-import { useEffect } from "react";
-import { Button } from "./components/ui/button";
-import { useCrux } from "./lib/crux/use-crux.js";
+import { ChatInput } from "./components/chat-input";
+import { PlanPanel } from "./components/plan-panel";
+import { SessionHeader } from "./components/session-header";
 
 function Chat() {
-  const { view, events, dispatch, ready, error } = useCrux();
-
-  useEffect(() => {
-    if (ready) dispatch(events.LoadState());
-  }, [ready, dispatch, events]);
-
   return (
-    <section className="flex flex-1 flex-col items-center justify-center gap-6 px-6">
-      <div className="space-y-2 text-center">
-        <h1 className="text-2xl font-semibold">共享计数器</h1>
-        <p className="text-sm text-muted-foreground">
-          Web 与桌面端使用同一套 Rust 业务逻辑
-        </p>
+    <section
+      aria-label="会话任务详情"
+      className="relative flex min-h-full min-w-0 flex-1 flex-col px-4"
+    >
+      {/* 顶部标题&操作按钮 */}
+      <SessionHeader />
+      {/* 中间内容 */}
+      <div className="mx-auto flex w-full min-w-0 max-w-[768px] flex-1 flex-col">
+        {/* 对话列表 */}
+        <div className="pb-10">
+          <p>中间对话内容列表</p>
+        </div>
+        {/* 底部输入框&任务清单 */}
+        <div className="sticky bottom-0 mt-auto bg-chat-background">
+          {/* 规划列表 */}
+          <PlanPanel className="mb-2" />
+          {/* 输入框 */}
+          <ChatInput className="mb-4" />
+        </div>
       </div>
-      <output aria-live="polite" className="text-xl tabular-nums">
-        {ready ? view.text : "正在加载…"}
-      </output>
-      <div className="flex flex-wrap justify-center gap-3">
-        <Button disabled={!ready} onClick={() => dispatch(events.Decrement())}>
-          减一
-        </Button>
-        <Button
-          variant="outline"
-          disabled={!ready}
-          onClick={() => dispatch(events.Reset())}
-        >
-          重置
-        </Button>
-        <Button disabled={!ready} onClick={() => dispatch(events.Increment())}>
-          加一
-        </Button>
-        <Button
-          variant="outline"
-          disabled={!ready}
-          onClick={() => dispatch(events.Get())}
-        >
-          同步服务端
-        </Button>
-      </div>
-      <p className="text-sm text-muted-foreground">
-        {ready ? (view.confirmed ? "已同步" : "本地状态") : "初始化中"}
-      </p>
-      {error && (
-        <p
-          role="alert"
-          className="max-w-lg text-center text-sm text-destructive"
-        >
-          {error.message}
-        </p>
-      )}
     </section>
   );
 }

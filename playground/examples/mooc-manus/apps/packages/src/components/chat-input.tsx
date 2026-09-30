@@ -51,7 +51,7 @@ export function ChatInput({ className }: ChatInputProps) {
   return (
     <div
       className={cn(
-        "flex w-full min-w-0 flex-col rounded-2xl bg-background py-3",
+        "flex w-full min-w-0 flex-col rounded-2xl border bg-background py-3",
         className,
       )}
     >

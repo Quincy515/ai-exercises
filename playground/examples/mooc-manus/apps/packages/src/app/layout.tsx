@@ -33,7 +33,7 @@ function ChatLayout({
   }, [open, isMobile, panelRef]);
 
   return (
-    // 保持内容组件树稳定，切换窄屏时继续使用同一个 Crux Core。
+    // 保持内容组件树稳定，切换窄屏时保留页面状态。
     <ResizablePanelGroup
       orientation="horizontal"
       disabled={isMobile}
@@ -88,8 +88,10 @@ export default function RootLayout({
   const content = (
     // 右侧的内容
     <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-auto bg-chat-background">
-      {/* 顶部header；收起后和窄屏下保留展开入口。 */}
-      {isChat && <ChatHeader onNavigateHome={navigation.onNewSession} />}
+      {/* 首页顶部header；详情页使用自己的 SessionHeader，保留侧栏展开入口。 */}
+      {pathname === "/" && (
+        <ChatHeader onNavigateHome={navigation.onNewSession} />
+      )}
       {/* 中间对话框 */}
       {children}
     </main>
