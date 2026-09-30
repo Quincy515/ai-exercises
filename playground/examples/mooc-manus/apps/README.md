@@ -10,7 +10,9 @@
 `components/chat-message.tsx` 展示用户消息气泡、AI 图标与正文，时间在悬停对应消息时显示。
 步骤消息展示完成图标、单行描述、虚线与四条工具调用，展开/折叠按钮保留为交互入口。
 `components/tool-use.tsx` 展示工具调用提示、执行状态、文件名和悬停时间，由普通工具消息与步骤内部共用。
-正文、步骤、工具信息与时间仍使用课程示例，附件保留占位；`role` 保留附件来源。
+`components/attachments-message.tsx` 根据 `role` 展示右对齐的用户附件或左对齐的 AI 附件；AI 附件增加查看任务全部文件的入口。
+附件复用文件卡片，宽屏两列、窄屏单列；预览与全部文件按钮保留为交互占位。
+正文、步骤、工具信息、附件与时间仍使用课程示例。
 `components/manus-icon.tsx` 保存课程提供的 Manus SVG 标识。
 主题、字体和 Tailwind 样式在 `packages/src/index.css`。
 

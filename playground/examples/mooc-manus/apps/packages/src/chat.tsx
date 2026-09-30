@@ -18,7 +18,7 @@ function Chat() {
   return (
     <section
       aria-label="会话任务详情"
-      className="relative flex min-h-full min-w-0 flex-1 flex-col px-4"
+      className="relative flex min-h-full min-w-0 flex-none flex-col px-4"
     >
       {/* 顶部标题&操作按钮 */}
       <SessionHeader />
