@@ -1,4 +1,5 @@
 import Chat from "@apps/frontend/chat";
+import NewSession from "@apps/frontend/new-session";
 import AppLayout from "@apps/frontend/layout";
 import SectionPage from "@apps/frontend/section-page";
 import {
@@ -38,7 +39,7 @@ const rootRoute = createRootRoute({ component: AppShell });
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: Chat,
+  component: NewSession,
 });
 const sessionRoute = createRoute({
   getParentRoute: () => rootRoute,

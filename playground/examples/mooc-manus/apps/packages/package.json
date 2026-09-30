@@ -6,6 +6,7 @@
   "exports": {
     "./crux": "./src/lib/crux/index.ts",
     "./chat": "./src/chat.tsx",
+    "./new-session": "./src/new-session.tsx",
     "./layout": "./src/app/layout.tsx",
     "./section-page": "./src/section-page.tsx",
     "./styles.css": "./src/index.css"

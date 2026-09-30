@@ -9,7 +9,7 @@ import { defineConfig } from "vite";
 const config = defineConfig({
 	// Crux typegen emits CommonJS into a linked workspace package.
 	optimizeDeps: {
-		include: ["@apps/frontend > shared_types/app.js", "@apps/frontend > shared_types/bincode/index.js", "@apps/frontend > shared > @boltffi/runtime"],
+		include: ["@apps/frontend > shared_types/app.js", "@apps/frontend > shared_types/bincode/index.js", "@apps/frontend > shared > @boltffi/runtime", "@apps/frontend > @base-ui/react/scroll-area"],
 		exclude: ["shared"],
 	},
 	resolve: { tsconfigPaths: true, dedupe: ["react", "react-dom"] },

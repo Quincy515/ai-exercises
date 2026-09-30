@@ -1,7 +1,11 @@
 # 前端工作区
 
 `electron-app` 和 `tanstack-app` 通过 `workspace:*` 使用同一个
-`@apps/frontend` 源码包。共享页面在 `packages/src/chat.tsx`，
+`@apps/frontend` 源码包。新建会话首页在 `packages/src/new-session.tsx`，
+输入区和推荐问题分别在 `packages/src/components/chat-input.tsx`、
+`packages/src/components/suggested-questions.tsx`。
+本课使用静态附件和问题，上传、移除、发送与推荐问题点击保留为业务入口占位。
+会话详情当前沿用 `packages/src/chat.tsx` 的 Crux 计数器验证页；
 主题、字体和 Tailwind 样式在 `packages/src/index.css`。
 
 当前采用 Web SPA + Electron CSR，业务界面和 Rust WASM 都在客户端运行。
