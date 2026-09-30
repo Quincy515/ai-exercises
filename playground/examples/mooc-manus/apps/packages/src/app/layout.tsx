@@ -84,6 +84,11 @@ export default function RootLayout({
   pathname: string;
   onNavigate: (to: NavigationTarget) => void;
 }) {
+  // noVNC 是独立全屏查看页，两端统一跳过三栏布局。
+  if (/^\/sessions\/[^/]+\/novnc\/?$/.test(pathname)) {
+    return <>{children}</>;
+  }
+
   const isChat = pathname === "/" || pathname.startsWith("/sessions/");
   const content = (
     // 右侧的内容

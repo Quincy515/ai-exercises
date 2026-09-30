@@ -1,5 +1,6 @@
 import Chat from "@apps/frontend/chat";
 import NewSession from "@apps/frontend/new-session";
+import Novnc from "@apps/frontend/novnc";
 import AppLayout from "@apps/frontend/layout";
 import SectionPage from "@apps/frontend/section-page";
 import {
@@ -46,6 +47,11 @@ const sessionRoute = createRoute({
   path: "/sessions/$id",
   component: Chat,
 });
+const novncRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/sessions/$id/novnc",
+  component: Novnc,
+});
 const schedulesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/schedules",
@@ -62,6 +68,7 @@ const router = createRouter({
   routeTree: rootRoute.addChildren([
     indexRoute,
     sessionRoute,
+    novncRoute,
     schedulesRoute,
     libraryRoute,
   ]),

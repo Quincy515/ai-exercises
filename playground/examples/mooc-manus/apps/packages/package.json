@@ -7,6 +7,7 @@
     "./crux": "./src/lib/crux/index.ts",
     "./chat": "./src/chat.tsx",
     "./new-session": "./src/new-session.tsx",
+    "./novnc": "./src/novnc.tsx",
     "./layout": "./src/app/layout.tsx",
     "./section-page": "./src/section-page.tsx",
     "./styles.css": "./src/index.css"
@@ -22,6 +23,7 @@
   "dependencies": {
     "@base-ui/react": "^1.8.0",
     "@fontsource-variable/geist": "^5.3.0",
+    "@novnc/novnc": "1.5.0",
     "class-variance-authority": "^0.7.1",
     "cn": "^0.3.0",
     "lucide-react": "^1.46.0",
@@ -37,6 +39,7 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^22.20.2",
+    "@types/novnc__novnc": "1.6.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.0.4",

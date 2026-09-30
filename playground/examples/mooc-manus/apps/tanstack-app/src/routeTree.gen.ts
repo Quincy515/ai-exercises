@@ -15,6 +15,7 @@ import { Route as LibraryRouteImport } from './routes/library'
 import { Route as SchedulesRouteImport } from './routes/schedules'
 import { Route as DemoTanstackQueryRouteImport } from './routes/demo/tanstack-query'
 import { Route as SessionsIdRouteImport } from './routes/sessions/$id'
+import { Route as SessionsIdNovncRouteImport } from './routes/sessions/$id_.novnc'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -46,6 +47,11 @@ const SessionsIdRoute = SessionsIdRouteImport.update({
   path: '/sessions/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SessionsIdNovncRoute = SessionsIdNovncRouteImport.update({
+  id: '/sessions/$id_/novnc',
+  path: '/sessions/$id/novnc',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -54,6 +60,7 @@ export interface FileRoutesByFullPath {
   '/schedules': typeof SchedulesRoute
   '/demo/tanstack-query': typeof DemoTanstackQueryRoute
   '/sessions/$id': typeof SessionsIdRoute
+  '/sessions/$id/novnc': typeof SessionsIdNovncRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -62,6 +69,7 @@ export interface FileRoutesByTo {
   '/schedules': typeof SchedulesRoute
   '/demo/tanstack-query': typeof DemoTanstackQueryRoute
   '/sessions/$id': typeof SessionsIdRoute
+  '/sessions/$id/novnc': typeof SessionsIdNovncRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -71,6 +79,7 @@ export interface FileRoutesById {
   '/schedules': typeof SchedulesRoute
   '/demo/tanstack-query': typeof DemoTanstackQueryRoute
   '/sessions/$id': typeof SessionsIdRoute
+  '/sessions/$id_/novnc': typeof SessionsIdNovncRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -81,6 +90,7 @@ export interface FileRouteTypes {
     | '/schedules'
     | '/demo/tanstack-query'
     | '/sessions/$id'
+    | '/sessions/$id/novnc'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -89,6 +99,7 @@ export interface FileRouteTypes {
     | '/schedules'
     | '/demo/tanstack-query'
     | '/sessions/$id'
+    | '/sessions/$id/novnc'
   id:
     | '__root__'
     | '/'
@@ -97,6 +108,7 @@ export interface FileRouteTypes {
     | '/schedules'
     | '/demo/tanstack-query'
     | '/sessions/$id'
+    | '/sessions/$id_/novnc'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -106,6 +118,7 @@ export interface RootRouteChildren {
   SchedulesRoute: typeof SchedulesRoute
   DemoTanstackQueryRoute: typeof DemoTanstackQueryRoute
   SessionsIdRoute: typeof SessionsIdRoute
+  SessionsIdNovncRoute: typeof SessionsIdNovncRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -152,6 +165,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SessionsIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/sessions/$id_/novnc': {
+      id: '/sessions/$id_/novnc'
+      path: '/sessions/$id/novnc'
+      fullPath: '/sessions/$id/novnc'
+      preLoaderRoute: typeof SessionsIdNovncRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -162,6 +182,7 @@ const rootRouteChildren: RootRouteChildren = {
   SchedulesRoute: SchedulesRoute,
   DemoTanstackQueryRoute: DemoTanstackQueryRoute,
   SessionsIdRoute: SessionsIdRoute,
+  SessionsIdNovncRoute: SessionsIdNovncRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

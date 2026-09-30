@@ -30,6 +30,41 @@ Web 使用 TanStack Start 官方 SPA 模式，构建时生成静态页面壳；
 `/schedules` 与 `/library` 已接通两端路由，当前显示占位页；设置弹窗复用在一级栏底部，
 账号位置暂作展示。窄屏继续使用聊天列表抽屉，业务核心沿用现有 Crux 接入。
 
+## noVNC 入门查看页
+
+`packages/src/components/vnc-viewer.tsx` 封装课程中的 RFB 连接，
+`packages/src/novnc.tsx` 提供两端共用的全屏页面。
+本课固定连接 `ws://127.0.0.1:5901`，`viewOnly={false}` 可操作桌面；
+URL 中的会话 ID 暂时用于路由，后续再与沙箱 API 关联。
+
+依赖集中在共享包，固定为 `@novnc/novnc` 1.5.0 和
+`@types/novnc__novnc` 1.6.0。RFB 在浏览器挂载后加载；
+`lib/novnc.ts` 统一不同打包器对 CommonJS 默认导出的包装。
+离开页面或修改连接参数时会断开旧连接。
+
+在 `apps` 目录中，先启动 Docker Desktop，再准备沙箱：
+
+```sh
+# 首次准备镜像；已有 sandbox-dev 镜像时可跳过
+docker build -t sandbox-dev ../sandbox
+docker run --rm -d --name sandbox-dev --shm-size=512m \
+  -p 127.0.0.1:8080:3000 \
+  -p 127.0.0.1:5900:5900 \
+  -p 127.0.0.1:5901:5901 \
+  -p 127.0.0.1:9222:9222 sandbox-dev
+```
+
+本项目沙箱 API 的容器端口是 3000；noVNC 使用 5901 的 WebSocket，
+由容器内 websockify 转接到 5900 的 VNC 服务。
+
+- Web：运行 `pnpm dev:web`，访问 `http://localhost:3000/sessions/1/novnc`。
+- Electron：运行 `pnpm dev:desktop`，在开发者工具 Console 执行
+  `window.location.hash = '/sessions/1/novnc'`；返回会话页可改为 `/sessions/1`。
+- 查看页跳过三栏布局，画面按窗口缩放；控制台输出 `Connected` / `Disconnected`。
+- 完成后可执行 `docker stop sandbox-dev`，`--rm` 会移除该容器。
+
+参考：[noVNC 1.5.0 API](https://github.com/novnc/noVNC/blob/v1.5.0/docs/API.md)。
+
 ## 开发、热更新与发布
 
 以下命令均在 `mooc-manus/apps` 目录执行。从 `mooc-manus` 根目录进入：
