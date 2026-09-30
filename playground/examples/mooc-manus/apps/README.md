@@ -8,8 +8,9 @@
 会话详情在 `packages/src/chat.tsx`，组合 `SessionHeader`、可折叠的 `PlanPanel` 和共用输入区。
 详情页当前显示静态标题、7 条模拟消息和演示计划，计划展开/收起由 React 状态控制。
 `components/chat-message.tsx` 展示用户消息气泡、AI 图标与正文，时间在悬停对应消息时显示。
-`components/tool-use.tsx` 展示工具调用提示、执行状态、文件名和悬停时间，供消息列表与后续步骤组件复用。
-正文、工具信息与时间仍使用课程示例，步骤和附件保留占位；`role` 保留附件来源。
+步骤消息展示完成图标、单行描述、虚线与四条工具调用，展开/折叠按钮保留为交互入口。
+`components/tool-use.tsx` 展示工具调用提示、执行状态、文件名和悬停时间，由普通工具消息与步骤内部共用。
+正文、步骤、工具信息与时间仍使用课程示例，附件保留占位；`role` 保留附件来源。
 `components/manus-icon.tsx` 保存课程提供的 Manus SVG 标识。
 主题、字体和 Tailwind 样式在 `packages/src/index.css`。
 
