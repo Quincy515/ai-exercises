@@ -149,7 +149,7 @@ pub trait SandboxFactory: Send + Sync {
     /// Create a sandbox instance.
     async fn create(&self) -> Result<Box<dyn Sandbox>>;
 
-    /// 类方法，根据传递的 id 获取沙箱实例
-    /// Get a sandbox instance by id.
-    async fn get(&self, id: &str) -> Result<Box<dyn Sandbox>>;
+    /// 根据传递的 id 获取沙箱实例；沙箱已释放时返回 None。
+    /// Get a sandbox instance by id, or None if it has been released.
+    async fn get(&self, id: &str) -> Result<Option<Box<dyn Sandbox>>>;
 }

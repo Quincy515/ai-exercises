@@ -8,6 +8,14 @@ use super::message_queue::SharedMessageQueue;
 pub type SharedTask = Arc<dyn Task>;
 pub type SharedTaskRunner = Arc<dyn TaskRunner>;
 
+/// 任务工厂：查询已有任务，或为运行器创建一个尚未执行的任务。
+#[async_trait]
+pub trait TaskFactory: Send + Sync {
+    fn get(&self, task_id: &str) -> Result<Option<SharedTask>>;
+
+    async fn create(&self, runner: SharedTaskRunner) -> Result<SharedTask>;
+}
+
 /// 任务运行器，负责任务执行、任务销毁和完成回调。
 /// Task runner responsible for execution, teardown, and completion callbacks.
 #[async_trait]

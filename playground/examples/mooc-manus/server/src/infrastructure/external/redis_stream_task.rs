@@ -11,11 +11,35 @@ use crate::domain::external::SharedMessageQueue;
 use crate::domain::external::SharedTask;
 use crate::domain::external::SharedTaskRunner;
 use crate::domain::external::Task;
+use crate::domain::external::TaskFactory;
 use crate::infrastructure::external::RedisStreamMessageQueue;
 
 /// 定义一个全局变量用于存储所有已注册的任务。
 /// Define a global variable for storing all registered tasks.
 static TASK_REGISTRY: OnceLock<Mutex<HashMap<String, RedisStreamTask>>> = OnceLock::new();
+
+/// Redis Stream 任务工厂，创建新任务时才建立队列连接。
+pub struct RedisStreamTaskFactory {
+    redis: redis::Client,
+}
+
+impl RedisStreamTaskFactory {
+    pub fn new(redis: redis::Client) -> Self {
+        Self { redis }
+    }
+}
+
+#[async_trait]
+impl TaskFactory for RedisStreamTaskFactory {
+    fn get(&self, task_id: &str) -> Result<Option<SharedTask>> {
+        <RedisStreamTask as Task>::get(task_id)
+    }
+
+    async fn create(&self, runner: SharedTaskRunner) -> Result<SharedTask> {
+        let connection = self.redis.get_multiplexed_async_connection().await?;
+        Ok(Arc::new(RedisStreamTask::new(runner, connection)?))
+    }
+}
 
 /// 执行任务可取消；监督任务负责等待执行结束并完成异步收尾。
 struct RunningTask {
@@ -300,3 +324,19 @@ impl Task for RedisStreamTask {
 #[cfg(test)]
 #[path = "redis_stream_task_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod factory_tests {
+    use super::{RedisStreamTaskFactory, TaskFactory};
+
+    #[test]
+    fn looks_up_tasks_without_connecting_to_redis() {
+        let client = redis::Client::open(("127.0.0.1", 0)).unwrap();
+        let factory = RedisStreamTaskFactory::new(client);
+
+        assert!(factory
+            .get(&uuid::Uuid::new_v4().to_string())
+            .unwrap()
+            .is_none());
+    }
+}

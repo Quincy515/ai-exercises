@@ -32,6 +32,10 @@ struct TestApp {
 
 impl TestApp {
     async fn new() -> Result<Self> {
+        Self::with_agent_config(false).await
+    }
+
+    async fn with_agent_config(agent_configured: bool) -> Result<Self> {
         let database = file_database::TestDatabase::new().await?;
         // 复用已有临时实例，在它的私有数据库内执行实际会话表迁移。
         let manager = SchemaManager::new(&database.db);
@@ -49,9 +53,36 @@ impl TestApp {
             migration.up(&manager).await?;
         }
 
+        if agent_configured {
+            // 配置表为空时服务使用默认配置；仅连接本测试的私有数据库。
+            let migrations = Migrator::migrations()
+                .into_iter()
+                .filter(|migration| {
+                    matches!(
+                        migration.name(),
+                        "m20260526_131658_llm_configs"
+                            | "m20260526_134746_fix_llm_configs_table"
+                            | "m20260601_143631_agent_configs"
+                            | "m20260601_144016_fix_agent_configs_table"
+                            | "m20260605_185020_mcp_servers"
+                            | "m20260717_191151_a2a_servers"
+                            | "m20260718_113716_fix_a2a_servers_table"
+                    )
+                })
+                .collect::<Vec<_>>();
+            ensure!(migrations.len() == 7, "没有找到配置表的七条迁移");
+            for migration in migrations {
+                migration.up(&manager).await?;
+            }
+        }
+
         let config: Config = serde_json::from_value(json!({
             "logger": { "enable": false, "level": "info", "format": "compact" },
             "server": { "port": 0, "host": "http://localhost" },
+            // 查询已有任务和空消息不需要 Redis 网络连接，端口1也应正常完成。
+            "cache": if agent_configured {
+                json!({"kind": "Redis", "uri": "redis://127.0.0.1:1", "max_size": 1})
+            } else { json!({"kind": "Null"}) },
             "database": {
                 "uri": "unused", "enable_logging": false,
                 "min_connections": 1, "max_connections": 1,
@@ -279,12 +310,12 @@ async fn rejects_invalid_ids_and_keeps_database_failures_distinct_from_missing_s
 
 #[test]
 #[serial]
-fn registers_all_four_operations_and_their_response_schemas() -> Result<()> {
+fn registers_management_operations_and_their_response_schemas() -> Result<()> {
     server::openapi::clear_routes();
     server::controllers::sessions::routes();
     let document = serde_json::to_value(server::openapi::document())?;
     let paths = &document["paths"];
-    assert_eq!(paths.as_object().unwrap().len(), 3);
+    assert_eq!(paths.as_object().unwrap().len(), 4);
     for (path, method) in [
         ("/api/sessions", "post"),
         ("/api/sessions", "get"),
@@ -311,5 +342,88 @@ fn registers_all_four_operations_and_their_response_schemas() -> Result<()> {
     let item = &document["components"]["schemas"]["ListSessionItem"]["properties"];
     assert_eq!(item.as_object().unwrap().len(), 6);
     assert!(item.get("session_id").is_some());
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn chat_returns_the_sse_shell_without_starting_tasks() -> Result<()> {
+    let app = TestApp::with_agent_config(true).await?;
+    let repository = app.repository();
+    let session = Session::default();
+    repository.save(session.clone()).await?;
+    let before = repository.get_by_id(&session.id).await?.unwrap();
+    let url = format!("/api/sessions/{}/chat", session.id);
+
+    for body in [
+        json!({}),
+        json!({"message": "", "attachments": ["file-1"], "event_id": "123-0", "timestamp": 123}),
+    ] {
+        let response = app.server.post(&url).json(&body).await;
+        response.assert_status_ok();
+        assert_eq!(response.header("content-type"), "text/event-stream");
+        // 本课的 Event→SSE 转换仍为 TODO，成功时返回合法的空事件流。
+        assert!(response.text().is_empty());
+        assert_eq!(repository.get_by_id(&session.id).await?.unwrap(), before);
+    }
+
+    repository
+        .update_status(&session.id, SessionStatus::Running)
+        .await?;
+    let response = app
+        .server
+        .post(&url)
+        .json(&json!({"message": "已有任务运行中"}))
+        .await;
+    response.assert_status_ok();
+    assert!(response.text().is_empty());
+    let after = repository.get_by_id(&session.id).await?.unwrap();
+    assert_eq!(after.status, SessionStatus::Running);
+    assert!(after.task_id.is_none() && after.sandbox_id.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn chat_rejects_bad_requests_and_reports_initialization_failures() -> Result<()> {
+    let app = TestApp::new().await?;
+    app.server
+        .post("/api/sessions/invalid/chat")
+        .json(&json!({}))
+        .await
+        .assert_status_bad_request();
+    let url = format!("/api/sessions/{}/chat", uuid::Uuid::new_v4());
+    let invalid = app
+        .server
+        .post(&url)
+        .json(&json!({"attachments": "wrong-type"}))
+        .await;
+    assert_eq!(invalid.status_code(), 422);
+    // 本夹具使用 Null cache，缺少 Agent 所需 Redis 配置时走已有安全错误出口。
+    let response = app.server.post(&url).json(&json!({})).await;
+    response.assert_status_internal_server_error();
+    assert_eq!(response.json::<Value>()["error"], "internal_server_error");
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn documents_chat_json_request_and_event_stream_response() -> Result<()> {
+    server::openapi::clear_routes();
+    server::controllers::sessions::routes();
+    let document = serde_json::to_value(server::openapi::document())?;
+    let chat = &document["paths"]["/api/sessions/{session_id}/chat"]["post"];
+    assert_eq!(chat["tags"], json!(["会话模块"]));
+    assert!(chat["responses"]["200"]["content"]
+        .get("text/event-stream")
+        .is_some());
+    assert!(chat["requestBody"]["content"]
+        .get("application/json")
+        .is_some());
+    let schema = &document["components"]["schemas"]["ChatRequest"];
+    assert_eq!(schema["properties"].as_object().unwrap().len(), 4);
+    assert!(schema
+        .get("required")
+        .is_none_or(|required| required.as_array().unwrap().is_empty()));
     Ok(())
 }

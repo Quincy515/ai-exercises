@@ -1,12 +1,21 @@
-use axum::http::StatusCode;
+use std::convert::Infallible;
+
+use axum::{
+    http::StatusCode,
+    response::{
+        sse::{Event as SseEvent, Sse},
+        IntoResponse,
+    },
+};
+use futures::StreamExt;
 use loco_rs::prelude::*;
 
 use crate::{
     application::{error::AppError, services::session_service::SessionNotFound},
-    interfaces::service_dependencies::get_session_service,
+    interfaces::service_dependencies::{get_agent_service, get_session_service},
     openapi::{openapi, routes},
     views::sessions::{
-        CreateSessionResponse, EmptySessionData, ListSessionResponse, SessionResponse,
+        ChatRequest, CreateSessionResponse, EmptySessionData, ListSessionResponse, SessionResponse,
     },
 };
 
@@ -124,6 +133,49 @@ pub async fn delete_session(
     ))
 }
 
+/// 根据会话 id 和聊天请求数据，向指定会话发起聊天请求。
+#[utoipa::path(
+    post,
+    path = "/api/sessions/{session_id}/chat",
+    tag = "会话模块",
+    summary = "向指定任务会话发起聊天请求",
+    description = "准备会话任务并返回 SSE 响应骨架；任务启动及事件编码在后续课时实现。",
+    params(("session_id" = String, Path, description = "会话业务 UUID")),
+    request_body = ChatRequest,
+    responses(
+        (status = 200, description = "聊天事件流（本课尚未输出 SSE 事件）", body = String, content_type = "text/event-stream"),
+        (status = 400, description = "会话 UUID 或请求 JSON 无效"),
+        (status = 422, description = "聊天请求字段类型无效"),
+        (status = 500, description = "Agent 服务初始化失败")
+    )
+)]
+#[debug_handler]
+pub async fn chat(
+    State(ctx): State<AppContext>,
+    Path(session_id): Path<String>,
+    Json(request): Json<ChatRequest>,
+) -> Result<Response> {
+    validate_session_id(&session_id)?;
+    let service = get_agent_service(&ctx)
+        .await
+        .map_err(|error| AppError::internal("session.agent_init_failed", format!("{error:#}")))?;
+
+    // 1.调用 Agent 服务发起聊天，将请求 event_id 传给 latest_event_id 参数。
+    let events = service.chat(
+        session_id,
+        request.message,
+        request.attachments,
+        request.event_id,
+        request.timestamp,
+    );
+    // 定义事件生成器，配合 Sse 生成流式响应数据。
+    let stream = events.filter_map(|_event| async {
+        // TODO: 等待实现，需要将领域 event 转换成 SSE 响应数据。
+        None::<std::result::Result<SseEvent, Infallible>>
+    });
+    Ok(Sse::new(stream).into_response())
+}
+
 fn validate_session_id(session_id: &str) -> std::result::Result<(), AppError> {
     uuid::Uuid::parse_str(session_id)
         .map(|_| ())
@@ -164,4 +216,5 @@ pub fn routes() -> Routes {
             "/{session_id}/delete",
             openapi(post(delete_session), routes!(delete_session)),
         )
+        .add("/{session_id}/chat", openapi(post(chat), routes!(chat)))
 }

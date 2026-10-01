@@ -25,7 +25,7 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        external::{Browser, Sandbox},
+        external::{Browser, Sandbox, SandboxFactory},
         models::ToolResult,
     },
     infrastructure::{external::browser::ChromiumoxideBrowser, settings::SandboxSettings},
@@ -55,6 +55,32 @@ pub struct DockerSandbox {
     base_url: String,
     vnc_url: String,
     cdp_url: String,
+}
+
+/// 使用应用配置创建或恢复 Docker 沙箱。
+pub struct DockerSandboxFactory {
+    settings: SandboxSettings,
+}
+
+impl DockerSandboxFactory {
+    pub fn new(settings: SandboxSettings) -> Self {
+        Self { settings }
+    }
+}
+
+#[async_trait]
+impl SandboxFactory for DockerSandboxFactory {
+    async fn create(&self) -> Result<Box<dyn Sandbox>> {
+        Ok(Box::new(DockerSandbox::create(&self.settings).await?))
+    }
+
+    async fn get(&self, id: &str) -> Result<Option<Box<dyn Sandbox>>> {
+        match DockerSandbox::get(&self.settings, id).await {
+            Ok(sandbox) => Ok(Some(Box::new(sandbox))),
+            Err(error) if is_missing_container(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 impl DockerSandbox {
@@ -1020,6 +1046,13 @@ fn is_container_not_found(error: &BollardError) -> bool {
     )
 }
 
+/// 保留 Docker 错误类型穿过 anyhow 上下文，只将容器 404 识别为已释放。
+fn is_missing_container(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<BollardError>()
+        .is_some_and(is_container_not_found)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1046,7 +1079,7 @@ mod tests {
     use tokio::{net::TcpListener, task::JoinHandle};
 
     use super::{
-        build_container_config, build_container_name, is_container_not_found,
+        build_container_config, build_container_name, is_container_not_found, is_missing_container,
         validate_managed_container_id, BollardError, DockerSandbox, HostnameCache,
         HOSTNAME_CACHE_CAPACITY,
     };
@@ -1256,6 +1289,25 @@ mod tests {
         };
 
         assert!(is_container_not_found(&error));
+    }
+
+    #[test]
+    fn sandbox_lookup_only_treats_docker_404_as_missing() {
+        for status_code in [403, 404, 500] {
+            let error = anyhow::Error::new(BollardError::DockerResponseServerError {
+                status_code,
+                message: "Docker response".to_owned(),
+            })
+            .context("获取 Docker 沙箱容器失败");
+            assert_eq!(is_missing_container(&error), status_code == 404);
+        }
+
+        let network_error = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "Docker connection refused",
+        ));
+        assert!(!is_missing_container(&network_error));
+        assert!(!is_missing_container(&anyhow::anyhow!("沙箱配置缺失")));
     }
 
     #[test]

@@ -1,8 +1,21 @@
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::domain::models::{Session, SessionStatus};
+
+/// 聊天请求结构，四个字段均可省略或传入 null。
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct ChatRequest {
+    /// 人类消息。
+    pub message: Option<String>,
+    /// 附件列表。
+    pub attachments: Option<Vec<String>>,
+    /// 最新事件 id。
+    pub event_id: Option<String>,
+    /// 当前时间戳，本课暂不处理其单位或转换。
+    pub timestamp: Option<i64>,
+}
 
 /// 创建会话响应结构。
 #[derive(Debug, Serialize, ToSchema)]
@@ -71,8 +84,41 @@ impl<T> SessionResponse<T> {
 mod tests {
     use serde_json::json;
 
-    use super::{EmptySessionData, ListSessionItem, SessionResponse};
+    use super::{ChatRequest, EmptySessionData, ListSessionItem, SessionResponse};
     use crate::domain::models::{Session, SessionStatus};
+
+    #[test]
+    fn chat_request_accepts_optional_fields_and_preserves_values() {
+        for value in [
+            json!({}),
+            json!({"message": null, "attachments": null, "event_id": null, "timestamp": null}),
+        ] {
+            let request: ChatRequest = serde_json::from_value(value).unwrap();
+            assert!(request.message.is_none() && request.attachments.is_none());
+            assert!(request.event_id.is_none() && request.timestamp.is_none());
+        }
+        let request: ChatRequest = serde_json::from_value(json!({
+            "message": " ", "attachments": ["file-1", "file-2"],
+            "event_id": "1790784000000-1", "timestamp": 1790784000000_i64
+        }))
+        .unwrap();
+        assert_eq!(request.message.as_deref(), Some(" "));
+        assert_eq!(request.attachments.unwrap(), vec!["file-1", "file-2"]);
+        assert_eq!(request.event_id.as_deref(), Some("1790784000000-1"));
+        assert_eq!(request.timestamp, Some(1790784000000));
+    }
+
+    #[test]
+    fn chat_request_rejects_wrong_field_types() {
+        for value in [
+            json!({"message": 1}),
+            json!({"attachments": "file-1"}),
+            json!({"event_id": []}),
+            json!({"timestamp": 1.5}),
+        ] {
+            assert!(serde_json::from_value::<ChatRequest>(value).is_err());
+        }
+    }
 
     #[test]
     fn list_item_exposes_only_basic_fields_and_keeps_null_time() {
