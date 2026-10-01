@@ -30,10 +30,15 @@ use server::{
     app::App,
     domain::{
         external::{SharedTask, Task, TaskRunner},
-        models::{DoneEvent, Event, MessageEvent, MessageRole, Session, SessionStatus},
+        models::{
+            DoneEvent, Event, ExecutionStatus, MessageEvent, MessageRole, Plan, PlanEvent, Session,
+            SessionStatus, ShellToolContent, Step, StepEvent, TitleEvent, ToolContent, ToolEvent,
+            ToolEventStatus, ToolResult,
+        },
         repositories::SessionRepository,
     },
     infrastructure::{external::RedisStreamTask, repositories::SeaOrmSessionRepository},
+    views::events::AgentSseEvent,
 };
 use tokio::time::timeout;
 
@@ -245,8 +250,11 @@ async fn chat_stream_runs_a_real_registered_task_and_persists_queue_ids() -> Res
     let stored = repository.get_by_id(&session.id).await?.unwrap();
     assert_eq!(stored.events.len(), 3);
     for ((_, payload), stored_event) in events.iter().zip(&stored.events[1..]) {
-        assert_eq!(payload, &serde_json::to_value(stored_event)?);
-        let queue_id = payload["id"].as_str().unwrap();
+        let response = serde_json::to_value(AgentSseEvent::from(stored_event.clone()))?;
+        assert_eq!(payload, &response["data"]);
+        assert!(payload.get("type").is_none() && payload.get("id").is_none());
+        assert!(payload["created_at"].is_i64());
+        let queue_id = payload["event_id"].as_str().unwrap();
         let (milliseconds, sequence) = queue_id.split_once('-').unwrap();
         milliseconds.parse::<u64>()?;
         sequence.parse::<u64>()?;
@@ -281,7 +289,45 @@ async fn chat_stream_drains_queued_events_even_when_task_is_already_done() -> Re
     session.task_id = Some(task.0.id().to_owned());
     repository.save(session.clone()).await?;
     let mut expected = Vec::new();
+    let step = Step {
+        id: "step-1".to_owned(),
+        description: "执行命令".to_owned(),
+        status: ExecutionStatus::Completed,
+        ..Step::default()
+    };
     for mut event in [
+        Event::Title(TitleEvent {
+            title: "统一响应".into(),
+            ..TitleEvent::default()
+        }),
+        Event::Plan(PlanEvent {
+            plan: Plan {
+                steps: vec![step.clone()],
+                ..Plan::default()
+            },
+            ..PlanEvent::default()
+        }),
+        Event::Step(StepEvent {
+            step,
+            ..StepEvent::default()
+        }),
+        Event::Tool(ToolEvent {
+            tool_name: "shell".into(),
+            function_name: "shell_exec".into(),
+            function_args: json!({"session_id": "shell-1"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            tool_content: Some(ToolContent::Shell(ShellToolContent {
+                console: json!([{"command": "pwd", "output": "/workspace"}]),
+            })),
+            function_result: Some(ToolResult {
+                data: Some(json!({"internal": "保留在领域历史"})),
+                ..ToolResult::default()
+            }),
+            status: ToolEventStatus::Called,
+            ..ToolEvent::default()
+        }),
         Event::Message(MessageEvent {
             message: "历史输出".into(),
             ..MessageEvent::default()
@@ -295,7 +341,7 @@ async fn chat_stream_drains_queued_events_even_when_task_is_already_done() -> Re
             .await?;
         event.set_id(id);
         repository.add_event(&session.id, event.clone()).await?;
-        expected.push(serde_json::to_value(event)?);
+        expected.push(serde_json::to_value(AgentSseEvent::from(event))?["data"].clone());
     }
     assert!(task.0.done());
 
@@ -313,8 +359,20 @@ async fn chat_stream_drains_queued_events_even_when_task_is_already_done() -> Re
             .iter()
             .map(|(kind, _)| kind.as_str())
             .collect::<Vec<_>>(),
-        ["message", "done"]
+        ["title", "plan", "step", "tool", "message", "done"]
     );
+    // HTTP 的 data 直接承载展示数据；步骤业务 ID 和队列事件 ID 各自保留。
+    assert_eq!(events[2].1["id"], "step-1");
+    assert!(events[2].1["event_id"].as_str().unwrap().contains('-'));
+    assert_eq!(events[2].1["status"], "completed");
+    assert_eq!(events[3].1["name"], "shell");
+    assert_eq!(events[3].1["function"], "shell_exec");
+    assert_eq!(events[3].1["args"], json!({"session_id": "shell-1"}));
+    assert_eq!(
+        events[3].1["content"],
+        json!({"console": [{"command": "pwd", "output": "/workspace"}]})
+    );
+    assert!(events[3].1.get("function_result").is_none());
     assert_eq!(
         events
             .into_iter()

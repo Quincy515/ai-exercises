@@ -95,14 +95,24 @@ curl -N -X POST "http://localhost:5150/api/sessions/$session_id/chat" \
 `attachments` 是文件 ID 数组，省略或传入 `null` 都按空列表处理。
 不传 `message` 时订阅已有任务；`event_id` 表示已收到的最后一个队列事件 ID。
 
-响应为 SSE：`event` 是领域事件类型，`data` 是包含 `id` 的 JSON。
+响应为 SSE：`event` 是响应事件名称，`data` 是统一的展示载荷，公共字段为
+`event_id` 与整数 Unix 秒 `created_at`。步骤另有业务 `id`，工具 `content`
+使用截图、搜索条目、控制台记录或文件正文等展示内容。
+响应转换集中在 `src/views/events.rs`，数据库和 Redis 保留完整领域事件格式。
 收到 `done`、`error` 或 `wait` 后结束本轮订阅；关闭连接后后台任务继续执行。
 当前运行器沿用批量 Flow：模型和工具产生一轮结果后，再逐条推送事件。
-跨接口的统一事件展示结构仍留待后续课时完善。
+步骤开始、工具调用中等事件会延后到本轮返回后可见，工具快照与新输入检查
+也受这个时序影响。逐事件传播需要后续贯通 Agent、Flow 和 Runner。
+
+运行中的会话收到非空消息时，已有 Task 会被复用；Task 实例丢失时会重建，
+保留会话历史并复用或按需创建沙箱。当前回归覆盖单请求编排，
+同会话并发创建与跨资源部分成功的恢复需要单独验证。
 
 ```sh
 # 隔离测试：各自创建临时 PostgreSQL / Redis，不调用真实模型或 Docker
-cargo test --locked --test agent_service --test chat_stream_api --test session_api
+cargo test --locked --lib \
+  --test agent_service --test chat_stream_api --test session_api \
+  --test event_response --test file_api --test file_storage
 ```
 
 测试需要本机 `initdb`、`pg_ctl` 和 `redis-server`。

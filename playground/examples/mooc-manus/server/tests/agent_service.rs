@@ -30,8 +30,9 @@ use server::{
             TaskFactory, Tool, ToolChoice,
         },
         models::{
-            A2aConfig, AgentConfig, DoneEvent, ErrorEvent, Event, McpConfig, MessageEvent,
-            MessageRole, SearchResults, Session, SessionStatus, ToolResult, WaitEvent,
+            A2aConfig, AgentConfig, DoneEvent, ErrorEvent, Event, File, McpConfig, Memory,
+            MessageEvent, MessageRole, SearchResults, Session, SessionStatus, ToolResult,
+            WaitEvent,
         },
         repositories::SessionRepository,
     },
@@ -410,27 +411,47 @@ async fn queue_event(queue: &RecordingQueue, mut event: Event) -> Result<Event> 
 #[tokio::test]
 async fn missing_or_empty_messages_only_look_up_the_existing_task() -> Result<()> {
     let fixture = Fixture::new().await?;
-    fixture.tasks.0.lock().unwrap().found = true;
-    let session = Session {
-        task_id: Some("existing-task".to_owned()),
-        ..Session::default()
-    };
-    fixture.repository.save(session.clone()).await?;
-    let before = fixture.repository.get_by_id(&session.id).await?.unwrap();
-    for message in [None, Some("")] {
-        assert!(fixture.chat(&session, message).await.is_empty());
-        let saved = fixture.repository.get_by_id(&session.id).await?.unwrap();
-        let mut expected = before.clone();
-        expected.unread_message_count = 0;
-        expected.updated_at = saved.updated_at;
-        assert_eq!(saved, expected);
+    for (status, task_id, found) in [
+        (SessionStatus::Pending, Some("existing-task"), true),
+        (SessionStatus::Running, Some("running-task"), true),
+        (SessionStatus::Running, Some("missing-task"), false),
+        (SessionStatus::Running, None, false),
+        (SessionStatus::Running, Some(""), false),
+    ] {
+        fixture.tasks.0.lock().unwrap().found = found;
+        let session = Session {
+            task_id: task_id.map(str::to_owned),
+            unread_message_count: 3,
+            status,
+            ..Session::default()
+        };
+        fixture.repository.save(session.clone()).await?;
+        let before = fixture.repository.get_by_id(&session.id).await?.unwrap();
+        for message in [None, Some("")] {
+            // 仅订阅或空消息时，Running 会话缺失 Task 也只执行查询。
+            assert!(fixture.chat(&session, message).await.is_empty());
+            let saved = fixture.repository.get_by_id(&session.id).await?.unwrap();
+            let mut expected = before.clone();
+            expected.unread_message_count = 0;
+            expected.updated_at = saved.updated_at;
+            assert_eq!(saved, expected);
+        }
     }
-    let task = fixture.tasks.task("existing-task");
-    assert_eq!(task.invokes.load(Ordering::SeqCst), 0);
-    assert!(task.input.0.lock().unwrap().entries.is_empty());
+    for task_id in ["existing-task", "running-task"] {
+        let task = fixture.tasks.task(task_id);
+        assert_eq!(task.invokes.load(Ordering::SeqCst), 0);
+        assert!(task.input.0.lock().unwrap().entries.is_empty());
+    }
     assert_eq!(
         fixture.tasks.0.lock().unwrap().ids,
-        ["existing-task", "existing-task"]
+        [
+            "existing-task",
+            "existing-task",
+            "running-task",
+            "running-task",
+            "missing-task",
+            "missing-task"
+        ]
     );
     assert_eq!(fixture.tasks.0.lock().unwrap().creates, 0);
     let sandboxes = fixture.sandboxes.calls.lock().unwrap();
@@ -440,53 +461,107 @@ async fn missing_or_empty_messages_only_look_up_the_existing_task() -> Result<()
 }
 
 #[tokio::test]
-async fn running_sessions_reuse_tasks_and_report_missing_instances() -> Result<()> {
+async fn running_sessions_reuse_existing_tasks() -> Result<()> {
     let fixture = Fixture::new().await?;
-    for (task_id, found) in [
-        (Some("existing-task"), true),
-        (Some("missing-task"), false),
-        (None, false),
-        (Some(""), false),
-    ] {
-        fixture.tasks.0.lock().unwrap().found = found;
+    fixture.tasks.0.lock().unwrap().found = true;
+    let session = Session {
+        task_id: Some("existing-task".to_owned()),
+        status: SessionStatus::Running,
+        ..Session::default()
+    };
+    fixture.repository.save(session.clone()).await?;
+    assert!(fixture.chat(&session, Some("继续任务")).await.is_empty());
+    let saved = fixture.repository.get_by_id(&session.id).await?.unwrap();
+    assert_eq!(saved.task_id, session.task_id);
+    assert_eq!(saved.status, SessionStatus::Running);
+    assert_eq!(saved.latest_message, "继续任务");
+    assert!(matches!(saved.events.as_slice(), [Event::Message(event)]
+        if event.role == MessageRole::User && event.message == "继续任务"));
+    let task = fixture.tasks.task("existing-task");
+    assert_eq!(task.invokes.load(Ordering::SeqCst), 1);
+    assert_eq!(task.input.0.lock().unwrap().entries.len(), 1);
+    assert_eq!(*task.persisted_at_invoke.lock().unwrap(), saved.events);
+    assert_eq!(fixture.tasks.0.lock().unwrap().ids, ["existing-task"]);
+    assert_eq!(fixture.tasks.0.lock().unwrap().creates, 0);
+    let sandboxes = fixture.sandboxes.calls.lock().unwrap();
+    assert!(sandboxes.ids.is_empty());
+    assert_eq!(sandboxes.creates, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn running_sessions_rebuild_missing_tasks_and_preserve_existing_session_data() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    fixture.sandboxes.calls.lock().unwrap().found = true;
+    let sandbox_id = fixture.sandboxes.sandbox.id();
+    let timestamp = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+    for (index, task_id) in [Some("missing-task"), None, Some("")]
+        .into_iter()
+        .enumerate()
+    {
         let session = Session {
             task_id: task_id.map(str::to_owned),
+            sandbox_id: Some(sandbox_id.to_owned()),
+            title: "保留会话内容".to_owned(),
+            unread_message_count: 3,
+            latest_message: "上一轮消息".to_owned(),
+            events: vec![reply("保留历史事件")],
+            files: vec![File {
+                id: "existing-file".to_owned(),
+                filename: "历史附件.txt".to_owned(),
+                ..File::default()
+            }],
+            memories: HashMap::from([(
+                "agent".to_owned(),
+                Memory {
+                    messages: vec![serde_json::from_value(json!({
+                        "role": "user", "content": "保留历史记忆"
+                    }))?],
+                },
+            )]),
             status: SessionStatus::Running,
             ..Session::default()
         };
         fixture.repository.save(session.clone()).await?;
-        let events = fixture.chat(&session, Some("继续任务")).await;
+        let before = fixture.repository.get_by_id(&session.id).await?.unwrap();
+        // 进程重启后注册表中的 Task 可丢失；新消息重建任务并沿用已有沙箱。
+        let stream = fixture.service().chat(
+            session.id.clone(),
+            Some("继续任务".to_owned()),
+            None,
+            None,
+            Some(timestamp),
+        );
+        assert!(stream.collect::<Vec<_>>().await.is_empty());
         let saved = fixture.repository.get_by_id(&session.id).await?.unwrap();
-        assert_eq!(saved.task_id, session.task_id);
-        assert_eq!(saved.status, SessionStatus::Running);
-        if found {
-            assert!(events.is_empty());
-            assert_eq!(saved.latest_message, "继续任务");
-            assert!(matches!(saved.events.as_slice(), [Event::Message(_)]));
-        } else {
-            assert_eq!(
-                error_message(&events),
-                "会话运行中的任务实例不存在，请核实后重试"
-            );
-            assert_eq!(saved.events, events);
-            assert!(saved.latest_message.is_empty());
-        }
+        let [_, Event::Message(message)] = saved.events.as_slice() else {
+            panic!("应保留历史事件并追加人类消息事件")
+        };
+        assert_eq!(message.role, MessageRole::User);
+        assert_eq!(message.message, "继续任务");
+        assert_eq!(message.base.id, "1-0");
+        assert!(message.attachments.is_empty());
+        let mut expected = before;
+        expected.task_id = Some(format!("created-task-{}", index + 1));
+        expected.latest_message = "继续任务".to_owned();
+        expected.latest_message_at = Some(timestamp);
+        expected.unread_message_count = 0;
+        expected.events.push(Event::Message(message.clone()));
+        expected.updated_at = saved.updated_at;
+        assert_eq!(saved, expected);
+        let task = fixture.tasks.task(saved.task_id.as_deref().unwrap());
+        assert_eq!(task.invokes.load(Ordering::SeqCst), 1);
+        assert_eq!(*task.persisted_at_invoke.lock().unwrap(), saved.events);
+        let entries = task.input.0.lock().unwrap().entries.clone();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1["role"], "user");
+        assert_eq!(entries[0].1["message"], "继续任务");
+        assert_eq!(fixture.tasks.0.lock().unwrap().creates, index + 1);
     }
-    assert_eq!(
-        fixture
-            .tasks
-            .task("existing-task")
-            .invokes
-            .load(Ordering::SeqCst),
-        1
-    );
-    assert_eq!(
-        fixture.tasks.0.lock().unwrap().ids,
-        ["existing-task", "missing-task"]
-    );
-    assert_eq!(fixture.tasks.0.lock().unwrap().creates, 0);
+    assert_eq!(fixture.tasks.0.lock().unwrap().ids, ["missing-task"]);
+    assert_eq!(fixture.tasks.0.lock().unwrap().creates, 3);
     let sandboxes = fixture.sandboxes.calls.lock().unwrap();
-    assert!(sandboxes.ids.is_empty());
+    assert_eq!(sandboxes.ids, [sandbox_id, sandbox_id, sandbox_id]);
     assert_eq!(sandboxes.creates, 0);
     Ok(())
 }

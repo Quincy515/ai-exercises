@@ -4,9 +4,9 @@ use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use server::{
     domain::models::{
-        BaseEvent, ErrorEvent, Event, EventType, ExecutionStatus, File, FileToolContent,
+        BaseEvent, DoneEvent, ErrorEvent, Event, EventType, ExecutionStatus, File, FileToolContent,
         MessageEvent, MessageRole, Plan, PlanEvent, Step, StepEvent, StepEventStatus, TitleEvent,
-        ToolContent, ToolEvent, ToolEventStatus, ToolResult,
+        ToolContent, ToolEvent, ToolEventStatus, ToolResult, WaitEvent,
     },
     views::events::{AgentSseEvent, BaseEventData, CommonSseEvent, MessageEventData},
 };
@@ -30,7 +30,7 @@ fn response_uses_unix_seconds_while_domain_keeps_its_timestamp() {
 
         assert_eq!(
             serde_json::to_value(BaseEventData::from(&event)).unwrap(),
-            json!({"id": "event-1", "created_at": seconds})
+            json!({"event_id": "event-1", "created_at": seconds})
         );
         assert_eq!(serde_json::to_value(&event).unwrap(), original);
         assert_eq!(original["type"], "done");
@@ -69,7 +69,7 @@ fn message_preserves_both_roles_and_complete_attachment_metadata() {
             json!({
                 "event": "message",
                 "data": {
-                    "id": "event-1", "created_at": SECONDS,
+                    "event_id": "event-1", "created_at": SECONDS,
                     "role": expected_role, "message": "查看这份报告",
                     "attachments": [{
                         "id": "file-1", "filename": "报告.txt", "filepath": "/workspace/报告.txt",
@@ -90,7 +90,7 @@ fn new_message_data_has_optional_id_current_seconds_and_empty_payload() {
     assert_eq!(
         serde_json::to_value(AgentSseEvent::Message(data)).unwrap(),
         json!({"event": "message", "data": {
-            "id": null, "created_at": created_at, "role": "assistant",
+            "event_id": null, "created_at": created_at, "role": "assistant",
             "message": "", "attachments": []
         }})
     );
@@ -121,7 +121,7 @@ fn step_uses_nested_step_identity_and_execution_status_without_duplicate_keys() 
         assert_eq!(
             serde_json::from_str::<Value>(&encoded).unwrap(),
             json!({"event": "step", "data": {
-                "id": "step-1", "created_at": SECONDS,
+                "event_id": "event-1", "id": "step-1", "created_at": SECONDS,
                 "status": expected_status, "description": "读取文件"
             }})
         );
@@ -151,23 +151,24 @@ fn plan_exposes_only_steps_with_individual_ids_and_parent_event_time() {
         ..PlanEvent::default()
     };
     let encoded = serde_json::to_string(&AgentSseEvent::Plan(event.into())).unwrap();
-    assert_eq!(encoded.matches("\"id\":").count(), 3);
+    assert_eq!(encoded.matches("\"id\":").count(), 2);
+    assert_eq!(encoded.matches("\"event_id\":").count(), 3);
     assert_eq!(
         serde_json::from_str::<Value>(&encoded).unwrap(),
         json!({"event": "plan", "data": {
-            "id": "event-1", "created_at": SECONDS,
+            "event_id": "event-1", "created_at": SECONDS,
             "steps": [
-                {"id": "step-1", "created_at": SECONDS, "status": "pending", "description": "读取"},
-                {"id": "step-2", "created_at": SECONDS, "status": "completed", "description": "汇总"}
+                {"event_id": "event-1", "id": "step-1", "created_at": SECONDS, "status": "pending", "description": "读取"},
+                {"event_id": "event-1", "id": "step-2", "created_at": SECONDS, "status": "completed", "description": "汇总"}
             ]
         }})
     );
 }
 
 #[test]
-fn tool_renames_fields_and_preserves_full_result_or_null() {
-    for (status, result, expected_status, expected_content) in [
-        (ToolEventStatus::Calling, None, "calling", Value::Null),
+fn tool_renames_fields_and_uses_display_content_instead_of_raw_result() {
+    for (status, result, tool_content, expected_status, expected_content) in [
+        (ToolEventStatus::Calling, None, None, "calling", Value::Null),
         (
             ToolEventStatus::Called,
             Some(ToolResult {
@@ -175,8 +176,11 @@ fn tool_renames_fields_and_preserves_full_result_or_null() {
                 message: Some("文件不存在".to_owned()),
                 data: Some(json!({"path": "/workspace/a.txt", "lines": []})),
             }),
+            Some(ToolContent::File(FileToolContent {
+                content: "用于展示的文件正文".to_owned(),
+            })),
             "called",
-            json!({"success": false, "message": "文件不存在", "data": {"path": "/workspace/a.txt", "lines": []}}),
+            json!({"content": "用于展示的文件正文"}),
         ),
     ] {
         let event = ToolEvent {
@@ -189,21 +193,72 @@ fn tool_renames_fields_and_preserves_full_result_or_null() {
                 .unwrap()
                 .clone(),
             function_result: result,
-            tool_content: Some(ToolContent::File(FileToolContent {
-                content: "扩展内容".to_owned(),
-            })),
+            tool_content,
             status,
         };
         assert_eq!(
             serde_json::to_value(AgentSseEvent::Tool(event.into())).unwrap(),
             json!({"event": "tool", "data": {
-                "id": "event-1", "created_at": SECONDS, "tool_call_id": "call-1",
+                "event_id": "event-1", "created_at": SECONDS, "tool_call_id": "call-1",
                 "name": "file", "status": expected_status, "function": "file_read",
                 "args": {"filepath": "/workspace/a.txt", "options": {"lines": [1, 2]}},
                 "content": expected_content
             }})
         );
     }
+}
+
+#[test]
+fn unified_mapping_covers_every_domain_variant_and_preserves_list_order() {
+    let events = vec![
+        Event::Message(MessageEvent {
+            base: base(EventType::Message),
+            ..MessageEvent::default()
+        }),
+        Event::Title(TitleEvent {
+            base: base(EventType::Title),
+            ..TitleEvent::default()
+        }),
+        Event::Step(StepEvent {
+            base: base(EventType::Step),
+            ..StepEvent::default()
+        }),
+        Event::Plan(PlanEvent {
+            base: base(EventType::Plan),
+            ..PlanEvent::default()
+        }),
+        Event::Tool(ToolEvent {
+            base: base(EventType::Tool),
+            ..ToolEvent::default()
+        }),
+        Event::Done(DoneEvent {
+            base: base(EventType::Done),
+        }),
+        Event::Error(ErrorEvent {
+            base: base(EventType::Error),
+            ..ErrorEvent::default()
+        }),
+        Event::Wait(WaitEvent {
+            base: base(EventType::Wait),
+        }),
+    ];
+    let responses = AgentSseEvent::from_events(events)
+        .into_iter()
+        .map(|event| serde_json::to_value(event).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        responses
+            .iter()
+            .map(|event| event["event"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["message", "title", "step", "plan", "tool", "done", "error", "wait"]
+    );
+    for event in responses {
+        assert_eq!(event["data"]["event_id"], "event-1");
+        assert_eq!(event["data"]["created_at"], SECONDS);
+        assert!(event["data"].get("type").is_none());
+    }
+    assert!(AgentSseEvent::from_events(Vec::new()).is_empty());
 }
 
 #[test]
@@ -217,7 +272,7 @@ fn title_error_done_and_wait_keep_their_expected_data_shape() {
                 }
                 .into(),
             ),
-            json!({"event": "title", "data": {"id": "event-1", "created_at": SECONDS, "title": "新标题"}}),
+            json!({"event": "title", "data": {"event_id": "event-1", "created_at": SECONDS, "title": "新标题"}}),
         ),
         (
             AgentSseEvent::Error(
@@ -227,15 +282,15 @@ fn title_error_done_and_wait_keep_their_expected_data_shape() {
                 }
                 .into(),
             ),
-            json!({"event": "error", "data": {"id": "event-1", "created_at": SECONDS, "error": "执行失败"}}),
+            json!({"event": "error", "data": {"event_id": "event-1", "created_at": SECONDS, "error": "执行失败"}}),
         ),
         (
             AgentSseEvent::Done((&base(EventType::Done)).into()),
-            json!({"event": "done", "data": {"id": "event-1", "created_at": SECONDS}}),
+            json!({"event": "done", "data": {"event_id": "event-1", "created_at": SECONDS}}),
         ),
         (
             AgentSseEvent::Wait((&base(EventType::Wait)).into()),
-            json!({"event": "wait", "data": {"id": "event-1", "created_at": SECONDS}}),
+            json!({"event": "wait", "data": {"event_id": "event-1", "created_at": SECONDS}}),
         ),
     ];
     for (response, expected) in cases {
@@ -260,7 +315,7 @@ fn common_event_preserves_extra_fields_without_adding_another_envelope() {
     assert_eq!(
         serde_json::to_value(AgentSseEvent::Common(response)).unwrap(),
         json!({"event": "tool", "data": {
-            "id": "event-1", "created_at": SECONDS, "tool_call_id": "call-1",
+            "event_id": "event-1", "created_at": SECONDS, "tool_call_id": "call-1",
             "tool_name": "file", "function_name": "file_read", "function_args": {"filepath": "a.txt"},
             "tool_content": {"content": "文件内容"}, "function_result": null, "status": "calling"
         }})

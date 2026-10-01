@@ -13,8 +13,12 @@ use crate::{
     application::{error::AppError, services::session_service::SessionNotFound},
     interfaces::service_dependencies::{get_agent_service, get_session_service},
     openapi::{openapi, routes},
-    views::sessions::{
-        ChatRequest, CreateSessionResponse, EmptySessionData, ListSessionResponse, SessionResponse,
+    views::{
+        events::AgentSseEvent,
+        sessions::{
+            ChatRequest, CreateSessionResponse, EmptySessionData, ListSessionResponse,
+            SessionResponse,
+        },
     },
 };
 
@@ -177,8 +181,7 @@ pub async fn chat(
         timestamp,
     );
     // 定义事件生成器，配合 Sse 生成流式响应数据。
-    // 2.将 Agent 领域事件转换为 SSE 数据。
-    // TODO: 后续与获取所有流式数据的接口统一响应结构。
+    // 2.将 Agent 领域事件转换为统一响应，再将事件名与数据分别写入 SSE 帧。
     let stream = events.map(encode_sse_event);
     Ok(Sse::new(stream).into_response())
 }
@@ -186,13 +189,17 @@ pub async fn chat(
 fn encode_sse_event(
     event: crate::domain::models::Event,
 ) -> std::result::Result<SseEvent, axum::Error> {
-    let data = serde_json::to_value(event).map_err(axum::Error::new)?;
-    let event_type = data
-        .get("type")
+    let response = serde_json::to_value(AgentSseEvent::from(event)).map_err(axum::Error::new)?;
+    let event_type = response
+        .get("event")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| <serde_json::Error as serde::ser::Error>::custom("领域事件缺少 type 字段"))
+        .ok_or_else(|| <serde_json::Error as serde::ser::Error>::custom("响应事件缺少 event 字段"))
         .map_err(axum::Error::new)?;
-    // 事件 id 保留在 JSON 中，本课沿用 event + data 两个 SSE 字段。
+    let data = response
+        .get("data")
+        .ok_or_else(|| <serde_json::Error as serde::ser::Error>::custom("响应事件缺少 data 字段"))
+        .map_err(axum::Error::new)?;
+    // data 只包含响应载荷；event_id 保留在 JSON 中，SSE event 字段保存事件名称。
     SseEvent::default().event(event_type).json_data(data)
 }
 

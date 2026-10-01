@@ -1434,10 +1434,10 @@ async fn search_shell_and_file_content_follow_existing_tool_contracts() {
     shell
         .function_args
         .insert("session_id".into(), json!("shell-1"));
-    for data in [json!({"console": [{"output": "完成"}]}), json!({})] {
+    for data in [json!({"console_records": [{"output": "完成"}]}), json!({})] {
         *sandbox.shell_output.lock().unwrap() = Some(data.to_string());
         runner.handle_tool_event(&mut shell).await;
-        let expected = data.get("console").cloned().unwrap_or(json!([]));
+        let expected = data.get("console_records").cloned().unwrap_or(json!([]));
         assert!(
             matches!(&shell.tool_content, Some(ToolContent::Shell(c)) if c.console == expected)
         );

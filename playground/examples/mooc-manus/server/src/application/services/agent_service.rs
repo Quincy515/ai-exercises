@@ -198,8 +198,8 @@ impl AgentService {
         let mut task = self.get_task(&session)?;
         // 3.判断是否传递了非空 message。
         if let Some(message) = request.message.filter(|message| !message.is_empty()) {
-            // 4.会话不在运行中时创建新任务。
-            if session.status != SessionStatus::Running {
+            // 4.会话不在运行中，或进程重启后任务实例已丢失时，创建新任务。
+            if session.status != SessionStatus::Running || task.is_none() {
                 // 5.创建并保存新 Task。
                 task = Some(self.create_task(&mut session).await?);
             }

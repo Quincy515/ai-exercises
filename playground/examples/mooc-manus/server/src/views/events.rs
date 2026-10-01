@@ -1,5 +1,5 @@
 //! 会话流式响应结构：在接口边界投影领域事件，供 Web 与 Electron 共用。
-//! 本课定义数据结构和单类型转换；控制器的事件分发与 SSE 接入由后续课程完成。
+//! 统一转换领域事件与事件列表，控制器将响应数据编码成 SSE 帧。
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,7 @@ use utoipa::ToSchema;
 
 use crate::domain::models::{
     BaseEvent, ErrorEvent, Event, ExecutionStatus, MessageEvent, MessageRole, PlanEvent, Step,
-    StepEvent, TitleEvent, ToolEvent, ToolEventStatus, ToolResult,
+    StepEvent, TitleEvent, ToolContent, ToolEvent, ToolEventStatus,
 };
 
 use super::files::FileInfoResponse;
@@ -16,8 +16,8 @@ use super::files::FileInfoResponse;
 /// 基础事件数据。
 #[derive(Debug, Serialize, ToSchema)]
 pub struct BaseEventData {
-    /// 事件 id。
-    pub id: Option<String>,
+    /// 事件 id，对应消息队列的事件标识，与步骤和文件的业务 id 分开。
+    pub event_id: Option<String>,
     /// 事件时间，响应中统一使用整数 Unix 秒。
     pub created_at: i64,
 }
@@ -25,7 +25,7 @@ pub struct BaseEventData {
 impl Default for BaseEventData {
     fn default() -> Self {
         Self {
-            id: None,
+            event_id: None,
             created_at: Utc::now().timestamp(),
         }
     }
@@ -35,7 +35,7 @@ impl From<&BaseEvent> for BaseEventData {
     /// 从领域模型中构建基础事件数据，在响应边界将时间转换为 Unix 秒。
     fn from(event: &BaseEvent) -> Self {
         Self {
-            id: Some(event.id.clone()),
+            event_id: Some(event.id.clone()),
             created_at: event.created_at.timestamp(),
         }
     }
@@ -83,7 +83,7 @@ impl TryFrom<&Event> for CommonSseEvent {
             event: fields.event,
             data: CommonEventData {
                 base: BaseEventData {
-                    id: fields.id,
+                    event_id: fields.id,
                     created_at: fields.created_at.timestamp(),
                 },
                 extra: fields.extra,
@@ -138,10 +138,10 @@ impl From<TitleEvent> for TitleEventData {
 /// 步骤事件数据，只保留 UI 展示需要的步骤信息。
 #[derive(Debug, Serialize, ToSchema)]
 pub struct StepEventData {
-    /// 步骤 id；这里使用步骤的标识，避免与公共事件 id 重复。
+    #[serde(flatten)]
+    pub base: BaseEventData,
+    /// 步骤 id；独立于公共 event_id，供 UI 关联同一个步骤。
     pub id: String,
-    /// 事件时间，单位为 Unix 秒；计划内的步骤沿用计划事件时间。
-    pub created_at: i64,
     /// 步骤执行状态：pending、running、completed、failed。
     #[schema(value_type = String, example = "running")]
     pub status: ExecutionStatus,
@@ -150,10 +150,10 @@ pub struct StepEventData {
 }
 
 impl StepEventData {
-    fn from_step(step: Step, created_at: i64) -> Self {
+    fn from_step(step: Step, event: &BaseEvent) -> Self {
         Self {
+            base: event.into(),
             id: step.id,
-            created_at,
             status: step.status,
             description: step.description,
         }
@@ -163,7 +163,7 @@ impl StepEventData {
 impl From<StepEvent> for StepEventData {
     fn from(event: StepEvent) -> Self {
         // 展开嵌套 step，使用步骤执行状态和步骤 id。
-        Self::from_step(event.step, event.base.created_at.timestamp())
+        Self::from_step(event.step, &event.base)
     }
 }
 
@@ -180,12 +180,12 @@ impl From<PlanEvent> for PlanEventData {
     fn from(event: PlanEvent) -> Self {
         // 1.保留计划事件的公共信息。
         let base = BaseEventData::from(&event.base);
-        // 2.将计划中的各步骤投影成统一的步骤响应。
+        // 2.将计划中的各步骤投影成统一响应，沿用计划事件的 event_id 和时间。
         let steps = event
             .plan
             .steps
             .into_iter()
-            .map(|step| StepEventData::from_step(step, base.created_at))
+            .map(|step| StepEventData::from_step(step, &event.base))
             .collect();
         Self { base, steps }
     }
@@ -208,9 +208,9 @@ pub struct ToolEventData {
     /// 工具参数。
     #[schema(value_type = Object)]
     pub args: Map<String, Value>,
-    /// 工具调用结果，保留完整的 success/message/data；尚无结果时为 null。
+    /// 工具展示内容，如截图、搜索条目、控制台记录或文件正文；尚无内容时为 null。
     #[schema(value_type = Option<Object>)]
-    pub content: Option<ToolResult<Value>>,
+    pub content: Option<ToolContent>,
 }
 
 impl From<ToolEvent> for ToolEventData {
@@ -222,7 +222,7 @@ impl From<ToolEvent> for ToolEventData {
             status: event.status,
             function: event.function_name,
             args: event.function_args,
-            content: event.function_result,
+            content: event.tool_content,
         }
     }
 }
@@ -247,7 +247,7 @@ impl From<ErrorEvent> for ErrorEventData {
 
 /// Agent 流式事件类型集合，统一外层的事件类型与数据结构。
 /// Rust 枚举把事件名与对应数据绑定，Serde 输出 {"event": "...", "data": {...}}。
-/// utoipa 5.5 的 schema 派生仅支持容器级 untagged；聚合 schema 留待端点接入时定义。
+/// utoipa 5.5 的 schema 派生仅支持容器级 untagged，聚合 schema 需单独描述真实信封。
 /// 各具体响应数据类型继续通过 ToSchema 描述接口字段。
 #[derive(Debug, Serialize)]
 #[serde(tag = "event", content = "data", rename_all = "lowercase")]
@@ -271,4 +271,30 @@ pub enum AgentSseEvent {
     /// 通用事件直接沿用自身的 event + data 结构。
     #[serde(untagged)]
     Common(CommonSseEvent),
+}
+
+impl From<Event> for AgentSseEvent {
+    /// 将领域事件转换为 Agent 流式事件模型。
+    fn from(event: Event) -> Self {
+        // 1.按 Rust 枚举变体选择具体响应类型，编译器检查事件是否全部覆盖。
+        // 2.复用各数据类型的转换，将领域字段投影成适合客户端展示的数据。
+        match event {
+            Event::Message(event) => Self::Message(event.into()),
+            Event::Title(event) => Self::Title(event.into()),
+            Event::Step(event) => Self::Step(event.into()),
+            Event::Plan(event) => Self::Plan(event.into()),
+            Event::Tool(event) => Self::Tool(event.into()),
+            Event::Done(event) => Self::Done((&event.base).into()),
+            Event::Error(event) => Self::Error(event.into()),
+            Event::Wait(event) => Self::Wait((&event.base).into()),
+        }
+    }
+}
+
+impl AgentSseEvent {
+    /// 将领域事件模型列表转换为 SSE 流式事件列表，保持输入顺序。
+    pub fn from_events(events: impl IntoIterator<Item = Event>) -> Vec<Self> {
+        // 每个领域事件都有确定的响应类型，直接转换并收集即可。
+        events.into_iter().map(Self::from).collect()
+    }
 }

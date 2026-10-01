@@ -347,7 +347,7 @@ fn registers_management_operations_and_their_response_schemas() -> Result<()> {
 
 #[tokio::test]
 #[serial]
-async fn chat_without_message_subscribes_and_reports_missing_running_task() -> Result<()> {
+async fn chat_without_message_subscribes_and_missing_session_returns_uniform_error() -> Result<()> {
     let app = TestApp::with_agent_config(true).await?;
     let repository = app.repository();
     let session = Session::default();
@@ -375,8 +375,8 @@ async fn chat_without_message_subscribes_and_reports_missing_running_task() -> R
         .await?;
     let response = app
         .server
-        .post(&url)
-        .json(&json!({"message": "已有任务运行中"}))
+        .post(&format!("/api/sessions/{}/chat", uuid::Uuid::new_v4()))
+        .json(&json!({"message": "会话已不存在"}))
         .await;
     response.assert_status_ok();
     let body = response.text();
@@ -386,8 +386,9 @@ async fn chat_without_message_subscribes_and_reports_missing_running_task() -> R
         .find_map(|line| line.strip_prefix("data: "))
         .unwrap();
     let event: Value = serde_json::from_str(data)?;
-    assert_eq!(event["type"], "error");
-    assert!(event["error"].as_str().unwrap().contains("任务实例不存在"));
+    assert_eq!(event.as_object().unwrap().len(), 3);
+    assert!(event["event_id"].is_string() && event["created_at"].is_i64());
+    assert!(event["error"].as_str().unwrap().contains("任务会话不存在"));
     let after = repository.get_by_id(&session.id).await?.unwrap();
     assert_eq!(after.status, SessionStatus::Running);
     assert!(after.task_id.is_none() && after.sandbox_id.is_none());

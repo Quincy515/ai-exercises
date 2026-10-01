@@ -318,7 +318,9 @@ impl AgentTaskRunner {
                             .data
                             .ok_or_else(|| anyhow!("Shell 工具结果缺少 data"))?;
                         let data: Value = serde_json::from_str(&data)?;
-                        data.get("console").cloned().unwrap_or_else(|| json!([]))
+                        data.get("console_records")
+                            .cloned()
+                            .unwrap_or_else(|| json!([]))
                     } else {
                         json!("(No console)")
                     };
