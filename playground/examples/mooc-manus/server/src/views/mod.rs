@@ -1,5 +1,6 @@
 pub mod app_config;
 pub mod auth;
+pub mod events;
 pub mod files;
 pub mod health_status;
 pub mod sessions;
