@@ -510,11 +510,11 @@ impl TaskRunner for AgentTaskRunner {
                     if self.publish_event(task.as_ref(), event).await? {
                         return Ok(());
                     }
-                }
 
-                // 11.判断如果输入消息队列为空则跳出循环。
-                if task.input_stream().is_empty().await? {
-                    break;
+                    // 11.有新输入时结束本轮事件发布，外层循环继续处理下一条消息。
+                    if !task.input_stream().is_empty().await? {
+                        break;
+                    }
                 }
             }
 

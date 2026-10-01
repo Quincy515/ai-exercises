@@ -113,7 +113,7 @@ impl MessageQueue for RedisStreamMessageQueue {
         start_id: Option<&str>,
         block_ms: Option<usize>,
     ) -> Result<Option<(String, MessageQueuePayload)>> {
-        info!(
+        debug!(
             "从消息队列中获取一条消息： [{:?}] start_id={:?} block_ms={:?}",
             self.stream_name, start_id, block_ms
         );

@@ -5,16 +5,28 @@ use utoipa::ToSchema;
 use crate::domain::models::{Session, SessionStatus};
 
 /// 聊天请求结构，四个字段均可省略或传入 null。
-#[derive(Debug, Default, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(default)]
 pub struct ChatRequest {
     /// 人类消息。
     pub message: Option<String>,
-    /// 附件列表。
+    /// 附件文件 id 列表，省略时为空列表，显式 null 也按空列表处理。
     pub attachments: Option<Vec<String>>,
     /// 最新事件 id。
     pub event_id: Option<String>,
-    /// 当前时间戳，本课暂不处理其单位或转换。
+    /// Unix 时间戳，单位为秒；省略时使用服务端当前时间。
     pub timestamp: Option<i64>,
+}
+
+impl Default for ChatRequest {
+    fn default() -> Self {
+        Self {
+            message: None,
+            attachments: Some(Vec::new()),
+            event_id: None,
+            timestamp: None,
+        }
+    }
 }
 
 /// 创建会话响应结构。
@@ -89,23 +101,26 @@ mod tests {
 
     #[test]
     fn chat_request_accepts_optional_fields_and_preserves_values() {
-        for value in [
-            json!({}),
-            json!({"message": null, "attachments": null, "event_id": null, "timestamp": null}),
-        ] {
-            let request: ChatRequest = serde_json::from_value(value).unwrap();
-            assert!(request.message.is_none() && request.attachments.is_none());
-            assert!(request.event_id.is_none() && request.timestamp.is_none());
-        }
+        let missing: ChatRequest = serde_json::from_value(json!({})).unwrap();
+        assert!(
+            missing.message.is_none() && missing.event_id.is_none() && missing.timestamp.is_none()
+        );
+        assert_eq!(missing.attachments, Some(vec![]));
+        let null: ChatRequest = serde_json::from_value(json!({
+            "message": null, "attachments": null, "event_id": null, "timestamp": null
+        }))
+        .unwrap();
+        assert!(null.message.is_none() && null.attachments.is_none());
+        assert!(null.event_id.is_none() && null.timestamp.is_none());
         let request: ChatRequest = serde_json::from_value(json!({
             "message": " ", "attachments": ["file-1", "file-2"],
-            "event_id": "1790784000000-1", "timestamp": 1790784000000_i64
+            "event_id": "1790784000000-1", "timestamp": 1790784000_i64
         }))
         .unwrap();
         assert_eq!(request.message.as_deref(), Some(" "));
         assert_eq!(request.attachments.unwrap(), vec!["file-1", "file-2"]);
         assert_eq!(request.event_id.as_deref(), Some("1790784000000-1"));
-        assert_eq!(request.timestamp, Some(1790784000000));
+        assert_eq!(request.timestamp, Some(1790784000));
     }
 
     #[test]

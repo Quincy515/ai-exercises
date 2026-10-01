@@ -347,7 +347,7 @@ fn registers_management_operations_and_their_response_schemas() -> Result<()> {
 
 #[tokio::test]
 #[serial]
-async fn chat_returns_the_sse_shell_without_starting_tasks() -> Result<()> {
+async fn chat_without_message_subscribes_and_reports_missing_running_task() -> Result<()> {
     let app = TestApp::with_agent_config(true).await?;
     let repository = app.repository();
     let session = Session::default();
@@ -362,9 +362,12 @@ async fn chat_returns_the_sse_shell_without_starting_tasks() -> Result<()> {
         let response = app.server.post(&url).json(&body).await;
         response.assert_status_ok();
         assert_eq!(response.header("content-type"), "text/event-stream");
-        // 本课的 Event→SSE 转换仍为 TODO，成功时返回合法的空事件流。
+        // 空白会话没有任务，订阅结束时保持空事件流并清除未读。
         assert!(response.text().is_empty());
-        assert_eq!(repository.get_by_id(&session.id).await?.unwrap(), before);
+        let actual = repository.get_by_id(&session.id).await?.unwrap();
+        let mut expected = before.clone();
+        expected.updated_at = actual.updated_at;
+        assert_eq!(actual, expected);
     }
 
     repository
@@ -376,7 +379,15 @@ async fn chat_returns_the_sse_shell_without_starting_tasks() -> Result<()> {
         .json(&json!({"message": "已有任务运行中"}))
         .await;
     response.assert_status_ok();
-    assert!(response.text().is_empty());
+    let body = response.text();
+    assert!(body.contains("event: error"));
+    let data = body
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .unwrap();
+    let event: Value = serde_json::from_str(data)?;
+    assert_eq!(event["type"], "error");
+    assert!(event["error"].as_str().unwrap().contains("任务实例不存在"));
     let after = repository.get_by_id(&session.id).await?.unwrap();
     assert_eq!(after.status, SessionStatus::Running);
     assert!(after.task_id.is_none() && after.sandbox_id.is_none());
@@ -393,6 +404,16 @@ async fn chat_rejects_bad_requests_and_reports_initialization_failures() -> Resu
         .await
         .assert_status_bad_request();
     let url = format!("/api/sessions/{}/chat", uuid::Uuid::new_v4());
+    let invalid_time = app
+        .server
+        .post(&url)
+        .json(&json!({"timestamp": i64::MAX}))
+        .await;
+    invalid_time.assert_status_bad_request();
+    assert_eq!(
+        invalid_time.json::<Value>()["error"],
+        "session.invalid_timestamp"
+    );
     let invalid = app
         .server
         .post(&url)

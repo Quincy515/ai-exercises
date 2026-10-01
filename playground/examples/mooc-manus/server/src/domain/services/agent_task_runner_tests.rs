@@ -42,6 +42,7 @@ struct MemoryQueue {
     fail_put: AtomicBool,
     fail_pop: AtomicBool,
     empty_pop_once: AtomicBool,
+    on_wait: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl MemoryQueue {
@@ -64,7 +65,13 @@ impl MessageQueue for MemoryQueue {
             bail!("模拟输出队列失败");
         }
         let id = format!("{}-0", self.next_id.fetch_add(1, Ordering::SeqCst) + 1);
+        let is_wait = message["type"] == "wait";
         self.push(&id, message);
+        if is_wait {
+            if let Some(on_wait) = self.on_wait.lock().unwrap().take() {
+                on_wait();
+            }
+        }
         Ok(id)
     }
 
@@ -1232,6 +1239,73 @@ impl JsonParser for TestJsonParser {
 }
 
 #[tokio::test]
+async fn queued_input_interrupts_event_publication_and_is_consumed_by_outer_loop() {
+    let (_, repository, sandbox) = fixture();
+    let llm = Arc::new(PlanningLlm::default());
+    let runner = AgentTaskRunner::new(
+        llm.clone(),
+        AgentConfig {
+            max_retries: 1,
+            ..AgentConfig::default()
+        },
+        McpConfig::default(),
+        A2aConfig::default(),
+        SESSION_ID,
+        repository.clone(),
+        Arc::new(UnusedDependency),
+        Arc::new(UnusedDependency),
+        Arc::new(TestJsonParser),
+        Box::new(UnusedDependency),
+        Box::new(UnusedDependency),
+        sandbox,
+    );
+    let task = Arc::new(MemoryTask::default());
+    for (id, message) in [("input-1", "整理旧资料"), ("input-2", "改为整理新资料")] {
+        task.input.push(
+            id,
+            serde_json::to_value(Event::Message(MessageEvent {
+                role: MessageRole::User,
+                message: message.to_owned(),
+                ..MessageEvent::default()
+            }))
+            .unwrap(),
+        );
+    }
+
+    timeout(Duration::from_secs(2), runner.invoke(task.clone()))
+        .await
+        .expect("外层循环应继续处理排队消息并结束")
+        .unwrap();
+
+    let requests = llm.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(serde_json::to_string(&requests[0])
+        .unwrap()
+        .contains("整理旧资料"));
+    assert!(serde_json::to_string(&requests[1])
+        .unwrap()
+        .contains("改为整理新资料"));
+    assert_eq!(task.input.pop_calls.load(Ordering::SeqCst), 2);
+    assert!(task.input.entries().is_empty());
+
+    // 第一轮只发布首个标题；第二轮继续发布完整结果。
+    let session = repository.session(SESSION_ID).unwrap();
+    assert!(matches!(session.events[0], Event::Title(_)));
+    assert!(matches!(session.events[1], Event::Title(_)));
+    assert_eq!(session.unread_message_count, 1);
+    assert_eq!(
+        session
+            .events
+            .iter()
+            .filter(|event| matches!(event, Event::Done(_)))
+            .count(),
+        1
+    );
+    assert_eq!(session.events.len(), task.output.entries().len());
+    assert_eq!(session.status, SessionStatus::Completed);
+}
+
+#[tokio::test]
 async fn invoke_runs_real_flow_with_synced_attachment_paths_without_deadlock() {
     let (_, repository, sandbox, storage) = file_fixture();
     let attachment = storage.insert("source", "材料.txt", b"source data");
@@ -1769,9 +1843,18 @@ async fn real_flow_wait_keeps_pending_input_and_normal_completion_drains_it() {
         };
         let runner = runner_using_llm(llm, repository.clone(), sandbox);
         let task = Arc::new(MemoryTask::default());
-        for id in ["input-1", "input-2"] {
+        task.input
+            .push("input-1", serde_json::to_value(message()).unwrap());
+        if waiting {
+            // 等到 Wait 已发布再收到下一条输入，验证等待返回会保留排队消息。
+            let input = task.input.clone();
+            *task.output.on_wait.lock().unwrap() = Some(Box::new(move || {
+                input.push("input-2", serde_json::to_value(message()).unwrap());
+            }));
+        } else {
+            // 第二条预先排队会打断第一轮事件发布，外层循环继续消费它。
             task.input
-                .push(id, serde_json::to_value(message()).unwrap());
+                .push("input-2", serde_json::to_value(message()).unwrap());
         }
         timeout(Duration::from_secs(2), runner.invoke(task.clone()))
             .await
@@ -1783,6 +1866,7 @@ async fn real_flow_wait_keeps_pending_input_and_normal_completion_drains_it() {
         if waiting {
             assert_eq!(session.status, SessionStatus::Waiting);
             assert_eq!(task.input.entries().len(), 1);
+            assert_eq!(task.input.entries()[0].0, "input-2");
             assert_eq!(output.last().unwrap().1["type"], "wait");
             assert!(output.iter().all(|(_, event)| event["type"] != "done"));
             assert_eq!(waiting_llm.requests.load(Ordering::SeqCst), 2);
@@ -1794,10 +1878,10 @@ async fn real_flow_wait_keeps_pending_input_and_normal_completion_drains_it() {
                     .iter()
                     .filter(|(_, event)| event["type"] == "done")
                     .count(),
-                2
+                1
             );
             assert_eq!(planning_llm.requests.lock().unwrap().len(), 2);
-            assert_eq!(session.unread_message_count, 2);
+            assert_eq!(session.unread_message_count, 1);
         }
     }
 }

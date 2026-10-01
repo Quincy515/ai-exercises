@@ -576,6 +576,18 @@ fn filter_llm_message(message: LlmMessage) -> LlmMessage {
         ),
     ]);
 
+    // 保留非空推理内容，供后续模型调用继续使用；其余额外字段仍按白名单过滤。
+    if let Some(reasoning_content) = message
+        .get("reasoning_content")
+        .and_then(Value::as_str)
+        .filter(|content| !content.is_empty())
+    {
+        filtered_message.insert(
+            "reasoning_content".to_string(),
+            Value::String(reasoning_content.to_owned()),
+        );
+    }
+
     if let Some(tool_calls) = get_tool_calls(&message) {
         filtered_message.insert(
             "tool_calls".to_string(),
@@ -846,6 +858,40 @@ mod tests {
         )
     }
 
+    #[test]
+    fn filters_assistant_fields_and_preserves_nonempty_reasoning() {
+        for (reasoning, expected_reasoning) in [
+            (None, None),
+            (Some(Value::Null), None),
+            (Some(json!("")), None),
+            (
+                Some(json!("  分析\n调用工具  ")),
+                Some("  分析\n调用工具  "),
+            ),
+            (Some(json!(" ")), Some(" ")),
+        ] {
+            let mut expected = tool_call_message();
+            expected.insert("content".to_string(), json!("调用说明"));
+            let mut message = expected.clone();
+            message.insert(
+                "provider_private".to_string(),
+                json!({ "trace": "private" }),
+            );
+            message["tool_calls"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({ "id": "call-2" }));
+            if let Some(reasoning) = reasoning {
+                message.insert("reasoning_content".to_string(), reasoning);
+            }
+            if let Some(reasoning) = expected_reasoning {
+                expected.insert("reasoning_content".to_string(), json!(reasoning));
+            }
+
+            assert_eq!(filter_llm_message(message), expected);
+        }
+    }
+
     #[tokio::test]
     async fn initialized_tool_definitions_are_available_to_the_same_agent() {
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -888,11 +934,11 @@ mod tests {
 
     #[tokio::test]
     async fn invoke_runs_tool_and_records_complete_memory() {
+        let mut tool_response = tool_call_message();
+        tool_response.insert("reasoning_content".to_string(), json!("先调用工具再总结"));
+        tool_response.insert("provider_private".to_string(), json!("private"));
         let (mut agent, requests, tool_counts, repository) = agent(
-            vec![
-                tool_call_message(),
-                assistant_message(json!("final answer")),
-            ],
+            vec![tool_response, assistant_message(json!("final answer"))],
             vec![Box::new(EchoTool::new(false))],
         );
 
@@ -935,6 +981,12 @@ mod tests {
         );
         assert_eq!(requests.lock().unwrap()[0].len(), 2);
         assert_eq!(requests.lock().unwrap()[1].len(), 4);
+        assert_eq!(
+            memory.get_messages()[2]["reasoning_content"],
+            "先调用工具再总结"
+        );
+        assert_eq!(requests.lock().unwrap()[1][2], memory.get_messages()[2]);
+        assert!(!memory.get_messages()[2].contains_key("provider_private"));
         let tool_content = requests.lock().unwrap()[1][3]
             .get("content")
             .and_then(Value::as_str)

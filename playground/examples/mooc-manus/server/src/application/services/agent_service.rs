@@ -1,13 +1,17 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
+use chrono::{DateTime, Utc};
 use futures::{stream, stream::BoxStream, StreamExt};
 
 use crate::domain::{
     external::{
         FileStorage, JsonParser, Llm, SandboxFactory, SearchEngine, SharedTask, TaskFactory,
     },
-    models::{A2aConfig, AgentConfig, ErrorEvent, Event, McpConfig, Session, SessionStatus},
+    models::{
+        A2aConfig, AgentConfig, ErrorEvent, Event, File, McpConfig, MessageEvent, MessageRole,
+        Session, SessionStatus,
+    },
     repositories::{FileRepository, SessionRepository},
     services::agent_task_runner::AgentTaskRunner,
 };
@@ -122,64 +126,191 @@ impl AgentService {
         Ok(task)
     }
 
-    /// 根据传递的信息调用 Agent 服务发起对话请求。
-    /// 本课先准备任务；附件、事件游标和时间戳的处理由后续课时接入。
+    /// 根据传递的信息调用 Agent 服务发起对话请求，逐个返回任务输出事件。
     pub fn chat(
         self,
         session_id: String,
         message: Option<String>,
-        _attachments: Option<Vec<String>>,
-        _latest_event_id: Option<String>,
-        _timestamp: Option<i64>,
+        attachments: Option<Vec<String>>,
+        latest_event_id: Option<String>,
+        timestamp: Option<DateTime<Utc>>,
     ) -> BoxStream<'static, Event> {
-        // Stream 在响应体被读取时才执行，成功分支本课暂不产生业务事件。
-        stream::once(async move {
-            let result = self.prepare_chat(&session_id, message.as_deref()).await;
-            if let Err(error) = result {
-                // 记录日志并返回错误事件。
-                tracing::error!(session_id, error = %error, "任务会话对话出错");
-                let event = Event::Error(ErrorEvent {
-                    error: error.to_string(),
-                    ..ErrorEvent::default()
-                });
-                if let Err(save_error) = self
-                    .session_repository
-                    .add_event(&session_id, event.clone())
-                    .await
-                {
-                    // 会话缺失时也能保留原始错误，追加失败不覆盖本次错误事件。
-                    tracing::error!(session_id, error = %save_error, "保存会话错误事件失败");
-                }
-                Some(event)
-            } else {
-                None
+        let state = ChatStream {
+            service: self,
+            session_id,
+            request: Some(ChatInput {
+                message,
+                attachments,
+                timestamp,
+            }),
+            task: None,
+            latest_event_id,
+            finished: false,
+        };
+        // Stream 被读取时才启动本轮；丢弃订阅后后台任务继续运行。
+        stream::unfold(state, |mut state| async move {
+            if state.finished {
+                return None;
             }
-        })
-        .filter_map(futures::future::ready)
-        .boxed()
+            match state.next_event().await {
+                Ok(Some(event)) => {
+                    // 15.返回事件，Done、Error、Wait 均结束本轮订阅。
+                    state.finished = matches!(event, Event::Done(_) | Event::Error(_) | Event::Wait(_));
+                    if state.finished { state.finish().await; }
+                    Some((event, state))
+                }
+                Ok(None) => {
+                    state.finish().await;
+                    None
+                }
+                Err(error) => {
+                    // 17.记录日志，持久化并返回错误事件。
+                    tracing::error!(session_id = %state.session_id, error = %error, "任务会话对话出错");
+                    let event = Event::Error(ErrorEvent {
+                        error: error.to_string(),
+                        ..ErrorEvent::default()
+                    });
+                    if let Err(save_error) = state.service.session_repository
+                        .add_event(&state.session_id, event.clone()).await
+                    {
+                        tracing::error!(session_id = %state.session_id, error = %save_error, "保存会话错误事件失败");
+                    }
+                    state.finished = true;
+                    state.finish().await;
+                    Some((event, state))
+                }
+            }
+        }).boxed()
     }
 
-    async fn prepare_chat(&self, session_id: &str, message: Option<&str>) -> Result<()> {
+    async fn prepare_chat(
+        &self,
+        session_id: &str,
+        request: ChatInput,
+    ) -> Result<Option<SharedTask>> {
         // 1.检查会话是否存在。
         let mut session = self
             .session_repository
             .get_by_id(session_id)
             .await?
             .ok_or_else(|| anyhow!("任务会话不存在, 请核实后重试"))?;
-
         // 2.获取对应会话任务。
         let mut task = self.get_task(&session)?;
-
         // 3.判断是否传递了非空 message。
-        if message.is_some_and(|message| !message.is_empty()) {
-            // 4.会话不在运行中时，准备一个新任务。
+        if let Some(message) = request.message.filter(|message| !message.is_empty()) {
+            // 4.会话不在运行中时创建新任务。
             if session.status != SessionStatus::Running {
-                // 5.创建新 Task，启动和消息处理在后续课时完成。
+                // 5.创建并保存新 Task。
                 task = Some(self.create_task(&mut session).await?);
-                // TODO: 后续逻辑待实现。
             }
+            let current_task = task
+                .as_ref()
+                .context("会话运行中的任务实例不存在，请核实后重试")?;
+            // 6.更新最后一条消息；省略时间戳时使用服务端当前时间。
+            self.session_repository
+                .update_latest_message(
+                    session_id,
+                    &message,
+                    request.timestamp.unwrap_or_else(Utc::now),
+                )
+                .await?;
+            // 7.创建人类消息事件，附件传入的是文件 id。
+            let mut event = Event::Message(MessageEvent {
+                role: MessageRole::User,
+                message: message.clone(),
+                attachments: request
+                    .attachments
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|id| File {
+                        id,
+                        ..File::default()
+                    })
+                    .collect(),
+                ..MessageEvent::default()
+            });
+            // 8.将事件写入输入流，使用队列返回的 id 保存会话事件。
+            let event_id = current_task
+                .input_stream()
+                .put(serde_json::to_value(&event)?)
+                .await?;
+            event.set_id(event_id);
+            self.session_repository.add_event(session_id, event).await?;
+            // 9.启动后台任务；已有任务正在执行时由 Task 自身保证重复调用安全。
+            current_task.invoke().await?;
+            tracing::info!(session_id, message = %message.chars().take(50).collect::<String>(), "往会话输入消息队列写入消息");
         }
-        let _ = task;
-        Ok(())
+        // 10.记录本轮订阅关联的任务。
+        tracing::info!(session_id, task_id = ?task.as_ref().map(|task| task.id()), "会话开始读取任务事件");
+        Ok(task)
+    }
+}
+
+/// 保存惰性流首次执行所需的业务参数。
+struct ChatInput {
+    message: Option<String>,
+    attachments: Option<Vec<String>>,
+    timestamp: Option<DateTime<Utc>>,
+}
+
+/// 每个 HTTP 订阅独立保存读取游标，后台 Task 由任务注册表持有。
+struct ChatStream {
+    service: AgentService,
+    session_id: String,
+    request: Option<ChatInput>,
+    task: Option<SharedTask>,
+    latest_event_id: Option<String>,
+    finished: bool,
+}
+
+impl ChatStream {
+    async fn next_event(&mut self) -> Result<Option<Event>> {
+        if let Some(request) = self.request.take() {
+            self.task = self.service.prepare_chat(&self.session_id, request).await?;
+        }
+        let Some(task) = &self.task else {
+            return Ok(None);
+        };
+        // 11.逐条读取输出；任务已完成时也要排空已经写入队列的事件。
+        loop {
+            let was_done = task.done();
+            // 12.输入和输出共享 Redis 连接，非阻塞读取避免 BLOCK 0 阻塞后台写入。
+            let item = task
+                .output_stream()
+                .get(self.latest_event_id.as_deref(), None)
+                .await?;
+            if let Some((event_id, payload)) = item {
+                self.latest_event_id = Some(event_id.clone());
+                // 13.按 type 解码领域事件，并使用队列返回的实际事件 id。
+                let mut event: Event = serde_json::from_value(payload)?;
+                event.set_id(event_id);
+                // 14.当前订阅正在传递事件，重置未读消息数。
+                self.service
+                    .session_repository
+                    .update_unread_message_count(&self.session_id, 0)
+                    .await?;
+                return Ok(Some(event));
+            }
+            if was_done {
+                return Ok(None);
+            }
+            // 空读期间任务可能刚结束，下一次读取会再次检查其输出。
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn finish(&mut self) {
+        // 16.本轮订阅结束。
+        tracing::info!(session_id = %self.session_id, "会话本轮运行结束");
+        // 18.正常结束及错误出口清零；失败只记录，不覆盖原始错误事件。
+        if let Err(error) = self
+            .service
+            .session_repository
+            .update_unread_message_count(&self.session_id, 0)
+            .await
+        {
+            tracing::error!(session_id = %self.session_id, error = %error, "清除会话未读数失败");
+        }
+        // 客户端断开时丢弃订阅即可；不取消 Task，也不延迟清零后台新产生的未读数。
     }
 }

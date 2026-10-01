@@ -1,5 +1,3 @@
-use std::convert::Infallible;
-
 use axum::{
     http::StatusCode,
     response::{
@@ -7,6 +5,7 @@ use axum::{
         IntoResponse,
     },
 };
+use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use loco_rs::prelude::*;
 
@@ -139,12 +138,12 @@ pub async fn delete_session(
     path = "/api/sessions/{session_id}/chat",
     tag = "会话模块",
     summary = "向指定任务会话发起聊天请求",
-    description = "准备会话任务并返回 SSE 响应骨架；任务启动及事件编码在后续课时实现。",
+    description = "发送消息或订阅已有任务，逐条返回领域事件的 SSE 数据。",
     params(("session_id" = String, Path, description = "会话业务 UUID")),
     request_body = ChatRequest,
     responses(
-        (status = 200, description = "聊天事件流（本课尚未输出 SSE 事件）", body = String, content_type = "text/event-stream"),
-        (status = 400, description = "会话 UUID 或请求 JSON 无效"),
+        (status = 200, description = "聊天事件流", body = String, content_type = "text/event-stream"),
+        (status = 400, description = "会话 UUID、时间戳或请求 JSON 无效"),
         (status = 422, description = "聊天请求字段类型无效"),
         (status = 500, description = "Agent 服务初始化失败")
     )
@@ -156,6 +155,15 @@ pub async fn chat(
     Json(request): Json<ChatRequest>,
 ) -> Result<Response> {
     validate_session_id(&session_id)?;
+    // 请求使用 Unix 秒，进入应用服务前转换为明确的 UTC 时间；0 表示纪元起点。
+    let timestamp = request
+        .timestamp
+        .map(|seconds| {
+            DateTime::<Utc>::from_timestamp(seconds, 0).ok_or_else(|| {
+                AppError::bad_request("session.invalid_timestamp", "时间戳超出支持范围")
+            })
+        })
+        .transpose()?;
     let service = get_agent_service(&ctx)
         .await
         .map_err(|error| AppError::internal("session.agent_init_failed", format!("{error:#}")))?;
@@ -166,14 +174,26 @@ pub async fn chat(
         request.message,
         request.attachments,
         request.event_id,
-        request.timestamp,
+        timestamp,
     );
     // 定义事件生成器，配合 Sse 生成流式响应数据。
-    let stream = events.filter_map(|_event| async {
-        // TODO: 等待实现，需要将领域 event 转换成 SSE 响应数据。
-        None::<std::result::Result<SseEvent, Infallible>>
-    });
+    // 2.将 Agent 领域事件转换为 SSE 数据。
+    // TODO: 后续与获取所有流式数据的接口统一响应结构。
+    let stream = events.map(encode_sse_event);
     Ok(Sse::new(stream).into_response())
+}
+
+fn encode_sse_event(
+    event: crate::domain::models::Event,
+) -> std::result::Result<SseEvent, axum::Error> {
+    let data = serde_json::to_value(event).map_err(axum::Error::new)?;
+    let event_type = data
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| <serde_json::Error as serde::ser::Error>::custom("领域事件缺少 type 字段"))
+        .map_err(axum::Error::new)?;
+    // 事件 id 保留在 JSON 中，本课沿用 event + data 两个 SSE 字段。
+    SseEvent::default().event(event_type).json_data(data)
 }
 
 fn validate_session_id(session_id: &str) -> std::result::Result<(), AppError> {
