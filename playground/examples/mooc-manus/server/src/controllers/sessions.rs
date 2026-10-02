@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use axum::{
+    extract::ws::{CloseFrame, Message as WebSocketMessage, WebSocket, WebSocketUpgrade},
     http::StatusCode,
     response::{
         sse::{Event as SseEvent, Sse},
@@ -8,8 +9,9 @@ use axum::{
     },
 };
 use chrono::{DateTime, Utc};
-use futures::{stream, StreamExt};
+use futures::{stream, SinkExt, StreamExt};
 use loco_rs::prelude::*;
+use tokio_tungstenite::{connect_async, tungstenite::Message as SandboxMessage};
 
 use crate::{
     application::{
@@ -407,6 +409,113 @@ pub async fn read_shell_output(
     ))
 }
 
+/// VNC WebSocket 端点，建立沙箱连接并双向转发数据。
+pub async fn vnc_websocket(
+    State(ctx): State<AppContext>,
+    Path(session_id): Path<String>,
+    websocket: WebSocketUpgrade,
+) -> Result<Response> {
+    let service = get_session_service(&ctx)?;
+    tracing::info!(session_id, "为会话开启 WebSocket 连接");
+    // 1.从客户端 noVNC 接收子协议；2.binary 优先，base64 次选。
+    // Axum 按服务端提供的顺序选择客户端支持的协议。
+    // 3.使用对应协议接受 WebSocket 连接，随后查询会话及沙箱。
+    Ok(websocket
+        .protocols(["binary", "base64"])
+        .on_upgrade(move |mut socket| async move {
+            let result: anyhow::Result<()> = async {
+                // 4.获取对应会话的 VNC 链接。
+                let sandbox_vnc_url = service.get_vnc_url(&session_id).await?;
+                tracing::info!(session_id, sandbox_vnc_url, "连接 WebSocket VNC");
+                forward_vnc(&mut socket, &sandbox_vnc_url).await
+            }
+            .await;
+            if let Err(error) = result {
+                // 连接沙箱失败或其他异常：记录日志并使用 1011 关闭 WebSocket。
+                tracing::error!(session_id, error = %error, "WebSocket 异常");
+                close_vnc_with_error(&mut socket, format!("WebSocket异常: {error:#}")).await;
+            }
+        }))
+}
+
+async fn forward_vnc(websocket: &mut WebSocket, sandbox_vnc_url: &str) -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    // 5.连接到 VNC；沿用客户端连接的十秒握手等待上限。
+    let (sandbox_ws, _) =
+        tokio::time::timeout(Duration::from_secs(10), connect_async(sandbox_vnc_url))
+            .await
+            .context("连接沙箱环境超时")?
+            .context("连接沙箱环境失败")?;
+    let (mut web_sender, mut web_receiver) = websocket.split();
+    let (mut sandbox_sender, mut sandbox_receiver) = sandbox_ws.split();
+
+    // 6.创建两个异步 future 完成数据的双向转发。
+    let forward_to_sandbox = async {
+        while let Some(message) = web_receiver.next().await {
+            match message? {
+                // 接收来自客户端的数据，原样发送给沙箱。
+                WebSocketMessage::Binary(data) => {
+                    sandbox_sender.send(SandboxMessage::Binary(data)).await?
+                }
+                WebSocketMessage::Close(_) => break,
+                WebSocketMessage::Ping(_) | WebSocketMessage::Pong(_) => {}
+                WebSocketMessage::Text(_) => anyhow::bail!("VNC 客户端需要发送二进制消息"),
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    };
+    let forward_from_sandbox = async {
+        while let Some(message) = sandbox_receiver.next().await {
+            match message? {
+                // 接收来自沙箱的数据并转发给客户端。
+                SandboxMessage::Binary(data) => {
+                    web_sender.send(WebSocketMessage::Binary(data)).await?
+                }
+                SandboxMessage::Close(_) => break,
+                SandboxMessage::Ping(_) | SandboxMessage::Pong(_) | SandboxMessage::Frame(_) => {}
+                SandboxMessage::Text(_) => anyhow::bail!("VNC 沙箱需要发送二进制消息"),
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    };
+
+    // 7.并行运行两个方向；8.等待任意方向结束，表示连接已中断。
+    // select! 返回时丢弃另一方向的 future，对应取消剩余转发任务。
+    let (direction, result) = tokio::select! {
+        result = forward_to_sandbox => ("Web->VNC", result),
+        result = forward_from_sandbox => ("VNC->Web", result),
+    };
+    if let Err(error) = result {
+        tracing::error!(direction, error = %error, "VNC 转发出错");
+    }
+    tracing::info!(direction, "WebSocket 连接已关闭");
+
+    // 9.关闭两端连接；限时发送关闭帧，结束后由所有权释放连接资源。
+    let _ = tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::join!(web_sender.close(), sandbox_sender.close())
+    })
+    .await;
+    Ok(())
+}
+
+async fn close_vnc_with_error(websocket: &mut WebSocket, mut reason: String) {
+    // WebSocket 关闭帧最多携带 123 字节原因，截断时保留完整 UTF-8 字符。
+    let mut end = reason.len().min(123);
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    reason.truncate(end);
+    let _ = tokio::time::timeout(
+        Duration::from_secs(1),
+        websocket.send(WebSocketMessage::Close(Some(CloseFrame {
+            code: 1011,
+            reason: reason.into(),
+        }))),
+    )
+    .await;
+}
+
 fn encode_sse_event(
     event: crate::domain::models::Event,
 ) -> std::result::Result<SseEvent, axum::Error> {
@@ -500,7 +609,13 @@ pub fn routes() -> Routes {
             "/{session_id}/shell",
             openapi(post(read_shell_output), routes!(read_shell_output)),
         )
+        // WebSocket 升级使用 GET，保持为独立于 REST OpenAPI 的长连接入口。
+        .add("/{session_id}/vnc", get(vnc_websocket))
 }
+
+#[cfg(test)]
+#[path = "sessions_vnc_tests.rs"]
+mod vnc_tests;
 
 #[cfg(test)]
 mod tests {

@@ -112,6 +112,14 @@ impl SessionService {
         Err(SessionSandboxError::RequestFailed(result.message.unwrap_or_default()).into())
     }
 
+    /// 获取指定会话的 VNC 链接。
+    pub async fn get_vnc_url(&self, session_id: &str) -> Result<String> {
+        tracing::info!(session_id, "获取会话的 VNC 链接");
+        // 1.检查会话是否存在；2.根据沙箱 id 获取沙箱并判断是否存在。
+        let sandbox = self.get_session_sandbox(session_id).await?;
+        Ok(sandbox.vnc_url().to_owned())
+    }
+
     async fn get_session_sandbox(&self, session_id: &str) -> Result<Box<dyn Sandbox>> {
         // 1.检查会话是否存在，查询完成后即归还数据库连接。
         let session = self

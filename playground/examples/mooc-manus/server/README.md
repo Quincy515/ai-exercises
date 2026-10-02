@@ -200,3 +200,23 @@ UUID 格式错误返回 400，请求字段缺失或类型错误返回 422。
 ```sh
 cargo test --locked --lib --test session_service --test session_api --test agent_service --test chat_stream_api --test event_response
 ```
+
+## 17-11：VNC WebSocket 双向转发
+
+服务端提供 `ws://localhost:5150/api/sessions/{session_id}/vnc`，由会话 ID 查找已关联
+沙箱的 VNC 地址。客户端和服务端先完成握手，随后连接沙箱并双向转发二进制数据。
+客户端关闭或沙箱关闭都会结束另一方向的转发并释放连接；VNC 断开只结束本次远程
+桌面连接，会话、沙箱及后台 Agent 任务继续按原有生命周期运行。
+
+子协议优先选择 `binary`，其次为 `base64`；未匹配时接受无子协议连接。课程中的
+`base64` 只参与协商，载荷保持二进制，本节沿用这一行为。会话/沙箱查找或连接失败
+在升级后使用关闭码 `1011`，完整错误记录在服务端日志中。
+
+已有共享 `VNCViewer` 接收 `url` 属性，后续前端业务接入时可传入上述会话代理地址；
+当前演示入口仍使用本地直连地址。测试使用随机本地端口与受控 WebSocket 上游，
+验证协议协商、双向字节保持、两端关闭和错误关闭；真实桌面显示需结合运行中的沙箱验证。
+
+```sh
+cargo test --locked --lib controllers::sessions::vnc_tests
+cargo test --locked --test session_service
+```

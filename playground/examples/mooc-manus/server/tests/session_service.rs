@@ -28,12 +28,14 @@ enum Call {
     Lookup(String),
     File(String),
     Shell(String),
+    Vnc,
 }
 
 #[derive(Clone, Copy)]
 enum ReadKind {
     File,
     Shell,
+    Vnc,
 }
 
 impl ReadKind {
@@ -41,6 +43,7 @@ impl ReadKind {
         match self {
             Self::File => service.read_file(id, "/home/ubuntu/测试文件.txt").await,
             Self::Shell => service.read_shell_output(id, "shell-session-42").await,
+            Self::Vnc => service.get_vnc_url(id).await,
         }
     }
 
@@ -48,6 +51,7 @@ impl ReadKind {
         match self {
             Self::File => Call::File("/home/ubuntu/测试文件.txt".into()),
             Self::Shell => Call::Shell("shell-session-42".into()),
+            Self::Vnc => Call::Vnc,
         }
     }
 }
@@ -226,7 +230,8 @@ impl Sandbox for RecordingSandbox {
         panic!("读取不使用浏览器")
     }
     fn vnc_url(&self) -> &str {
-        panic!("读取不使用远程桌面")
+        self.0.calls.lock().unwrap().push(Call::Vnc);
+        "ws://sandbox.example:5901/websockify"
     }
 }
 
@@ -297,13 +302,14 @@ impl Fixture {
 async fn reads_only_the_associated_sandbox_and_preserves_session_history() -> Result<()> {
     let fixture = Fixture::new().await?;
     let session = fixture.session(Some("关联沙箱")).await?;
-    for kind in [ReadKind::File, ReadKind::Shell] {
+    for kind in [ReadKind::File, ReadKind::Shell, ReadKind::Vnc] {
         let contents = match kind {
             ReadKind::File => vec!["", "中文文件\n第二行\n"],
             ReadKind::Shell => vec![
                 r#"{"output":"","session_id":"shell-session-42","console_records":[]}"#,
                 r#"{"output":"执行成功\n","session_id":"shell-session-42","console_records":[{"command":"echo 测试","output":"测试","ps1":"ubuntu $"}]}"#,
             ],
+            ReadKind::Vnc => vec!["ws://sandbox.example:5901/websockify"],
         };
         for content in contents {
             *fixture.sandbox.response.lock().unwrap() = Ok(ToolResult {
@@ -327,7 +333,7 @@ async fn reads_only_the_associated_sandbox_and_preserves_session_history() -> Re
 #[tokio::test]
 async fn rejects_missing_sessions_and_unassigned_sandboxes_before_lookup() -> Result<()> {
     let fixture = Fixture::new().await?;
-    for kind in [ReadKind::File, ReadKind::Shell] {
+    for kind in [ReadKind::File, ReadKind::Shell, ReadKind::Vnc] {
         let id = uuid::Uuid::new_v4().to_string();
         let error = kind.read(&fixture.service, &id).await.unwrap_err();
         assert_eq!(
@@ -358,7 +364,7 @@ async fn rejects_missing_sessions_and_unassigned_sandboxes_before_lookup() -> Re
 async fn propagates_lookup_and_tool_failures_without_mutating_sessions() -> Result<()> {
     let fixture = Fixture::new().await?;
     let session = fixture.session(Some("关联沙箱")).await?;
-    for kind in [ReadKind::File, ReadKind::Shell] {
+    for kind in [ReadKind::File, ReadKind::Shell, ReadKind::Vnc] {
         *fixture.sandbox.available.lock().unwrap() = Ok(false);
         let error = kind.read(&fixture.service, &session.id).await.unwrap_err();
         assert!(matches!(
@@ -378,6 +384,15 @@ async fn propagates_lookup_and_tool_failures_without_mutating_sessions() -> Resu
             fixture.sandbox.take_calls(),
             vec![Call::Lookup("关联沙箱".into())]
         );
+
+        // 获取 VNC 地址只检查会话与沙箱；文件和 Shell 才继续调用读取工具。
+        if matches!(kind, ReadKind::Vnc) {
+            assert_eq!(
+                fixture.repository.get_by_id(&session.id).await?,
+                Some(session.clone())
+            );
+            continue;
+        }
 
         *fixture.sandbox.available.lock().unwrap() = Ok(true);
         *fixture.sandbox.response.lock().unwrap() =
@@ -428,7 +443,7 @@ async fn stops_on_database_failure_before_accessing_the_sandbox() -> Result<()> 
         .db
         .execute_unprepared("DROP TABLE sessions")
         .await?;
-    for kind in [ReadKind::File, ReadKind::Shell] {
+    for kind in [ReadKind::File, ReadKind::Shell, ReadKind::Vnc] {
         assert!(kind.read(&fixture.service, &session.id).await.is_err());
         assert!(fixture.sandbox.take_calls().is_empty());
     }
