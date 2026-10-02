@@ -157,6 +157,7 @@ struct RecordingTask {
     output: Arc<RecordingQueue>,
     done: Arc<AtomicBool>,
     invokes: AtomicUsize,
+    cancels: AtomicUsize,
     repository: Arc<SeaOrmSessionRepository>,
     persisted_at_invoke: Mutex<Vec<Event>>,
 }
@@ -170,6 +171,7 @@ impl RecordingTask {
             output: Arc::default(),
             done: Arc::new(AtomicBool::new(true)),
             invokes: AtomicUsize::new(0),
+            cancels: AtomicUsize::new(0),
             persisted_at_invoke: Mutex::default(),
         }
     }
@@ -192,7 +194,8 @@ impl Task for RecordingTask {
         Ok(())
     }
     fn cancel(&self) -> bool {
-        panic!("结束 HTTP 订阅不能取消后台 Task")
+        self.cancels.fetch_add(1, Ordering::SeqCst);
+        !self.done()
     }
     fn input_stream(&self) -> SharedMessageQueue {
         self.input.clone()
@@ -915,6 +918,147 @@ async fn dropping_a_waiting_subscription_keeps_the_task_and_new_unread_messages(
     assert_eq!(task.output.0.lock().unwrap().reads.len(), reads_before_drop);
     assert_eq!(task.output.size().await?, 2);
     assert!(!task.done());
+    assert_eq!(task.cancels.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stopping_sessions_cancels_existing_tasks_and_preserves_other_session_data() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    for (status, done) in [
+        (SessionStatus::Running, false),
+        (SessionStatus::Waiting, false),
+        (SessionStatus::Completed, true),
+    ] {
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let session = Session {
+            task_id: Some(task_id.clone()),
+            sandbox_id: Some("保留沙箱".into()),
+            title: "保留任务内容".into(),
+            latest_message: "保留最新消息".into(),
+            unread_message_count: 6,
+            files: vec![File {
+                filename: "保留附件.txt".into(),
+                ..File::default()
+            }],
+            events: vec![reply("已经发布的历史")],
+            status,
+            ..Session::default()
+        };
+        fixture.repository.save(session.clone()).await?;
+        let before = fixture.repository.get_by_id(&session.id).await?.unwrap();
+        let task = fixture.tasks.task(&task_id);
+        task.done.store(done, Ordering::SeqCst);
+
+        // 停止接口只发起取消；已结束任务返回 false 时也继续更新会话状态。
+        for call_count in 1..=2 {
+            fixture.service().stop_session(&session.id).await?;
+            assert_eq!(task.cancels.load(Ordering::SeqCst), call_count);
+            assert_eq!(task.invokes.load(Ordering::SeqCst), 0);
+            assert!(task.input.0.lock().unwrap().entries.is_empty());
+            assert!(task.output.0.lock().unwrap().entries.is_empty());
+            let actual = fixture.repository.get_by_id(&session.id).await?.unwrap();
+            let mut expected = before.clone();
+            expected.status = SessionStatus::Completed;
+            expected.updated_at = actual.updated_at;
+            assert_eq!(actual, expected);
+        }
+    }
+    assert_eq!(fixture.tasks.0.lock().unwrap().creates, 0);
+    let sandboxes = fixture.sandboxes.calls.lock().unwrap();
+    assert!(sandboxes.ids.is_empty());
+    assert_eq!(sandboxes.creates, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stopping_sessions_without_registered_tasks_still_marks_them_completed() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    for task_id in [None, Some(""), Some("released-task")] {
+        let session = Session {
+            task_id: task_id.map(str::to_owned),
+            status: SessionStatus::Pending,
+            unread_message_count: 2,
+            ..Session::default()
+        };
+        fixture.repository.save(session.clone()).await?;
+        let before = fixture.repository.get_by_id(&session.id).await?.unwrap();
+        fixture.service().stop_session(&session.id).await?;
+        let actual = fixture.repository.get_by_id(&session.id).await?.unwrap();
+        let mut expected = before;
+        expected.status = SessionStatus::Completed;
+        expected.updated_at = actual.updated_at;
+        assert_eq!(actual, expected);
+    }
+    let tasks = fixture.tasks.0.lock().unwrap();
+    assert_eq!(tasks.ids, ["released-task"]);
+    assert_eq!(tasks.creates, 0);
+    assert!(tasks.registry.is_empty());
+    let sandboxes = fixture.sandboxes.calls.lock().unwrap();
+    assert!(sandboxes.ids.is_empty());
+    assert_eq!(sandboxes.creates, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stopping_missing_sessions_or_failed_task_lookups_stops_before_status_changes() -> Result<()>
+{
+    let fixture = Fixture::new().await?;
+    let missing = fixture
+        .service()
+        .stop_session(&uuid::Uuid::new_v4().to_string())
+        .await
+        .unwrap_err();
+    assert_eq!(missing.to_string(), "任务会话不存在, 请核实后重试");
+    assert!(fixture.tasks.0.lock().unwrap().ids.is_empty());
+
+    let (session, task) = fixture.subscription().await?;
+    let before = fixture.repository.get_by_id(&session.id).await?.unwrap();
+    fixture.tasks.0.lock().unwrap().fail_get = true;
+    let error = fixture
+        .service()
+        .stop_session(&session.id)
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "模拟任务查询失败");
+    assert_eq!(task.cancels.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture.repository.get_by_id(&session.id).await?.unwrap(),
+        before
+    );
+    assert_eq!(fixture.tasks.0.lock().unwrap().creates, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stopping_cancels_before_the_status_write_and_propagates_database_failures() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let (session, task) = fixture.subscription().await?;
+    let before = fixture.repository.get_by_id(&session.id).await?.unwrap();
+    // 仅在私有数据库中拒绝 Completed，验证取消请求先于状态写入。
+    fixture
+        .database
+        .db
+        .execute_unprepared(
+            "ALTER TABLE sessions ADD CONSTRAINT test_stop_status CHECK (status <> 'completed')",
+        )
+        .await?;
+    assert!(fixture.service().stop_session(&session.id).await.is_err());
+    assert_eq!(task.cancels.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture.repository.get_by_id(&session.id).await?.unwrap(),
+        before
+    );
+
+    fixture
+        .database
+        .db
+        .execute_unprepared("DROP TABLE sessions")
+        .await?;
+    assert!(fixture.service().stop_session(&session.id).await.is_err());
+    // 会话读取失败后，后续任务查询和取消均不执行。
+    assert_eq!(fixture.tasks.0.lock().unwrap().ids.len(), 1);
+    assert_eq!(task.cancels.load(Ordering::SeqCst), 1);
     Ok(())
 }
 

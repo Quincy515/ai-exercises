@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
-use crate::domain::{models::Session, repositories::SessionRepository};
+use crate::domain::{
+    models::{File, Session},
+    repositories::SessionRepository,
+};
 
 /// 删除会话时，指定的会话不存在。
 #[derive(Debug, thiserror::Error)]
@@ -42,6 +45,17 @@ impl SessionService {
     /// 获取指定会话详情信息。
     pub async fn get_session(&self, session_id: &str) -> Result<Option<Session>> {
         self.session_repository.get_by_id(session_id).await
+    }
+
+    /// 根据传递的会话 id 获取指定会话的文件列表信息。
+    pub async fn get_session_files(&self, session_id: &str) -> Result<Vec<File>> {
+        tracing::info!(session_id, "获取指定会话下的文件列表信息");
+        let session = self
+            .session_repository
+            .get_by_id(session_id)
+            .await?
+            .ok_or_else(|| anyhow!("当前会话不存在[{session_id}], 请核实后重试"))?;
+        Ok(session.files)
     }
 
     /// 清空指定会话未读消息数。

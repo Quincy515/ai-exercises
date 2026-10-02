@@ -22,7 +22,7 @@ use server::{
     app::App,
     domain::{
         models::{
-            DoneEvent, ErrorEvent, Event, FileToolContent, MessageEvent, PlanEvent, Session,
+            DoneEvent, ErrorEvent, Event, File, FileToolContent, MessageEvent, PlanEvent, Session,
             SessionStatus, StepEvent, TitleEvent, ToolContent, ToolEvent, ToolEventStatus,
             ToolResult, WaitEvent,
         },
@@ -497,13 +497,165 @@ async fn deletes_the_selected_session_and_reports_missing_on_repeat() -> Result<
 
 #[tokio::test]
 #[serial]
+async fn gets_all_session_files_in_saved_order_without_mutating_the_session() -> Result<()> {
+    let app = TestApp::new().await?;
+    let repository = app.repository();
+    // 文件列表直接读取会话保存的 Human/AI 附件，并保留同一路径的多个版本。
+    let files = vec![
+        File {
+            filename: "用户资料.txt".into(),
+            filepath: "/home/ubuntu/upload/用户资料.txt".into(),
+            key: "uploads/human-source.txt".into(),
+            extension: ".txt".into(),
+            mime_type: "text/plain".into(),
+            size: 128,
+            ..File::default()
+        },
+        File {
+            filename: "随机数.py".into(),
+            filepath: "/home/ubuntu/随机数.py".into(),
+            key: "outputs/first-version.py".into(),
+            extension: ".py".into(),
+            mime_type: "text/x-python".into(),
+            size: 64,
+            ..File::default()
+        },
+        File {
+            filename: "随机数.py".into(),
+            filepath: "/home/ubuntu/随机数.py".into(),
+            key: "outputs/second-version.py".into(),
+            extension: ".py".into(),
+            mime_type: "text/x-python".into(),
+            size: 256,
+            ..File::default()
+        },
+    ];
+    let session = Session {
+        files: files.clone(),
+        events: vec![Event::Message(MessageEvent::default())],
+        unread_message_count: 7,
+        status: SessionStatus::Running,
+        task_id: Some("保留任务".into()),
+        sandbox_id: Some("保留沙箱".into()),
+        ..Session::default()
+    };
+    repository.save(session.clone()).await?;
+    let before = repository.get_by_id(&session.id).await?.unwrap();
+    // Null cache 和缺失模型配置证明该接口独立于 Agent、Redis 和对象存储下载。
+    let response = app
+        .server
+        .get(&format!("/api/sessions/{}/files", session.id))
+        .await;
+    response.assert_status_ok();
+    assert_eq!(
+        response.json::<Value>(),
+        json!({
+            "code": 200, "msg": "获取会话文件列表成功", "data": {"files": files}
+        })
+    );
+    for file in response.json::<Value>()["data"]["files"]
+        .as_array()
+        .unwrap()
+    {
+        assert_eq!(file.as_object().unwrap().len(), 7);
+    }
+    assert_eq!(repository.get_by_id(&session.id).await?.unwrap(), before);
+
+    let blank = Session::default();
+    repository.save(blank.clone()).await?;
+    let response = app
+        .server
+        .get(&format!("/api/sessions/{}/files", blank.id))
+        .await;
+    response.assert_status_ok();
+    assert_eq!(
+        response.json::<Value>(),
+        json!({
+            "code": 200, "msg": "获取会话文件列表成功", "data": {"files": []}
+        })
+    );
+    let missing = app
+        .server
+        .get(&format!("/api/sessions/{}/files", uuid::Uuid::new_v4()))
+        .await;
+    missing.assert_status_internal_server_error();
+    assert_eq!(missing.json::<Value>()["error"], "internal_server_error");
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn stops_sessions_with_no_registered_task_and_preserves_their_data_on_repeat() -> Result<()> {
+    let app = TestApp::with_agent_config(true).await?;
+    let repository = app.repository();
+    for (status, task_id) in [
+        (SessionStatus::Pending, None),
+        (
+            SessionStatus::Running,
+            Some(uuid::Uuid::new_v4().to_string()),
+        ),
+        (
+            SessionStatus::Waiting,
+            Some(uuid::Uuid::new_v4().to_string()),
+        ),
+        (
+            SessionStatus::Completed,
+            Some(uuid::Uuid::new_v4().to_string()),
+        ),
+    ] {
+        let session = Session {
+            status,
+            task_id,
+            sandbox_id: Some("保留沙箱".into()),
+            title: "保留会话".into(),
+            unread_message_count: 3,
+            events: vec![Event::Title(TitleEvent::default())],
+            files: vec![File::default()],
+            ..Session::default()
+        };
+        repository.save(session.clone()).await?;
+        let before = repository.get_by_id(&session.id).await?.unwrap();
+        for _ in 0..2 {
+            // 无请求体；已释放的 Task 不触发任务重建，也不需要 Redis 网络连接。
+            let response = app
+                .server
+                .post(&format!("/api/sessions/{}/stop", session.id))
+                .await;
+            response.assert_status_ok();
+            assert_eq!(
+                response.json::<Value>(),
+                json!({
+                    "code": 200, "msg": "停止任务会话成功", "data": null
+                })
+            );
+            let actual = repository.get_by_id(&session.id).await?.unwrap();
+            let mut expected = before.clone();
+            expected.status = SessionStatus::Completed;
+            expected.updated_at = actual.updated_at;
+            assert_eq!(actual, expected);
+        }
+    }
+    let missing = app
+        .server
+        .post(&format!("/api/sessions/{}/stop", uuid::Uuid::new_v4()))
+        .await;
+    missing.assert_status_internal_server_error();
+    assert_eq!(missing.json::<Value>()["error"], "internal_server_error");
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
 async fn rejects_invalid_ids_and_keeps_database_failures_distinct_from_missing_sessions(
 ) -> Result<()> {
-    let app = TestApp::new().await?;
+    let app = TestApp::with_agent_config(true).await?;
     let invalid = app.server.get("/api/sessions/invalid").await;
     invalid.assert_status_bad_request();
     assert_eq!(invalid.json::<Value>()["error"], "session.invalid_id");
-    for action in ["delete", "clear-unread-message-count"] {
+    let invalid = app.server.get("/api/sessions/invalid/files").await;
+    invalid.assert_status_bad_request();
+    assert_eq!(invalid.json::<Value>()["error"], "session.invalid_id");
+    for action in ["delete", "clear-unread-message-count", "stop"] {
         let invalid = app
             .server
             .post(&format!("/api/sessions/invalid/{action}"))
@@ -527,6 +679,12 @@ async fn rejects_invalid_ids_and_keeps_database_failures_distinct_from_missing_s
         app.server.get("/api/sessions").await,
         app.server.get(&format!("/api/sessions/{missing}")).await,
         app.server
+            .get(&format!("/api/sessions/{missing}/files"))
+            .await,
+        app.server
+            .post(&format!("/api/sessions/{missing}/stop"))
+            .await,
+        app.server
             .post(&format!("/api/sessions/{missing}/delete"))
             .await,
         app.server
@@ -549,7 +707,7 @@ fn registers_management_operations_and_their_response_schemas() -> Result<()> {
     server::controllers::sessions::routes();
     let document = serde_json::to_value(server::openapi::document())?;
     let paths = &document["paths"];
-    assert_eq!(paths.as_object().unwrap().len(), 6);
+    assert_eq!(paths.as_object().unwrap().len(), 8);
     for (path, method) in [
         ("/api/sessions", "post"),
         ("/api/sessions", "get"),
@@ -559,6 +717,8 @@ fn registers_management_operations_and_their_response_schemas() -> Result<()> {
             "post",
         ),
         ("/api/sessions/{session_id}/delete", "post"),
+        ("/api/sessions/{session_id}/stop", "post"),
+        ("/api/sessions/{session_id}/files", "get"),
     ] {
         let operation = &paths[path][method];
         assert_eq!(operation["tags"], json!(["会话模块"]));
@@ -588,6 +748,28 @@ fn registers_management_operations_and_their_response_schemas() -> Result<()> {
         .get("text/event-stream")
         .is_some());
     assert!(stream.get("requestBody").is_none());
+    let stop = &paths["/api/sessions/{session_id}/stop"]["post"];
+    assert!(stop.get("requestBody").is_none());
+    assert!(stop["responses"].get("500").is_some());
+    assert_eq!(
+        stop["responses"]["200"]["content"]["application/json"]["schema"],
+        paths["/api/sessions/{session_id}/delete"]["post"]["responses"]["200"]["content"]
+            ["application/json"]["schema"]
+    );
+    let files = &document["components"]["schemas"]["GetSessionFilesResponse"]["properties"];
+    assert_eq!(files.as_object().unwrap().len(), 1);
+    assert_eq!(files["files"]["type"], "array");
+    assert_eq!(
+        files["files"]["items"]["$ref"],
+        "#/components/schemas/FileInfoResponse"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["FileInfoResponse"]["properties"]
+            .as_object()
+            .unwrap()
+            .len(),
+        7
+    );
     // 详情嵌套事件、计划、附件等响应结构，文档中的每个本地引用均应有定义。
     assert_schema_references_resolve(&document, &document);
     Ok(())

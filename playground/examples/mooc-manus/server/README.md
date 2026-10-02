@@ -158,3 +158,21 @@ cargo test --locked --test session_api --test agent_service --test event_respons
 
 接口测试使用私有数据库与随机 HTTP 端口，验证历史映射、查询错误、首帧、五秒间隔
 及数据库更新后的快照。流等待期间可以继续读写会话，断开请求后释放本次查询流。
+
+## 17-9：停止任务会话与读取会话文件
+
+```sh
+# session_id 使用已有会话 ID；停止请求无需 JSON 请求体
+curl -X POST "http://localhost:5150/api/sessions/$session_id/stop"
+
+# 读取人类上传和智能体生成的文件元数据
+curl "http://localhost:5150/api/sessions/$session_id/files"
+```
+
+停止接口查找并取消已有任务，然后将会话标记为 `completed`，成功响应的 `data` 为
+`null`。已有事件、文件和沙箱继续保留；无任务或重复停止时同样返回成功。运行中
+任务通过现有 Tokio 取消监督流程保存 `done`、结束聊天 SSE 并清理远程工具。
+
+文件列表响应为 `data: {"files": [...]}`，保留会话中的顺序和同路径版本，空列表为
+`[]`。本节两个新增服务的会话缺失错误按课程运行错误出口返回 500，UUID 格式错误
+沿用 400。接口测试覆盖真实 HTTP 停止、私有 Redis/PostgreSQL、Done 持久化及文件字段。

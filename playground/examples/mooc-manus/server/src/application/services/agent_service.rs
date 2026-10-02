@@ -126,6 +126,26 @@ impl AgentService {
         Ok(task)
     }
 
+    /// 根据传递的会话 id 停止指定会话。
+    pub async fn stop_session(&self, session_id: &str) -> Result<()> {
+        // 1.查找会话是否存在。
+        let session = self.session_repository.get_by_id(session_id).await?;
+        let Some(session) = session else {
+            tracing::error!(session_id, "尝试停止不存在的会话");
+            return Err(anyhow!("任务会话不存在, 请核实后重试"));
+        };
+
+        // 2.根据会话获取任务信息，有任务时发出取消请求。
+        if let Some(task) = self.get_task(&session)? {
+            task.cancel();
+        }
+
+        // 3.更新会话任务状态；任务已经结束或不在注册表中时同样标记完成。
+        self.session_repository
+            .update_status(session_id, SessionStatus::Completed)
+            .await
+    }
+
     /// 根据传递的信息调用 Agent 服务发起对话请求，逐个返回任务输出事件。
     pub fn chat(
         self,

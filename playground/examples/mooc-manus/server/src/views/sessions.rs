@@ -4,7 +4,7 @@ use utoipa::ToSchema;
 
 use crate::domain::models::{Session, SessionStatus};
 
-use super::events::AgentSseEvent;
+use super::{events::AgentSseEvent, files::FileInfoResponse};
 
 /// 聊天请求结构，四个字段均可省略或传入 null。
 #[derive(Debug, Deserialize, ToSchema)]
@@ -97,7 +97,14 @@ impl From<Session> for GetSessionResponse {
     }
 }
 
-/// 操作成功时的可选空对象；当前清除未读数和删除接口均返回 None。
+/// 获取会话文件列表响应结构，空白会话返回空列表。
+#[derive(Debug, Default, Serialize, ToSchema)]
+pub struct GetSessionFilesResponse {
+    /// 人类上传与智能体生成的文件信息。
+    pub files: Vec<FileInfoResponse>,
+}
+
+/// 操作成功时的可选空对象；清除未读数、删除和停止接口均返回 None。
 #[derive(Debug, Serialize, ToSchema)]
 pub struct EmptySessionData {}
 

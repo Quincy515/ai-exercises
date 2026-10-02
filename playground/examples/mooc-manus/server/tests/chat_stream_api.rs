@@ -7,7 +7,7 @@ mod redis_database;
 
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -182,6 +182,8 @@ struct GatedToolRunner {
     entered: Arc<Notify>,
     release: Arc<Notify>,
     resumed: AtomicBool,
+    cancelled: AtomicUsize,
+    completed: AtomicUsize,
 }
 
 impl GatedToolRunner {
@@ -236,7 +238,18 @@ impl TaskRunner for GatedToolRunner {
         Ok(())
     }
 
+    async fn on_cancel(&self, task: SharedTask) -> Result<()> {
+        // 真实任务监督协程确认取消后，再由运行器保存结束事件与会话状态。
+        self.cancelled.fetch_add(1, Ordering::SeqCst);
+        self.publish(&task, Event::Done(DoneEvent::default()))
+            .await?;
+        self.repository
+            .update_status(&self.session_id, SessionStatus::Completed)
+            .await
+    }
+
     async fn on_done(&self, _task: SharedTask) -> Result<()> {
+        self.completed.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -307,6 +320,8 @@ async fn chat_stream_delivers_calling_over_http_while_tool_is_blocked() -> Resul
         entered: Arc::new(Notify::new()),
         release: Arc::new(Notify::new()),
         resumed: AtomicBool::new(false),
+        cancelled: AtomicUsize::new(0),
+        completed: AtomicUsize::new(0),
     });
     let task = RegisteredTask(Arc::new(RedisStreamTask::new(
         runner.clone(),
@@ -394,6 +409,128 @@ async fn chat_stream_delivers_calling_over_http_while_tool_is_blocked() -> Resul
     }
     assert_eq!(stored.status, SessionStatus::Completed);
     assert_eq!(stored.unread_message_count, 0);
+    assert_eq!(runner.cancelled.load(Ordering::SeqCst), 0);
+    assert_eq!(runner.completed.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn stop_session_cancels_a_running_task_and_finishes_its_chat_stream() -> Result<()> {
+    let app = TestApp::with_http_transport(true).await?;
+    let repository = Arc::new(app.repository());
+    let mut session = Session {
+        status: SessionStatus::Running,
+        ..Session::default()
+    };
+    let runner = Arc::new(GatedToolRunner {
+        repository: repository.clone(),
+        session_id: session.id.clone(),
+        entered: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+        resumed: AtomicBool::new(false),
+        cancelled: AtomicUsize::new(0),
+        completed: AtomicUsize::new(0),
+    });
+    // 失败时只取消本测试注册的任务，门闩始终保持关闭。
+    let task = RegisteredTask(Arc::new(RedisStreamTask::new(
+        runner.clone(),
+        app.redis.client.get_multiplexed_async_connection().await?,
+    )?));
+    session.task_id = Some(task.0.id().to_owned());
+    repository.save(session.clone()).await?;
+
+    let client = reqwest::Client::new();
+    let chat_url = app
+        .server
+        .server_url(&format!("/api/sessions/{}/chat", session.id))?;
+    let mut response = timeout(
+        Duration::from_secs(5),
+        client
+            .post(chat_url)
+            .json(&json!({"message": MESSAGE}))
+            .send(),
+    )
+    .await
+    .context("聊天 SSE 应及时返回响应头")??;
+    ensure!(response.status().is_success());
+    ensure!(response.headers()["content-type"] == "text/event-stream");
+    timeout(Duration::from_secs(5), runner.entered.notified())
+        .await
+        .context("任务应保存 Calling 并阻塞在工具执行阶段")?;
+
+    let mut buffered = Vec::new();
+    let first_frame = timeout(
+        Duration::from_secs(5),
+        next_sse_frame(&mut response, &mut buffered),
+    )
+    .await
+    .context("客户端应在停止前收到 Calling")??;
+    let first = sse_events(&first_frame)?;
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].0, "tool");
+    assert_eq!(first[0].1["status"], "calling");
+    assert!(!task.0.done());
+    assert!(!runner.resumed.load(Ordering::SeqCst));
+    let before_stop = repository.get_by_id(&session.id).await?.unwrap();
+    assert_eq!(before_stop.status, SessionStatus::Running);
+    assert_eq!(before_stop.events.len(), 2);
+    let saved_calling = serde_json::to_value(AgentSseEvent::from(before_stop.events[1].clone()))?;
+    assert_eq!(first[0].1, saved_calling["data"]);
+
+    // 停止接口无需请求体，必须取消已有任务并返回统一响应。
+    let stop_url = app
+        .server
+        .server_url(&format!("/api/sessions/{}/stop", session.id))?;
+    let stop = timeout(Duration::from_secs(5), client.post(stop_url.clone()).send())
+        .await
+        .context("停止接口应及时响应")??;
+    assert_eq!(stop.status(), reqwest::StatusCode::OK);
+    let expected_response = json!({"code": 200, "msg": "停止任务会话成功", "data": null});
+    assert_eq!(stop.json::<Value>().await?, expected_response);
+
+    timeout(Duration::from_secs(5), async {
+        while let Some(chunk) = response.chunk().await? {
+            buffered.extend_from_slice(&chunk);
+        }
+        while !task.0.done() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("取消后应发出 Done、关闭 SSE 并完成监督协程")??;
+
+    let remaining = sse_events(std::str::from_utf8(&buffered)?)?;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].0, "done");
+    let stored = repository.get_by_id(&session.id).await?.unwrap();
+    assert_eq!(stored.status, SessionStatus::Completed);
+    assert_eq!(stored.events.len(), 3);
+    assert_eq!(&stored.events[..2], before_stop.events.as_slice());
+    let saved_done = serde_json::to_value(AgentSseEvent::from(stored.events[2].clone()))?;
+    assert_eq!(remaining[0].1, saved_done["data"]);
+    assert_eq!(stored.unread_message_count, 0);
+    assert_eq!(stored.task_id, session.task_id);
+    assert!(<RedisStreamTask as Task>::get(task.0.id())?.is_none());
+    assert!(!runner.resumed.load(Ordering::SeqCst));
+    assert_eq!(runner.cancelled.load(Ordering::SeqCst), 1);
+    assert_eq!(runner.completed.load(Ordering::SeqCst), 1);
+
+    // 已完成会话重复停止保持成功，历史结束事件和任务信息保持原值。
+    let repeated = timeout(Duration::from_secs(5), client.post(stop_url).send())
+        .await
+        .context("重复停止应直接返回成功")??;
+    assert_eq!(repeated.status(), reqwest::StatusCode::OK);
+    assert_eq!(repeated.json::<Value>().await?, expected_response);
+    let after_repeat = repository.get_by_id(&session.id).await?.unwrap();
+    assert_eq!(after_repeat.events, stored.events);
+    assert_eq!(after_repeat.task_id, stored.task_id);
+    assert_eq!(after_repeat.status, SessionStatus::Completed);
+    assert!(<RedisStreamTask as Task>::get(task.0.id())?.is_none());
+    assert!(!runner.resumed.load(Ordering::SeqCst));
+    assert_eq!(runner.cancelled.load(Ordering::SeqCst), 1);
+    assert_eq!(runner.completed.load(Ordering::SeqCst), 1);
     Ok(())
 }
 

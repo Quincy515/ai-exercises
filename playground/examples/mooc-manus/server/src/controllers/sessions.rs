@@ -18,8 +18,8 @@ use crate::{
     views::{
         events::AgentSseEvent,
         sessions::{
-            ChatRequest, CreateSessionResponse, EmptySessionData, GetSessionResponse,
-            ListSessionResponse, SessionResponse,
+            ChatRequest, CreateSessionResponse, EmptySessionData, GetSessionFilesResponse,
+            GetSessionResponse, ListSessionResponse, SessionResponse,
         },
     },
 };
@@ -264,6 +264,70 @@ pub async fn get_session(
     ))
 }
 
+/// 根据传递的指定会话 id 停止对应任务会话。
+#[utoipa::path(
+    post,
+    path = "/api/sessions/{session_id}/stop",
+    tag = "会话模块",
+    summary = "停止指定任务会话",
+    description = "查找并取消已有任务，将指定会话标记为已完成。",
+    params(("session_id" = String, Path, description = "会话业务 UUID")),
+    responses(
+        (status = 200, description = "停止任务会话成功", body = SessionResponse<Option<EmptySessionData>>),
+        (status = 400, description = "会话 UUID 无效"),
+        (status = 500, description = "服务初始化失败、会话不存在或停止失败")
+    )
+)]
+#[debug_handler]
+pub async fn stop_session(
+    State(ctx): State<AppContext>,
+    Path(session_id): Path<String>,
+) -> Result<Response> {
+    validate_session_id(&session_id)?;
+    get_agent_service(&ctx)
+        .await
+        .map_err(|error| AppError::internal("session.agent_init_failed", format!("{error:#}")))?
+        .stop_session(&session_id)
+        .await
+        .map_err(|error| map_session_error(error, "session.stop_failed"))?;
+    format::json(SessionResponse::success(
+        "停止任务会话成功",
+        None::<EmptySessionData>,
+    ))
+}
+
+/// 获取指定任务会话文件列表信息。
+#[utoipa::path(
+    get,
+    path = "/api/sessions/{session_id}/files",
+    tag = "会话模块",
+    summary = "获取指定任务会话文件列表信息",
+    description = "返回当前会话中人类上传与智能体生成的全部文件信息。",
+    params(("session_id" = String, Path, description = "会话业务 UUID")),
+    responses(
+        (status = 200, description = "获取会话文件列表成功", body = SessionResponse<GetSessionFilesResponse>),
+        (status = 400, description = "会话 UUID 无效"),
+        (status = 500, description = "会话不存在或文件列表读取失败")
+    )
+)]
+#[debug_handler]
+pub async fn get_session_files(
+    State(ctx): State<AppContext>,
+    Path(session_id): Path<String>,
+) -> Result<Response> {
+    validate_session_id(&session_id)?;
+    let files = get_session_service(&ctx)
+        .get_session_files(&session_id)
+        .await
+        .map_err(|error| map_session_error(error, "session.files_failed"))?;
+    format::json(SessionResponse::success(
+        "获取会话文件列表成功",
+        GetSessionFilesResponse {
+            files: files.into_iter().map(Into::into).collect(),
+        },
+    ))
+}
+
 fn encode_sse_event(
     event: crate::domain::models::Event,
 ) -> std::result::Result<SseEvent, axum::Error> {
@@ -330,4 +394,12 @@ pub fn routes() -> Routes {
             openapi(post(delete_session), routes!(delete_session)),
         )
         .add("/{session_id}/chat", openapi(post(chat), routes!(chat)))
+        .add(
+            "/{session_id}/stop",
+            openapi(post(stop_session), routes!(stop_session)),
+        )
+        .add(
+            "/{session_id}/files",
+            openapi(get(get_session_files), routes!(get_session_files)),
+        )
 }
