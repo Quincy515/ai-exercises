@@ -12,14 +12,18 @@ use futures::{stream, StreamExt};
 use loco_rs::prelude::*;
 
 use crate::{
-    application::{error::AppError, services::session_service::SessionNotFound},
+    application::{
+        error::AppError,
+        services::session_service::{SessionNotFound, SessionSandboxError},
+    },
     interfaces::service_dependencies::{get_agent_service, get_session_service},
     openapi::{openapi, routes},
     views::{
         events::AgentSseEvent,
         sessions::{
-            ChatRequest, CreateSessionResponse, EmptySessionData, GetSessionFilesResponse,
-            GetSessionResponse, ListSessionResponse, SessionResponse,
+            ChatRequest, CreateSessionResponse, EmptySessionData, FileReadRequest,
+            FileReadResponse, GetSessionFilesResponse, GetSessionResponse, ListSessionResponse,
+            SessionResponse, ShellReadRequest, ShellReadResponse,
         },
     },
 };
@@ -41,7 +45,7 @@ const SESSION_SLEEP_INTERVAL: Duration = Duration::from_secs(5);
 )]
 #[debug_handler]
 pub async fn create_session(State(ctx): State<AppContext>) -> Result<Response> {
-    let session = get_session_service(&ctx)
+    let session = get_session_service(&ctx)?
         .create_session()
         .await
         .map_err(|error| map_session_error(error, "session.create_failed"))?;
@@ -66,7 +70,7 @@ pub async fn create_session(State(ctx): State<AppContext>) -> Result<Response> {
 )]
 #[debug_handler]
 pub async fn stream_sessions(State(ctx): State<AppContext>) -> Result<Response> {
-    let service = get_session_service(&ctx);
+    let service = get_session_service(&ctx)?;
     // 定义事件生成器：首轮立即读取，后续在上次事件交付后等待五秒。
     // 请求断开时生成器被丢弃，数据库查询结束后再等待，不持有长事务。
     let events = stream::try_unfold((service, false), |(service, should_sleep)| async move {
@@ -101,7 +105,7 @@ pub async fn stream_sessions(State(ctx): State<AppContext>) -> Result<Response> 
 )]
 #[debug_handler]
 pub async fn get_all_sessions(State(ctx): State<AppContext>) -> Result<Response> {
-    let sessions = get_session_service(&ctx)
+    let sessions = get_session_service(&ctx)?
         .get_all_sessions()
         .await
         .map_err(|error| map_session_error(error, "session.list_failed"))?;
@@ -134,7 +138,7 @@ pub async fn clear_unread_message_count(
     Path(session_id): Path<String>,
 ) -> Result<Response> {
     validate_session_id(&session_id)?;
-    get_session_service(&ctx)
+    get_session_service(&ctx)?
         .clear_unread_message_count(&session_id)
         .await
         .map_err(|error| map_session_error(error, "session.clear_unread_failed"))?;
@@ -165,7 +169,7 @@ pub async fn delete_session(
     Path(session_id): Path<String>,
 ) -> Result<Response> {
     validate_session_id(&session_id)?;
-    get_session_service(&ctx)
+    get_session_service(&ctx)?
         .delete_session(&session_id)
         .await
         .map_err(|error| map_session_error(error, "session.delete_failed"))?;
@@ -246,7 +250,7 @@ pub async fn get_session(
     Path(session_id): Path<String>,
 ) -> Result<Response> {
     validate_session_id(&session_id)?;
-    let session = get_session_service(&ctx)
+    let session = get_session_service(&ctx)?
         .get_session(&session_id)
         .await
         .map_err(|error| map_session_error(error, "session.get_failed"))?
@@ -316,7 +320,7 @@ pub async fn get_session_files(
     Path(session_id): Path<String>,
 ) -> Result<Response> {
     validate_session_id(&session_id)?;
-    let files = get_session_service(&ctx)
+    let files = get_session_service(&ctx)?
         .get_session_files(&session_id)
         .await
         .map_err(|error| map_session_error(error, "session.files_failed"))?;
@@ -325,6 +329,81 @@ pub async fn get_session_files(
         GetSessionFilesResponse {
             files: files.into_iter().map(Into::into).collect(),
         },
+    ))
+}
+
+/// 根据传递的会话 id + 文件路径查看沙箱中文件的内容信息。
+#[utoipa::path(
+    post,
+    path = "/api/sessions/{session_id}/file",
+    tag = "会话模块",
+    summary = "查看会话沙箱中指定文件的内容",
+    description = "根据传递的会话 id 与文件路径查看沙箱中文件的内容信息。",
+    params(("session_id" = String, Path, description = "会话业务 UUID")),
+    request_body = FileReadRequest,
+    responses(
+        (status = 200, description = "获取会话文件内容成功", body = SessionResponse<FileReadResponse>),
+        (status = 400, description = "会话 UUID 无效或 JSON 格式错误"),
+        (status = 404, description = "当前会话无沙箱或沙箱已销毁"),
+        (status = 422, description = "请求字段缺失或类型错误"),
+        (status = 500, description = "会话不存在、沙箱读取失败或响应格式错误")
+    )
+)]
+#[debug_handler]
+pub async fn read_file(
+    State(ctx): State<AppContext>,
+    Path(session_id): Path<String>,
+    Json(request): Json<FileReadRequest>,
+) -> Result<Response> {
+    validate_session_id(&session_id)?;
+    let content = get_session_service(&ctx)?
+        .read_file(&session_id, &request.filepath)
+        .await
+        .map_err(|error| map_session_error(error, "session.file_read_failed"))?;
+    // 当前沙箱原样回显请求路径，适配器已从结果中提取文件文本。
+    format::json(SessionResponse::success(
+        "获取会话文件内容成功",
+        FileReadResponse {
+            filepath: request.filepath,
+            content,
+        },
+    ))
+}
+
+/// 查看会话的 Shell 内容输出。
+#[utoipa::path(
+    post,
+    path = "/api/sessions/{session_id}/shell",
+    tag = "会话模块",
+    summary = "查看会话的 Shell 内容输出",
+    description = "传递指定任务会话 id 与 Shell 会话标识，查看输出和控制台记录。",
+    params(("session_id" = String, Path, description = "任务会话业务 UUID，与请求体中的 Shell 会话 id 分开")),
+    request_body = ShellReadRequest,
+    responses(
+        (status = 200, description = "获取 Shell 内容输出结果成功", body = SessionResponse<ShellReadResponse>),
+        (status = 400, description = "会话 UUID 无效或 JSON 格式错误"),
+        (status = 404, description = "当前会话无沙箱或沙箱已销毁"),
+        (status = 422, description = "请求字段缺失或类型错误"),
+        (status = 500, description = "会话不存在、沙箱读取失败或响应格式错误")
+    )
+)]
+#[debug_handler]
+pub async fn read_shell_output(
+    State(ctx): State<AppContext>,
+    Path(session_id): Path<String>,
+    Json(request): Json<ShellReadRequest>,
+) -> Result<Response> {
+    validate_session_id(&session_id)?;
+    let data = get_session_service(&ctx)?
+        .read_shell_output(&session_id, &request.session_id)
+        .await
+        .map_err(|error| map_session_error(error, "session.shell_read_failed"))?;
+    // 只保留约定的响应字段；缺失控制台记录时使用空列表。
+    let response: ShellReadResponse = serde_json::from_str(&data)
+        .map_err(|error| AppError::internal("session.shell_response_invalid", error.to_string()))?;
+    format::json(SessionResponse::success(
+        "获取Shell内容输出结果成功",
+        response,
     ))
 }
 
@@ -352,7 +431,18 @@ fn validate_session_id(session_id: &str) -> std::result::Result<(), AppError> {
 }
 
 fn map_session_error(error: anyhow::Error, code: &'static str) -> AppError {
-    if error.is::<SessionNotFound>() {
+    if let Some(sandbox_error) = error.downcast_ref::<SessionSandboxError>() {
+        let (status, code) = match sandbox_error {
+            SessionSandboxError::Unassigned | SessionSandboxError::Unavailable => {
+                (StatusCode::NOT_FOUND, "session.sandbox_not_found")
+            }
+            SessionSandboxError::RequestFailed(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "session.sandbox_request_failed",
+            ),
+        };
+        AppError::business(status, code, error.to_string(), None)
+    } else if error.is::<SessionNotFound>() {
         AppError::business(
             StatusCode::NOT_FOUND,
             "session.not_found",
@@ -402,4 +492,50 @@ pub fn routes() -> Routes {
             "/{session_id}/files",
             openapi(get(get_session_files), routes!(get_session_files)),
         )
+        .add(
+            "/{session_id}/file",
+            openapi(post(read_file), routes!(read_file)),
+        )
+        .add(
+            "/{session_id}/shell",
+            openapi(post(read_shell_output), routes!(read_shell_output)),
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{map_session_error, SessionSandboxError, StatusCode};
+    use loco_rs::Error;
+
+    #[test]
+    fn sandbox_business_errors_keep_their_status_and_message() {
+        for (error, status, code, message) in [
+            (
+                SessionSandboxError::Unassigned,
+                StatusCode::NOT_FOUND,
+                "session.sandbox_not_found",
+                "当前会话无沙箱环境",
+            ),
+            (
+                SessionSandboxError::Unavailable,
+                StatusCode::NOT_FOUND,
+                "session.sandbox_not_found",
+                "当前会话沙箱不存在或已销毁",
+            ),
+            (
+                SessionSandboxError::RequestFailed("文件读取失败".into()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "session.sandbox_request_failed",
+                "文件读取失败",
+            ),
+        ] {
+            let error: Error = map_session_error(error.into(), "session.read_failed").into();
+            let Error::CustomError(actual_status, detail) = error else {
+                panic!("预期业务错误响应");
+            };
+            assert_eq!(actual_status, status);
+            assert_eq!(detail.error.as_deref(), Some(code));
+            assert_eq!(detail.description.as_deref(), Some(message));
+        }
+    }
 }

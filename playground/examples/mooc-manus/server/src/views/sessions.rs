@@ -104,6 +104,43 @@ pub struct GetSessionFilesResponse {
     pub files: Vec<FileInfoResponse>,
 }
 
+/// 需要读取的沙箱文件请求结构。
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct FileReadRequest {
+    pub filepath: String,
+}
+
+/// 需要读取的沙箱文件响应结构体。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FileReadResponse {
+    pub filepath: String,
+    pub content: String,
+}
+
+/// 需要读取的沙箱 Shell 请求结构体。
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ShellReadRequest {
+    /// Shell 会话 id，与 URL 中的任务会话 id 分别传递。
+    pub session_id: String,
+}
+
+/// 控制台记录模型，包含 ps1、command、output。
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct ConsoleRecord {
+    pub ps1: String,
+    pub command: String,
+    pub output: String,
+}
+
+/// 需要读取的沙箱 Shell 响应结构体。
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct ShellReadResponse {
+    pub session_id: String,
+    pub output: String,
+    #[serde(default)]
+    pub console_records: Vec<ConsoleRecord>,
+}
+
 /// 操作成功时的可选空对象；清除未读数、删除和停止接口均返回 None。
 #[derive(Debug, Serialize, ToSchema)]
 pub struct EmptySessionData {}
@@ -130,8 +167,63 @@ impl<T> SessionResponse<T> {
 mod tests {
     use serde_json::json;
 
-    use super::{ChatRequest, EmptySessionData, ListSessionItem, SessionResponse};
+    use super::{
+        ChatRequest, EmptySessionData, FileReadResponse, ListSessionItem, SessionResponse,
+        ShellReadResponse,
+    };
     use crate::domain::models::{Session, SessionStatus};
+
+    #[test]
+    fn sandbox_read_responses_preserve_content_and_project_declared_fields() {
+        assert_eq!(
+            serde_json::to_value(SessionResponse::success(
+                "获取会话文件内容成功",
+                FileReadResponse {
+                    filepath: "/home/ubuntu/示例.txt".into(),
+                    content: "第一行\n第二行\n".into(),
+                },
+            ))
+            .unwrap(),
+            json!({
+                "code": 200, "msg": "获取会话文件内容成功",
+                "data": {"filepath": "/home/ubuntu/示例.txt", "content": "第一行\n第二行\n"}
+            })
+        );
+        let data = json!({
+            "session_id": "manus-shell", "output": "你好\n",
+            "console_records": [
+                {"ps1": "ubuntu $", "command": "echo 你好", "output": "你好\n", "extra": true}
+            ],
+            "extra": "沙箱内部字段"
+        });
+        let response: ShellReadResponse = serde_json::from_value(data).unwrap();
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            json!({
+                "session_id": "manus-shell", "output": "你好\n",
+                "console_records": [{"ps1": "ubuntu $", "command": "echo 你好", "output": "你好\n"}]
+            })
+        );
+        let empty: ShellReadResponse =
+            serde_json::from_str(r#"{"session_id":"manus-shell","output":""}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(empty).unwrap()["console_records"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn malformed_shell_payloads_fail_instead_of_becoming_successful_empty_output() {
+        for data in [
+            json!({}),
+            json!({"session_id": "shell"}),
+            json!({"session_id": "shell", "output": null}),
+            json!({"session_id": "shell", "output": "", "console_records": null}),
+            json!({"session_id": "shell", "output": "", "console_records": [{}]}),
+        ] {
+            assert!(serde_json::from_value::<ShellReadResponse>(data).is_err());
+        }
+    }
 
     #[test]
     fn chat_request_accepts_optional_fields_and_preserves_values() {

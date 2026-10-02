@@ -585,6 +585,85 @@ async fn gets_all_session_files_in_saved_order_without_mutating_the_session() ->
 
 #[tokio::test]
 #[serial]
+async fn sandbox_content_routes_validate_requests_and_preserve_sessions_without_sandboxes(
+) -> Result<()> {
+    let app = TestApp::new().await?;
+    let repository = app.repository();
+
+    // 任务会话路径使用 UUID；Shell 会话标识是沙箱内部的任意字符串。
+    for sandbox_id in [None, Some(String::new())] {
+        let session = Session {
+            sandbox_id,
+            status: SessionStatus::Running,
+            unread_message_count: 3,
+            events: vec![Event::Title(TitleEvent::default())],
+            files: vec![File::default()],
+            ..Session::default()
+        };
+        repository.save(session.clone()).await?;
+        let before = repository.get_by_id(&session.id).await?.unwrap();
+        for (action, body) in [
+            ("file", json!({"filepath": "/home/ubuntu/结果.txt"})),
+            ("shell", json!({"session_id": "manus-shell"})),
+            ("shell", json!({"session_id": ""})),
+        ] {
+            // 缺少沙箱时直接返回404，避免访问 Docker 或固定端口服务。
+            let response = app
+                .server
+                .post(&format!("/api/sessions/{}/{action}", session.id))
+                .json(&body)
+                .await;
+            response.assert_status_not_found();
+            assert_eq!(
+                response.json::<Value>()["error"],
+                "session.sandbox_not_found"
+            );
+            assert_eq!(
+                response.json::<Value>()["description"],
+                "当前会话无沙箱环境"
+            );
+            assert_eq!(repository.get_by_id(&session.id).await?.unwrap(), before);
+        }
+    }
+
+    let missing = uuid::Uuid::new_v4();
+    for (action, field, valid_body) in [
+        (
+            "file",
+            "filepath",
+            json!({"filepath": "/home/ubuntu/result.txt"}),
+        ),
+        ("shell", "session_id", json!({"session_id": "manus-shell"})),
+    ] {
+        let response = app
+            .server
+            .post(&format!("/api/sessions/invalid/{action}"))
+            .json(&valid_body)
+            .await;
+        response.assert_status_bad_request();
+        assert_eq!(response.json::<Value>()["error"], "session.invalid_id");
+
+        let url = format!("/api/sessions/{missing}/{action}");
+        let response = app.server.post(&url).json(&valid_body).await;
+        response.assert_status_internal_server_error();
+        assert_eq!(response.json::<Value>()["error"], "internal_server_error");
+
+        // Json 提取器在进入服务前拒绝缺字段、null 和错误类型。
+        for body in [
+            json!({}),
+            json!({(field): null}),
+            json!({(field): 1}),
+            json!({(field): []}),
+        ] {
+            let response = app.server.post(&url).json(&body).await;
+            assert_eq!(response.status_code(), 422);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
 async fn stops_sessions_with_no_registered_task_and_preserves_their_data_on_repeat() -> Result<()> {
     let app = TestApp::with_agent_config(true).await?;
     let repository = app.repository();
@@ -685,6 +764,14 @@ async fn rejects_invalid_ids_and_keeps_database_failures_distinct_from_missing_s
             .post(&format!("/api/sessions/{missing}/stop"))
             .await,
         app.server
+            .post(&format!("/api/sessions/{missing}/file"))
+            .json(&json!({"filepath": "/home/ubuntu/result.txt"}))
+            .await,
+        app.server
+            .post(&format!("/api/sessions/{missing}/shell"))
+            .json(&json!({"session_id": "manus-shell"}))
+            .await,
+        app.server
             .post(&format!("/api/sessions/{missing}/delete"))
             .await,
         app.server
@@ -707,7 +794,7 @@ fn registers_management_operations_and_their_response_schemas() -> Result<()> {
     server::controllers::sessions::routes();
     let document = serde_json::to_value(server::openapi::document())?;
     let paths = &document["paths"];
-    assert_eq!(paths.as_object().unwrap().len(), 8);
+    assert_eq!(paths.as_object().unwrap().len(), 10);
     for (path, method) in [
         ("/api/sessions", "post"),
         ("/api/sessions", "get"),
@@ -719,6 +806,8 @@ fn registers_management_operations_and_their_response_schemas() -> Result<()> {
         ("/api/sessions/{session_id}/delete", "post"),
         ("/api/sessions/{session_id}/stop", "post"),
         ("/api/sessions/{session_id}/files", "get"),
+        ("/api/sessions/{session_id}/file", "post"),
+        ("/api/sessions/{session_id}/shell", "post"),
     ] {
         let operation = &paths[path][method];
         assert_eq!(operation["tags"], json!(["会话模块"]));
@@ -771,6 +860,89 @@ fn registers_management_operations_and_their_response_schemas() -> Result<()> {
         7
     );
     // 详情嵌套事件、计划、附件等响应结构，文档中的每个本地引用均应有定义。
+    assert_schema_references_resolve(&document, &document);
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn documents_sandbox_read_requests_and_typed_content_responses() -> Result<()> {
+    server::openapi::clear_routes();
+    server::controllers::sessions::routes();
+    let document = serde_json::to_value(server::openapi::document())?;
+    // Utoipa 在泛型响应包裹中内联 data，按最终文档验证实际载荷结构。
+    let response_schema = |action: &str| {
+        let path = format!("/api/sessions/{{session_id}}/{action}");
+        let reference = document["paths"][&path]["post"]["responses"]["200"]["content"]
+            ["application/json"]["schema"]["$ref"]
+            .as_str()
+            .unwrap();
+        &document.pointer(&reference[1..]).unwrap()["properties"]["data"]
+    };
+    for (action, request_name, request_field, response_fields) in [
+        (
+            "file",
+            "FileReadRequest",
+            "filepath",
+            vec!["filepath", "content"],
+        ),
+        (
+            "shell",
+            "ShellReadRequest",
+            "session_id",
+            vec!["session_id", "output", "console_records"],
+        ),
+    ] {
+        let path = format!("/api/sessions/{{session_id}}/{action}");
+        let operation = &document["paths"][&path]["post"];
+        assert_eq!(operation["tags"], json!(["会话模块"]));
+        assert_eq!(operation["requestBody"]["required"], true);
+        assert_eq!(
+            operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            format!("#/components/schemas/{request_name}")
+        );
+        let request = &document["components"]["schemas"][request_name];
+        assert_eq!(request["properties"].as_object().unwrap().len(), 1);
+        assert_eq!(request["required"], json!([request_field]));
+        assert_eq!(request["properties"][request_field]["type"], "string");
+        // Body 中的 Shell session_id 保持普通字符串；路径参数明确表示任务会话。
+        assert!(request["properties"][request_field].get("format").is_none());
+        assert!(operation["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|parameter| parameter["name"] == "session_id"
+                && parameter["in"] == "path"
+                && parameter["required"] == true));
+        for status in ["400", "404", "422", "500"] {
+            assert!(operation["responses"].get(status).is_some());
+        }
+
+        let response = response_schema(action);
+        assert_eq!(
+            response["properties"].as_object().unwrap().len(),
+            response_fields.len()
+        );
+        for field in response_fields {
+            assert!(response["properties"].get(field).is_some());
+        }
+    }
+
+    let file = response_schema("file");
+    assert_eq!(file["required"], json!(["filepath", "content"]));
+    let shell = response_schema("shell");
+    assert_eq!(shell["required"], json!(["session_id", "output"]));
+    // console_records 可省略，反序列化时使用空列表，记录中的三个文本字段均必填。
+    assert_eq!(shell["properties"]["console_records"]["type"], "array");
+    let record_reference = shell["properties"]["console_records"]["items"]["$ref"]
+        .as_str()
+        .unwrap();
+    let record = document.pointer(&record_reference[1..]).unwrap();
+    assert_eq!(record["required"], json!(["ps1", "command", "output"]));
+    assert_eq!(record["properties"].as_object().unwrap().len(), 3);
+    for field in ["ps1", "command", "output"] {
+        assert_eq!(record["properties"][field]["type"], "string");
+    }
     assert_schema_references_resolve(&document, &document);
     Ok(())
 }

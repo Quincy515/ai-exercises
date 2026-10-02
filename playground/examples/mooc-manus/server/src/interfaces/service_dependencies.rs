@@ -61,8 +61,12 @@ pub async fn get_agent_service(ctx: &AppContext) -> Result<AgentService> {
 }
 
 /// 获取会话服务，复用应用上下文的数据库连接池。
-pub fn get_session_service(ctx: &AppContext) -> SessionService {
-    SessionService::new(Arc::new(get_db_session_repository(ctx)))
+pub fn get_session_service(ctx: &AppContext) -> loco_rs::Result<SessionService> {
+    let settings = AppSettings::from_config(&ctx.config)?;
+    Ok(SessionService::new(
+        Arc::new(get_db_session_repository(ctx)),
+        Arc::new(DockerSandboxFactory::new(settings.sandbox)),
+    ))
 }
 
 /// 获取文件存储桶，复用 Loco 的存储驱动和数据库连接池。

@@ -176,3 +176,27 @@ curl "http://localhost:5150/api/sessions/$session_id/files"
 文件列表响应为 `data: {"files": [...]}`，保留会话中的顺序和同路径版本，空列表为
 `[]`。本节两个新增服务的会话缺失错误按课程运行错误出口返回 500，UUID 格式错误
 沿用 400。接口测试覆盖真实 HTTP 停止、私有 Redis/PostgreSQL、Done 持久化及文件字段。
+
+## 17-10：查看沙箱文件与 Shell 内容
+
+```sh
+# URL 使用任务会话 UUID；文件路径来自工具事件或会话文件列表
+curl -X POST "http://localhost:5150/api/sessions/$session_id/file" \
+  -H 'Content-Type: application/json' \
+  -d '{"filepath":"/home/ubuntu/bubble_sort.py"}'
+
+# 请求体中的 session_id 是 Shell 标识，如 manus-shell
+curl -X POST "http://localhost:5150/api/sessions/$session_id/shell" \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"manus-shell"}'
+```
+
+文件响应的 `data` 为 `{filepath, content}`；沿用沙箱默认的 10000 字符读取上限。
+Shell 响应为 `{session_id, output, console_records}`，记录包含 `ps1/command/output`，
+缺省记录为 `[]`。两个接口只读取已关联沙箱，保持会话状态、历史和文件记录。
+会话缺失返回 500，无沙箱或沙箱已销毁返回 404，沙箱返回读取失败时以 500 传递提示。
+UUID 格式错误返回 400，请求字段缺失或类型错误返回 422。
+
+```sh
+cargo test --locked --lib --test session_service --test session_api --test agent_service --test chat_stream_api --test event_response
+```

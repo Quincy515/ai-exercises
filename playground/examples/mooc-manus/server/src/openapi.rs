@@ -50,7 +50,7 @@ pub fn document() -> OpenApiDocument {
         (name = "认证", description = "认证相关接口"),
         (name = "状态模块", description = "包含 **状态监测** 等 API 接口，用于监测系统的运行状态"),
         (name = "文件模块", description = "文件上传、基础信息查询与流式下载"),
-        (name = "会话模块", description = "创建、查询、停止、删除任务会话，读取会话文件与清除未读消息数"),
+        (name = "会话模块", description = "创建、查询、停止、删除任务会话，读取会话文件、沙箱文件与 Shell 输出，清除未读消息数"),
         (name = "设置模块", description = "应用配置信息，包含 **Agent** 配置、**LLM** 提供商配置、**A2A** 网络配置、**MCP** 服务配置等"),
     )
 )]
