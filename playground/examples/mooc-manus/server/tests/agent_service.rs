@@ -471,11 +471,17 @@ async fn running_sessions_reuse_existing_tasks() -> Result<()> {
         ..Session::default()
     };
     fixture.repository.save(session.clone()).await?;
+    let before_message = Utc::now();
     assert!(fixture.chat(&session, Some("继续任务")).await.is_empty());
+    let after_message = Utc::now();
     let saved = fixture.repository.get_by_id(&session.id).await?.unwrap();
     assert_eq!(saved.task_id, session.task_id);
     assert_eq!(saved.status, SessionStatus::Running);
     assert_eq!(saved.latest_message, "继续任务");
+    // 请求省略 timestamp 时，最新消息使用服务端接收本次消息时的时间。
+    let saved_time = saved.latest_message_at.unwrap();
+    assert!(saved_time.timestamp_micros() >= before_message.timestamp_micros());
+    assert!(saved_time.timestamp_micros() <= after_message.timestamp_micros());
     assert!(matches!(saved.events.as_slice(), [Event::Message(event)]
         if event.role == MessageRole::User && event.message == "继续任务"));
     let task = fixture.tasks.task("existing-task");

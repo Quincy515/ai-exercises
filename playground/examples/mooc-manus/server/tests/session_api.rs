@@ -3,7 +3,9 @@
 #[path = "support/file_database.rs"]
 mod file_database;
 
-use anyhow::{ensure, Result};
+use std::time::Duration;
+
+use anyhow::{ensure, Context, Result};
 use axum::Router;
 use axum_test::TestServer;
 use chrono::{TimeZone, Utc};
@@ -19,11 +21,17 @@ use serial_test::serial;
 use server::{
     app::App,
     domain::{
-        models::{Event, Session, SessionStatus, TitleEvent},
+        models::{
+            DoneEvent, ErrorEvent, Event, FileToolContent, MessageEvent, PlanEvent, Session,
+            SessionStatus, StepEvent, TitleEvent, ToolContent, ToolEvent, ToolEventStatus,
+            ToolResult, WaitEvent,
+        },
         repositories::SessionRepository,
     },
     infrastructure::repositories::SeaOrmSessionRepository,
+    views::events::AgentSseEvent,
 };
+use tokio::time::{timeout, timeout_at, Instant};
 
 struct TestApp {
     server: TestServer,
@@ -36,6 +44,10 @@ impl TestApp {
     }
 
     async fn with_agent_config(agent_configured: bool) -> Result<Self> {
+        Self::with_transport(agent_configured, false).await
+    }
+
+    async fn with_transport(agent_configured: bool, http_transport: bool) -> Result<Self> {
         let database = file_database::TestDatabase::new().await?;
         // 复用已有临时实例，在它的私有数据库内执行实际会话表迁移。
         let manager = SchemaManager::new(&database.db);
@@ -92,10 +104,13 @@ impl TestApp {
         let ctx = AppContext::builder(Environment::Test, database.db.clone(), config).build();
         // 通过真实应用路由覆盖依赖注入、控制器、服务及仓库的完整链路。
         let router = App::routes(&ctx).to_router::<App>(ctx, Router::new())?;
-        Ok(Self {
-            server: TestServer::new(router)?,
-            database,
-        })
+        let server = if http_transport {
+            // 随机监听端口，客户端按帧读取持续推送的会话列表。
+            TestServer::builder().http_transport().build(router)?
+        } else {
+            TestServer::new(router)?
+        };
+        Ok(Self { server, database })
     }
 
     fn repository(&self) -> SeaOrmSessionRepository {
@@ -175,6 +190,221 @@ async fn creates_blank_sessions_and_lists_only_basic_information() -> Result<()>
         })
     );
     assert_eq!(items[1]["session_id"], id);
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn gets_session_details_with_ordered_events_without_changing_the_session() -> Result<()> {
+    let app = TestApp::new().await?;
+    let repository = app.repository();
+    let session = Session {
+        title: "已保存的会话历史".into(),
+        unread_message_count: 7,
+        status: SessionStatus::Waiting,
+        sandbox_id: Some("保留沙箱".into()),
+        task_id: Some("保留任务".into()),
+        events: vec![
+            Event::Title(TitleEvent {
+                title: "读取文件".into(),
+                ..TitleEvent::default()
+            }),
+            Event::Message(MessageEvent {
+                message: "已经读取文件".into(),
+                ..MessageEvent::default()
+            }),
+            Event::Plan(PlanEvent::default()),
+            Event::Step(StepEvent::default()),
+            Event::Tool(ToolEvent {
+                tool_name: "file".into(),
+                function_name: "file_read".into(),
+                status: ToolEventStatus::Called,
+                tool_content: Some(ToolContent::File(FileToolContent {
+                    content: "调用时的文件快照".into(),
+                })),
+                function_result: Some(ToolResult {
+                    data: Some(json!({"internal": "原始工具结果保留在数据库"})),
+                    ..ToolResult::default()
+                }),
+                ..ToolEvent::default()
+            }),
+            Event::Wait(WaitEvent::default()),
+            Event::Error(ErrorEvent::default()),
+            Event::Done(DoneEvent::default()),
+        ],
+        ..Session::default()
+    };
+    repository.save(session.clone()).await?;
+    let before = repository.get_by_id(&session.id).await?.unwrap();
+
+    // Null cache 且没有模型配置：读取详情仅查询历史，不构建或启动 Agent 任务。
+    let response = app
+        .server
+        .get(&format!("/api/sessions/{}", session.id))
+        .await;
+    response.assert_status_ok();
+    let body: Value = response.json();
+    assert_eq!(
+        body,
+        json!({
+            "code": 200,
+            "msg": "获取会话详情成功",
+            "data": {
+                "session_id": session.id,
+                "title": session.title,
+                "status": "waiting",
+                "events": AgentSseEvent::from_events(before.events.clone())
+            }
+        })
+    );
+    assert_eq!(
+        body["data"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["event"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["title", "message", "plan", "step", "tool", "wait", "error", "done"]
+    );
+    assert_eq!(
+        body["data"]["events"][4]["data"]["content"],
+        json!({"content": "调用时的文件快照"})
+    );
+    assert!(!response.text().contains("原始工具结果保留在数据库"));
+    // 查看详情保留未读数及全部原始数据，复用聊天流的公开事件格式。
+    assert_eq!(repository.get_by_id(&session.id).await?.unwrap(), before);
+
+    let blank = Session::default();
+    repository.save(blank.clone()).await?;
+    let response = app.server.get(&format!("/api/sessions/{}", blank.id)).await;
+    response.assert_status_ok();
+    assert_eq!(response.json::<Value>()["data"]["events"], json!([]));
+
+    let missing = app
+        .server
+        .get(&format!("/api/sessions/{}", uuid::Uuid::new_v4()))
+        .await;
+    missing.assert_status_not_found();
+    assert_eq!(missing.json::<Value>()["error"], "session.not_found");
+    assert_eq!(
+        missing.json::<Value>()["description"],
+        "该会话不存在，请核实后重试"
+    );
+    Ok(())
+}
+
+/// 以完整 SSE 帧为单位解码，避免 TCP 分块截断中文字符或无限等待整个响应。
+async fn next_sessions_frame(
+    response: &mut reqwest::Response,
+    buffered: &mut Vec<u8>,
+) -> Result<Value> {
+    loop {
+        if let Some(end) = buffered.windows(2).position(|bytes| bytes == b"\n\n") {
+            let frame = String::from_utf8(buffered.drain(..end + 2).collect())?;
+            let event = frame
+                .lines()
+                .find_map(|line| line.strip_prefix("event:"))
+                .context("会话列表 SSE 缺少事件名")?;
+            ensure!(event.trim() == "sessions", "会话列表事件名应为 sessions");
+            let data = frame
+                .lines()
+                .find_map(|line| line.strip_prefix("data:"))
+                .context("会话列表 SSE 缺少数据")?;
+            return Ok(serde_json::from_str(data)?);
+        }
+        let chunk = response.chunk().await?.context("会话列表流提前结束")?;
+        buffered.extend_from_slice(&chunk);
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn streams_full_session_snapshots_immediately_then_every_five_seconds() -> Result<()> {
+    let app = TestApp::with_transport(false, true).await?;
+    let client = reqwest::Client::new();
+    let url = app.server.server_url("/api/sessions/stream")?;
+    // 流式列表接口不要求 JSON 请求体；先收到空列表，再等待下一次查询。
+    let mut response = timeout(Duration::from_secs(3), client.post(url).send()).await??;
+    assert!(response.status().is_success());
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let mut buffered = Vec::new();
+    let first = timeout(
+        Duration::from_secs(2),
+        next_sessions_frame(&mut response, &mut buffered),
+    )
+    .await??;
+    assert_eq!(first, json!({"sessions": []}));
+    let first_received = Instant::now();
+
+    // SSE 挂起期间，普通接口和数据库更新均能正常完成。
+    let created = timeout(Duration::from_secs(2), async {
+        app.server.post("/api/sessions").await
+    })
+    .await?;
+    created.assert_status_ok();
+    let created: Value = created.json();
+    let id = created["data"]["session_id"].as_str().unwrap();
+    let repository = app.repository();
+    repository.update_title(id, "流式刷新标题").await?;
+    repository
+        .update_latest_message(
+            id,
+            "工具运行中",
+            Utc.with_ymd_and_hms(2026, 10, 1, 12, 0, 0).unwrap(),
+        )
+        .await?;
+    repository.update_status(id, SessionStatus::Running).await?;
+    repository.update_unread_message_count(id, 4).await?;
+    let details = app.server.get(&format!("/api/sessions/{id}")).await;
+    details.assert_status_ok();
+
+    assert!(
+        timeout_at(
+            first_received + Duration::from_secs(4),
+            next_sessions_frame(&mut response, &mut buffered),
+        )
+        .await
+        .is_err(),
+        "连续快照之间应遵循五秒睡眠间隔"
+    );
+    let second = timeout_at(
+        first_received + Duration::from_secs(7),
+        next_sessions_frame(&mut response, &mut buffered),
+    )
+    .await??;
+    let expected = json!({"sessions": [{
+        "session_id": id,
+        "title": "流式刷新标题",
+        "latest_message": "工具运行中",
+        "latest_message_at": "2026-10-01T12:00:00Z",
+        "status": "running",
+        "unread_message_count": 4
+    }]});
+    assert_eq!(second, expected);
+
+    // 数据没有变化时也继续发送全量快照，保证持续订阅语义。
+    let third = timeout(
+        Duration::from_secs(7),
+        next_sessions_frame(&mut response, &mut buffered),
+    )
+    .await??;
+    assert_eq!(third, expected);
+    assert_eq!(
+        repository
+            .get_by_id(id)
+            .await?
+            .unwrap()
+            .unread_message_count,
+        4
+    );
+
+    // 主动断开客户端后，仍可通过普通接口操作同一个会话。
+    drop(response);
+    timeout(Duration::from_secs(2), async {
+        app.server.post(&format!("/api/sessions/{id}/delete")).await
+    })
+    .await?
+    .assert_status_ok();
     Ok(())
 }
 
@@ -270,6 +500,9 @@ async fn deletes_the_selected_session_and_reports_missing_on_repeat() -> Result<
 async fn rejects_invalid_ids_and_keeps_database_failures_distinct_from_missing_sessions(
 ) -> Result<()> {
     let app = TestApp::new().await?;
+    let invalid = app.server.get("/api/sessions/invalid").await;
+    invalid.assert_status_bad_request();
+    assert_eq!(invalid.json::<Value>()["error"], "session.invalid_id");
     for action in ["delete", "clear-unread-message-count"] {
         let invalid = app
             .server
@@ -292,6 +525,7 @@ async fn rejects_invalid_ids_and_keeps_database_failures_distinct_from_missing_s
     for response in [
         app.server.post("/api/sessions").await,
         app.server.get("/api/sessions").await,
+        app.server.get(&format!("/api/sessions/{missing}")).await,
         app.server
             .post(&format!("/api/sessions/{missing}/delete"))
             .await,
@@ -315,10 +549,11 @@ fn registers_management_operations_and_their_response_schemas() -> Result<()> {
     server::controllers::sessions::routes();
     let document = serde_json::to_value(server::openapi::document())?;
     let paths = &document["paths"];
-    assert_eq!(paths.as_object().unwrap().len(), 4);
+    assert_eq!(paths.as_object().unwrap().len(), 6);
     for (path, method) in [
         ("/api/sessions", "post"),
         ("/api/sessions", "get"),
+        ("/api/sessions/{session_id}", "get"),
         (
             "/api/sessions/{session_id}/clear-unread-message-count",
             "post",
@@ -342,7 +577,46 @@ fn registers_management_operations_and_their_response_schemas() -> Result<()> {
     let item = &document["components"]["schemas"]["ListSessionItem"]["properties"];
     assert_eq!(item.as_object().unwrap().len(), 6);
     assert!(item.get("session_id").is_some());
+    let detail = &paths["/api/sessions/{session_id}"]["get"];
+    assert!(detail["responses"].get("404").is_some());
+    let schema = &document["components"]["schemas"]["GetSessionResponse"]["properties"];
+    assert_eq!(schema.as_object().unwrap().len(), 4);
+    assert!(schema.get("events").is_some());
+    let stream = &paths["/api/sessions/stream"]["post"];
+    assert_eq!(stream["tags"], json!(["会话模块"]));
+    assert!(stream["responses"]["200"]["content"]
+        .get("text/event-stream")
+        .is_some());
+    assert!(stream.get("requestBody").is_none());
+    // 详情嵌套事件、计划、附件等响应结构，文档中的每个本地引用均应有定义。
+    assert_schema_references_resolve(&document, &document);
     Ok(())
+}
+
+fn assert_schema_references_resolve(value: &Value, document: &Value) {
+    match value {
+        Value::Object(fields) => {
+            if let Some(pointer) = fields
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|reference| reference.strip_prefix('#'))
+            {
+                assert!(
+                    document.pointer(pointer).is_some(),
+                    "OpenAPI 缺少引用的结构：#{pointer}"
+                );
+            }
+            for child in fields.values() {
+                assert_schema_references_resolve(child, document);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                assert_schema_references_resolve(item, document);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[tokio::test]

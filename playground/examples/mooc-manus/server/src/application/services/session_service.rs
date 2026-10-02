@@ -39,6 +39,11 @@ impl SessionService {
         self.session_repository.get_all().await
     }
 
+    /// 获取指定会话详情信息。
+    pub async fn get_session(&self, session_id: &str) -> Result<Option<Session>> {
+        self.session_repository.get_by_id(session_id).await
+    }
+
     /// 清空指定会话未读消息数。
     pub async fn clear_unread_message_count(&self, session_id: &str) -> Result<()> {
         tracing::info!(session_id, "清除会话未读消息数");

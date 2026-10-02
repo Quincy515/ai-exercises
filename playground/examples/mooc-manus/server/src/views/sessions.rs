@@ -4,6 +4,8 @@ use utoipa::ToSchema;
 
 use crate::domain::models::{Session, SessionStatus};
 
+use super::events::AgentSseEvent;
+
 /// 聊天请求结构，四个字段均可省略或传入 null。
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(default)]
@@ -68,6 +70,31 @@ impl From<Session> for ListSessionItem {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ListSessionResponse {
     pub sessions: Vec<ListSessionItem>,
+}
+
+/// 获取会话详情响应结构。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GetSessionResponse {
+    /// 会话 id。
+    pub session_id: String,
+    /// 会话标题。
+    pub title: Option<String>,
+    /// 会话状态。
+    #[schema(value_type = String, example = "pending")]
+    pub status: SessionStatus,
+    /// 对话过程中产生的事件，空白会话返回空列表。
+    pub events: Vec<AgentSseEvent>,
+}
+
+impl From<Session> for GetSessionResponse {
+    fn from(session: Session) -> Self {
+        Self {
+            session_id: session.id,
+            title: Some(session.title),
+            status: session.status,
+            events: AgentSseEvent::from_events(session.events),
+        }
+    }
 }
 
 /// 操作成功时的可选空对象；当前清除未读数和删除接口均返回 None。

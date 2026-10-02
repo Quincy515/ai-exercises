@@ -136,3 +136,25 @@ cargo test --locked --lib \
 可通过 `FILE_REPOSITORY_PG_BIN` 指定 PostgreSQL 程序目录，
 通过 `CHAT_TEST_REDIS_BIN` 指定 Redis 程序。完成手动演示后使用
 `docker stop sandbox-dev` 关闭上述容器。
+
+## 17-8：读取会话详情与持续刷新会话列表
+
+```sh
+# 会话详情：session_id 使用创建会话接口返回的值
+curl "http://localhost:5150/api/sessions/$session_id"
+
+# 持续订阅侧栏需要的会话基础信息，Ctrl+C 结束本次订阅
+curl -N -X POST http://localhost:5150/api/sessions/stream
+```
+
+详情返回 `session_id/title/status/events`，历史事件沿用聊天流的 `event + data` 格式。
+列表流立即发送首帧，随后每五秒重新查询并发送 `event: sessions`，其 `data`
+直接为 `{"sessions": [...]}`，空列表同样发送。读取详情和订阅列表均保留未读数，
+需要清零时调用已有的 `clear-unread-message-count` 接口。
+
+```sh
+cargo test --locked --test session_api --test agent_service --test event_response --test chat_stream_api
+```
+
+接口测试使用私有数据库与随机 HTTP 端口，验证历史映射、查询错误、首帧、五秒间隔
+及数据库更新后的快照。流等待期间可以继续读写会话，断开请求后释放本次查询流。

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use axum::{
     http::StatusCode,
     response::{
@@ -6,7 +8,7 @@ use axum::{
     },
 };
 use chrono::{DateTime, Utc};
-use futures::StreamExt;
+use futures::{stream, StreamExt};
 use loco_rs::prelude::*;
 
 use crate::{
@@ -16,11 +18,14 @@ use crate::{
     views::{
         events::AgentSseEvent,
         sessions::{
-            ChatRequest, CreateSessionResponse, EmptySessionData, ListSessionResponse,
-            SessionResponse,
+            ChatRequest, CreateSessionResponse, EmptySessionData, GetSessionResponse,
+            ListSessionResponse, SessionResponse,
         },
     },
 };
+
+/// 流式获取会话列表的睡眠间隔。
+const SESSION_SLEEP_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 创建一个空白的新任务会话。
 #[utoipa::path(
@@ -48,6 +53,40 @@ pub async fn create_session(State(ctx): State<AppContext>) -> Result<Response> {
     ))
 }
 
+/// 间隔指定时间流式获取所有会话基础信息列表。
+#[utoipa::path(
+    post,
+    path = "/api/sessions/stream",
+    tag = "会话模块",
+    summary = "流式获取所有会话基础信息列表",
+    description = "立即返回所有会话基础信息，随后每隔五秒重新查询并返回全量列表。",
+    responses(
+        (status = 200, description = "sessions 事件流，data 为会话基础信息列表", body = String, content_type = "text/event-stream")
+    )
+)]
+#[debug_handler]
+pub async fn stream_sessions(State(ctx): State<AppContext>) -> Result<Response> {
+    let service = get_session_service(&ctx);
+    // 定义事件生成器：首轮立即读取，后续在上次事件交付后等待五秒。
+    // 请求断开时生成器被丢弃，数据库查询结束后再等待，不持有长事务。
+    let events = stream::try_unfold((service, false), |(service, should_sleep)| async move {
+        // 4.睡眠指定时间，避免高频响应；首次查询直接执行。
+        if should_sleep {
+            tokio::time::sleep(SESSION_SLEEP_INTERVAL).await;
+        }
+        // 1.获取所有会话列表。
+        let sessions = service.get_all_sessions().await.map_err(axum::Error::new)?;
+        // 2.循环遍历并组装基础信息。
+        let data = ListSessionResponse {
+            sessions: sessions.into_iter().map(Into::into).collect(),
+        };
+        // 3.将会话列表转换为流式事件数据并返回。
+        let event = SseEvent::default().event("sessions").json_data(data)?;
+        Ok::<_, axum::Error>(Some((event, (service, true))))
+    });
+    Ok(Sse::new(events).into_response())
+}
+
 /// 获取项目中所有任务会话的基础信息列表。
 #[utoipa::path(
     get,
@@ -66,7 +105,7 @@ pub async fn get_all_sessions(State(ctx): State<AppContext>) -> Result<Response>
         .get_all_sessions()
         .await
         .map_err(|error| map_session_error(error, "session.list_failed"))?;
-    // 列表只转换基础信息，完整事件由后续会话详情和事件流接口提供。
+    // 列表只转换基础信息，完整事件由会话详情和聊天事件流接口提供。
     format::json(SessionResponse::success(
         "获取任务会话列表成功",
         ListSessionResponse {
@@ -186,6 +225,45 @@ pub async fn chat(
     Ok(Sse::new(stream).into_response())
 }
 
+/// 传递指定会话 id 获取该会话的对话详情。
+#[utoipa::path(
+    get,
+    path = "/api/sessions/{session_id}",
+    tag = "会话模块",
+    summary = "获取指定会话详情信息",
+    description = "根据会话 id 获取标题、状态和对话过程中产生的全部事件。",
+    params(("session_id" = String, Path, description = "会话业务 UUID")),
+    responses(
+        (status = 200, description = "获取会话详情成功", body = SessionResponse<GetSessionResponse>),
+        (status = 400, description = "会话 UUID 无效"),
+        (status = 404, description = "会话不存在"),
+        (status = 500, description = "会话详情读取失败")
+    )
+)]
+#[debug_handler]
+pub async fn get_session(
+    State(ctx): State<AppContext>,
+    Path(session_id): Path<String>,
+) -> Result<Response> {
+    validate_session_id(&session_id)?;
+    let session = get_session_service(&ctx)
+        .get_session(&session_id)
+        .await
+        .map_err(|error| map_session_error(error, "session.get_failed"))?
+        .ok_or_else(|| {
+            AppError::business(
+                StatusCode::NOT_FOUND,
+                "session.not_found",
+                "该会话不存在，请核实后重试",
+                None,
+            )
+        })?;
+    format::json(SessionResponse::success(
+        "获取会话详情成功",
+        GetSessionResponse::from(session),
+    ))
+}
+
 fn encode_sse_event(
     event: crate::domain::models::Event,
 ) -> std::result::Result<SseEvent, axum::Error> {
@@ -238,6 +316,14 @@ pub fn routes() -> Routes {
                 post(clear_unread_message_count),
                 routes!(clear_unread_message_count),
             ),
+        )
+        .add(
+            "/stream",
+            openapi(post(stream_sessions), routes!(stream_sessions)),
+        )
+        .add(
+            "/{session_id}",
+            openapi(get(get_session), routes!(get_session)),
         )
         .add(
             "/{session_id}/delete",

@@ -4,7 +4,13 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use utoipa::ToSchema;
+use utoipa::{
+    openapi::{
+        schema::{AnyOfBuilder, ObjectBuilder, Schema, Type},
+        RefOr,
+    },
+    PartialSchema, ToSchema,
+};
 
 use crate::domain::models::{
     BaseEvent, ErrorEvent, Event, ExecutionStatus, MessageEvent, MessageRole, PlanEvent, Step,
@@ -248,7 +254,7 @@ impl From<ErrorEvent> for ErrorEventData {
 /// Agent 流式事件类型集合，统一外层的事件类型与数据结构。
 /// Rust 枚举把事件名与对应数据绑定，Serde 输出 {"event": "...", "data": {...}}。
 /// utoipa 5.5 的 schema 派生仅支持容器级 untagged，聚合 schema 需单独描述真实信封。
-/// 各具体响应数据类型继续通过 ToSchema 描述接口字段。
+/// 各具体响应数据类型继续通过 ToSchema 描述接口字段，联合类型在下面复用这些描述。
 #[derive(Debug, Serialize)]
 #[serde(tag = "event", content = "data", rename_all = "lowercase")]
 pub enum AgentSseEvent {
@@ -271,6 +277,52 @@ pub enum AgentSseEvent {
     /// 通用事件直接沿用自身的 event + data 结构。
     #[serde(untagged)]
     Common(CommonSseEvent),
+}
+
+impl PartialSchema for AgentSseEvent {
+    fn schema() -> RefOr<Schema> {
+        // 描述实际的 event + data 信封，供会话详情的事件数组复用。
+        // 通用事件可以与具体事件同时匹配，因此使用 anyOf。
+        let mut schema = AnyOfBuilder::new();
+        for (event, data) in [
+            ("message", MessageEventData::schema()),
+            ("title", TitleEventData::schema()),
+            ("step", StepEventData::schema()),
+            ("plan", PlanEventData::schema()),
+            ("tool", ToolEventData::schema()),
+            ("done", BaseEventData::schema()),
+            ("error", ErrorEventData::schema()),
+            ("wait", BaseEventData::schema()),
+        ] {
+            schema = schema.item(
+                ObjectBuilder::new()
+                    .property(
+                        "event",
+                        ObjectBuilder::new()
+                            .schema_type(Type::String)
+                            .enum_values(Some([event])),
+                    )
+                    .property("data", data)
+                    .required("event")
+                    .required("data"),
+            );
+        }
+        schema.item(CommonSseEvent::schema()).into()
+    }
+}
+
+impl ToSchema for AgentSseEvent {
+    fn schemas(schemas: &mut Vec<(String, RefOr<Schema>)>) {
+        // 注册各载荷引用到的嵌套类型，例如文件、步骤和基础事件字段。
+        MessageEventData::schemas(schemas);
+        TitleEventData::schemas(schemas);
+        StepEventData::schemas(schemas);
+        PlanEventData::schemas(schemas);
+        ToolEventData::schemas(schemas);
+        BaseEventData::schemas(schemas);
+        ErrorEventData::schemas(schemas);
+        CommonSseEvent::schemas(schemas);
+    }
 }
 
 impl From<Event> for AgentSseEvent {
