@@ -6,7 +6,7 @@ use chrono::Local;
 use loco_rs::storage::Storage;
 
 use crate::domain::{
-    external::{FileNotFound, FileStorage, FileStream, InvalidFileUpload, UploadFile},
+    external::{FileNotFound, FileStorage, FileStream, UploadFile},
     models::File,
     repositories::FileRepository,
 };
@@ -15,67 +15,54 @@ use crate::domain::{
 pub struct LocoFileStorage {
     storage: Arc<Storage>,
     file_repository: Arc<dyn FileRepository>,
+    server_base_url: String,
 }
 
 impl LocoFileStorage {
     /// 构造函数，完成文件存储桶初始化。
-    pub fn new(storage: Arc<Storage>, file_repository: Arc<dyn FileRepository>) -> Self {
+    pub fn new(
+        storage: Arc<Storage>,
+        file_repository: Arc<dyn FileRepository>,
+        server_base_url: impl Into<String>,
+    ) -> Self {
         Self {
             storage,
             file_repository,
+            server_base_url: server_base_url.into(),
         }
     }
 }
 
 #[async_trait]
 impl FileStorage for LocoFileStorage {
+    /// 本地、内存和远程存储统一经由既有下载接口提供可直接访问的文件 URL。
+    fn file_url(&self, file: &File) -> String {
+        format!(
+            "{}/api/files/{}/download",
+            self.server_base_url.trim_end_matches('/'),
+            file.id
+        )
+    }
+
     /// 根据传递的文件源上传文件后返回文件信息。
     async fn upload_file(&self, upload_file: UploadFile) -> Result<File> {
         // 1.生成随机的 UUID 作为文件 id 并获取文件扩展名。
-        // 大小以实际内容为准；写入对象存储前先检查数据库字段范围。
-        // 同时兼容浏览器提供的 Unix/Windows 路径，只保留最后的文件名。
-        let filename = upload_file
+        // 按 POSIX 文件名规则取扩展名，保留前导点；.env 这类只有前导点的文件不算有扩展名。
+        // 文件名与 MIME 类型保持上传源中的原值；大小以实际二进制内容为准。
+        let extension = upload_file
             .filename
-            .rsplit(['/', '\\'])
+            .rsplit('/')
             .next()
-            .unwrap_or_default();
-        ensure!(
-            !filename.trim().is_empty()
-                && filename != "."
-                && filename != ".."
-                && !filename.chars().any(char::is_control),
-            InvalidFileUpload("文件名无效")
-        );
-        ensure!(
-            filename.chars().count() <= 255,
-            InvalidFileUpload("文件名不能超过 255 个字符")
-        );
-        let size = upload_file.content.len();
-        ensure!(
-            i32::try_from(size).is_ok(),
-            InvalidFileUpload("文件大小超出数据库 size 的 i32 范围")
-        );
-        let mime_type = upload_file
-            .mime_type
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or_default();
-        ensure!(
-            mime_type.chars().count() <= 255 && !mime_type.chars().any(char::is_control),
-            InvalidFileUpload("文件 MIME 类型无效")
-        );
-        // 扩展名保留前导点；.env 这类只有前导点的文件不算有扩展名。
-        let extension = filename
+            .unwrap_or_default()
             .rsplit_once('.')
             .filter(|(stem, _)| stem.chars().any(|character| character != '.'))
             .map(|(_, extension)| format!(".{extension}"))
             .unwrap_or_default();
         let mut file = File {
-            filename: filename.to_owned(),
+            filename: upload_file.filename,
             extension,
-            mime_type: mime_type.to_owned(),
-            size,
+            mime_type: upload_file.mime_type.unwrap_or_default(),
+            size: upload_file.content.len(),
             ..File::default()
         };
 
@@ -87,10 +74,6 @@ impl FileStorage for LocoFileStorage {
             file.id,
             file.extension
         );
-        ensure!(
-            file.key.chars().count() <= 255,
-            InvalidFileUpload("文件扩展名过长，生成的对象 key 不能超过 255 个字符")
-        );
         let path = Path::new(&file.key);
 
         // 3.使用 Loco 原生异步 API 上传文件，不占用阻塞线程池。
@@ -98,21 +81,13 @@ impl FileStorage for LocoFileStorage {
             .upload(path, &upload_file.content)
             .await
             .context("上传文件内容失败")?;
+        tracing::info!(filename = %file.filename, file_id = %file.id, "文件上传成功");
 
         // 4.构建文件模型后将数据存储到数据库中。
-        // 数据库与对象存储不能共用事务，保存失败时补偿删除对象。
-        if let Err(error) = self.file_repository.save(file.clone()).await {
-            if let Err(cleanup_error) = self.storage.delete(path).await {
-                // 仅记录对象标识，避免驱动错误中的连接配置进入日志；原始错误保留在返回值。
-                tracing::error!(key = %file.key, "文件信息保存失败，清理已上传对象也失败");
-                return Err(error.context(format!(
-                    "保存文件信息失败，清理对象[{}]也失败: {cleanup_error}",
-                    file.key
-                )));
-            }
-            return Err(error.context("保存文件信息失败，已清理上传对象"));
-        }
-        tracing::info!(filename = %file.filename, file_id = %file.id, "文件上传成功");
+        self.file_repository
+            .save(file.clone())
+            .await
+            .context("保存文件信息失败")?;
         Ok(file)
     }
 

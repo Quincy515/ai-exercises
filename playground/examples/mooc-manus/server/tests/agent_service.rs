@@ -352,6 +352,7 @@ impl Fixture {
             Arc::new(LocoFileStorage::new(
                 Arc::new(Storage::single(drivers::mem::new())),
                 self.file_repository.clone(),
+                "http://localhost:5150",
             )),
             self.file_repository.clone(),
         )

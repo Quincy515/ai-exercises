@@ -47,6 +47,14 @@ pub trait SessionRepository: Send + Sync {
         timestamp: DateTime<Utc>,
     ) -> Result<()>;
 
+    /// 原子更新最新消息及其时间，并增加一条未读消息；任一步失败时全部回滚。
+    async fn update_latest_message_and_increment_unread(
+        &self,
+        session_id: &str,
+        message: &str,
+        timestamp: DateTime<Utc>,
+    ) -> Result<()>;
+
     /// 设置未读消息数；类型与领域模型的计数字段一致。
     async fn update_unread_message_count(&self, session_id: &str, count: usize) -> Result<()>;
 

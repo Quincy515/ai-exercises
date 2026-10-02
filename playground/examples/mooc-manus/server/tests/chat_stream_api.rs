@@ -40,7 +40,7 @@ use server::{
     infrastructure::{external::RedisStreamTask, repositories::SeaOrmSessionRepository},
     views::events::AgentSseEvent,
 };
-use tokio::time::timeout;
+use tokio::{sync::Notify, time::timeout};
 
 const MESSAGE: &str = "整理本节资料";
 // 0 是合法的 Unix 秒时间戳，不能被当作缺省值忽略。
@@ -54,6 +54,10 @@ struct TestApp {
 
 impl TestApp {
     async fn new() -> Result<Self> {
+        Self::with_http_transport(false).await
+    }
+
+    async fn with_http_transport(http_transport: bool) -> Result<Self> {
         // 首次 HTTP 客户端会初始化系统 TLS；在夹具阶段完成，保留聊天事件流的五秒预算。
         drop(reqwest::Client::builder().build()?);
         let database = file_database::TestDatabase::new().await?;
@@ -92,8 +96,14 @@ impl TestApp {
         }))?;
         let ctx = AppContext::builder(Environment::Test, database.db.clone(), config).build();
         let router = App::routes(&ctx).to_router::<App>(ctx, Router::new())?;
+        let server = if http_transport {
+            // 随机监听端口，允许客户端在响应完成前增量读取 SSE。
+            TestServer::builder().http_transport().build(router)?
+        } else {
+            TestServer::new(router)?
+        };
         Ok(Self {
-            server: TestServer::new(router)?,
+            server,
             database,
             redis,
         })
@@ -165,6 +175,81 @@ impl TaskRunner for EchoRunner {
     }
 }
 
+/// 暂停在工具执行阶段，验证 Calling 已经通过 HTTP 传播并写入数据库。
+struct GatedToolRunner {
+    repository: Arc<SeaOrmSessionRepository>,
+    session_id: String,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    resumed: AtomicBool,
+}
+
+impl GatedToolRunner {
+    async fn publish(&self, task: &SharedTask, mut event: Event) -> Result<()> {
+        let id = task
+            .output_stream()
+            .put(serde_json::to_value(&event)?)
+            .await?;
+        event.set_id(id);
+        self.repository.add_event(&self.session_id, event).await
+    }
+}
+
+#[async_trait]
+impl TaskRunner for GatedToolRunner {
+    async fn invoke(&self, task: SharedTask) -> Result<()> {
+        let (_, payload) = task.input_stream().pop().await?.context("输入流缺少消息")?;
+        let Event::Message(message) = serde_json::from_value::<Event>(payload)? else {
+            anyhow::bail!("输入流应包含消息事件");
+        };
+        ensure!(message.role == MessageRole::User && message.message == MESSAGE);
+
+        let mut tool = ToolEvent {
+            tool_name: "shell".into(),
+            function_name: "shell_exec".into(),
+            function_args: json!({"session_id": "shell-1"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            status: ToolEventStatus::Calling,
+            ..ToolEvent::default()
+        };
+        self.publish(&task, Event::Tool(tool.clone())).await?;
+        // 通知只发生在 Calling 已保存之后；释放门闩前任务保持运行。
+        self.entered.notify_one();
+        self.release.notified().await;
+        self.resumed.store(true, Ordering::SeqCst);
+
+        tool.status = ToolEventStatus::Called;
+        tool.tool_content = Some(ToolContent::Shell(ShellToolContent {
+            console: json!([{"command": "pwd", "output": "/workspace"}]),
+        }));
+        self.publish(&task, Event::Tool(tool)).await?;
+        self.publish(&task, Event::Done(DoneEvent::default()))
+            .await?;
+        self.repository
+            .update_status(&self.session_id, SessionStatus::Completed)
+            .await
+    }
+
+    async fn destroy(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn on_done(&self, _task: SharedTask) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// 提前返回或断言失败时也释放门闩，任务注册守卫随后取消自身任务。
+struct ReleaseGate(Arc<Notify>);
+
+impl Drop for ReleaseGate {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
 /// 清理只针对本测试注册的任务；已完成任务的监督协程会自行移除注册项。
 struct RegisteredTask(Arc<RedisStreamTask>);
 
@@ -191,6 +276,125 @@ fn sse_events(body: &str) -> Result<Vec<(String, Value)>> {
             Ok((event, serde_json::from_str(data)?))
         })
         .collect()
+}
+
+async fn next_sse_frame(
+    response: &mut reqwest::Response,
+    buffered: &mut Vec<u8>,
+) -> Result<String> {
+    loop {
+        if let Some(end) = buffered.windows(2).position(|bytes| bytes == b"\n\n") {
+            // TCP 分块边界可以落在 UTF-8 字符或 SSE 帧中间，完整帧后再解码。
+            return Ok(String::from_utf8(buffered.drain(..end + 2).collect())?);
+        }
+        let chunk = response.chunk().await?.context("SSE 在完整帧前结束")?;
+        buffered.extend_from_slice(&chunk);
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn chat_stream_delivers_calling_over_http_while_tool_is_blocked() -> Result<()> {
+    let app = TestApp::with_http_transport(true).await?;
+    let repository = Arc::new(app.repository());
+    let mut session = Session {
+        status: SessionStatus::Running,
+        ..Session::default()
+    };
+    let runner = Arc::new(GatedToolRunner {
+        repository: repository.clone(),
+        session_id: session.id.clone(),
+        entered: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+        resumed: AtomicBool::new(false),
+    });
+    let task = RegisteredTask(Arc::new(RedisStreamTask::new(
+        runner.clone(),
+        app.redis.client.get_multiplexed_async_connection().await?,
+    )?));
+    let release_gate = ReleaseGate(runner.release.clone());
+    session.task_id = Some(task.0.id().to_owned());
+    repository.save(session.clone()).await?;
+
+    let url = app
+        .server
+        .server_url(&format!("/api/sessions/{}/chat", session.id))?;
+    let mut response = timeout(Duration::from_secs(5), async {
+        reqwest::Client::new()
+            .post(url)
+            .json(&json!({"message": MESSAGE}))
+            .send()
+            .await
+    })
+    .await
+    .context("聊天 SSE 应及时返回响应头")??;
+    ensure!(response.status().is_success());
+    ensure!(response.headers()["content-type"] == "text/event-stream");
+    timeout(Duration::from_secs(5), runner.entered.notified())
+        .await
+        .context("任务应在 Calling 持久化后进入工具门闩")?;
+
+    let mut buffered = Vec::new();
+    let first_frame = timeout(
+        Duration::from_secs(5),
+        next_sse_frame(&mut response, &mut buffered),
+    )
+    .await
+    .context("工具尚未完成时，客户端应收到 Calling 帧")??;
+    let first = sse_events(&first_frame)?;
+    // 在门闩关闭时记录实际状态，随后先释放任务，再验收这些快照。
+    let was_done = task.0.done();
+    let resumed = runner.resumed.load(Ordering::SeqCst);
+    let during = repository.get_by_id(&session.id).await?.unwrap();
+    drop(release_gate);
+
+    timeout(Duration::from_secs(5), async {
+        while let Some(chunk) = response.chunk().await? {
+            buffered.extend_from_slice(&chunk);
+        }
+        while !task.0.done() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("工具释放后应收到 Called、Done 并完成任务")??;
+
+    assert!(!was_done && !resumed);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].0, "tool");
+    assert_eq!(first[0].1["status"], "calling");
+    assert_eq!(during.status, SessionStatus::Running);
+    assert_eq!(during.events.len(), 2);
+    let saved_calling = serde_json::to_value(AgentSseEvent::from(during.events[1].clone()))?;
+    assert_eq!(first[0].1, saved_calling["data"]);
+
+    let mut received = first;
+    received.extend(sse_events(std::str::from_utf8(&buffered)?)?);
+    assert_eq!(
+        received
+            .iter()
+            .map(|(kind, data)| (kind.as_str(), data["status"].as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("tool", Some("calling")),
+            ("tool", Some("called")),
+            ("done", None)
+        ]
+    );
+    assert_eq!(
+        received[1].1["content"],
+        json!({"console": [{"command": "pwd", "output": "/workspace"}]})
+    );
+    let stored = repository.get_by_id(&session.id).await?.unwrap();
+    assert_eq!(stored.events.len(), 4);
+    for ((_, data), event) in received.iter().zip(&stored.events[1..]) {
+        let saved = serde_json::to_value(AgentSseEvent::from(event.clone()))?;
+        assert_eq!(data, &saved["data"]);
+    }
+    assert_eq!(stored.status, SessionStatus::Completed);
+    assert_eq!(stored.unread_message_count, 0);
+    Ok(())
 }
 
 #[tokio::test]

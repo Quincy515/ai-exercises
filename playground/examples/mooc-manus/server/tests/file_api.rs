@@ -3,7 +3,7 @@
 #[path = "support/file_database.rs"]
 mod file_database;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use axum::{
@@ -24,7 +24,16 @@ use loco_rs::{
 use sea_orm::{ConnectionTrait, EntityTrait, PaginatorTrait};
 use serde_json::{json, Value};
 use serial_test::serial;
-use server::{app::App, controllers::files::MAX_UPLOAD_BODY_SIZE, models::files::Entity};
+use server::{
+    app::App,
+    controllers::files::MAX_UPLOAD_BODY_SIZE,
+    domain::{
+        external::{FileStorage, UploadFile},
+        repositories::FileRepository,
+    },
+    infrastructure::{external::LocoFileStorage, repositories::SeaOrmFileRepository},
+    models::files::Entity,
+};
 
 struct TestApp {
     server: TestServer,
@@ -34,6 +43,10 @@ struct TestApp {
 
 impl TestApp {
     async fn new(storage: Storage) -> Result<Self> {
+        Self::with_http_transport(storage, false).await
+    }
+
+    async fn with_http_transport(storage: Storage, http_transport: bool) -> Result<Self> {
         let database = file_database::TestDatabase::new().await?;
         // 显式构造配置，不读取 DATABASE_URL，也不调用带迁移/清表行为的应用 boot。
         let config: Config = serde_json::from_value(json!({
@@ -51,7 +64,11 @@ impl TestApp {
             .build();
         // 使用真实应用路由及 Loco 默认中间件，覆盖路由注册和上传限制的组合行为。
         let router = App::routes(&ctx).to_router::<App>(ctx, Router::new())?;
-        let server = TestServer::new(router)?;
+        let server = if http_transport {
+            TestServer::builder().http_transport().build(router)?
+        } else {
+            TestServer::new(router)?
+        };
         Ok(Self {
             server,
             database,
@@ -150,6 +167,53 @@ async fn uploads_queries_and_downloads_binary_content_with_chinese_filename() ->
 
 #[tokio::test]
 #[serial]
+async fn uploaded_screenshot_url_returns_original_png_over_http() -> Result<()> {
+    let app = TestApp::with_http_transport(Storage::single(drivers::mem::new()), true).await?;
+    // 小型 PNG 固定样本；与 Runner 一样通过存储扩展上传，MIME 类型保持未提供。
+    let content = Bytes::from_static(&[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
+        0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 11, 73, 68, 65, 84, 120, 156, 99, 0, 1, 0, 0, 5, 0, 1,
+        13, 10, 45, 180, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ]);
+    let repository = Arc::new(SeaOrmFileRepository::new(app.database.db.clone()));
+    let storage = LocoFileStorage::new(
+        app.storage.clone(),
+        repository.clone(),
+        app.server.server_url("/")?.to_string(),
+    );
+    let file = storage
+        .upload_file(UploadFile {
+            filename: "截图.png".to_string(),
+            mime_type: None,
+            content: content.clone(),
+        })
+        .await?;
+    assert!(file.mime_type.is_empty());
+    assert_eq!(repository.get_by_id(&file.id).await?, Some(file.clone()));
+    let url = storage.file_url(&file);
+    assert_eq!(
+        url,
+        app.server
+            .server_url(&format!("/api/files/{}/download", file.id))?
+            .as_str()
+    );
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?
+        .get(url)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "application/octet-stream"
+    );
+    assert_eq!(response.bytes().await?, content);
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
 async fn handles_empty_extensionless_files_without_a_content_type() -> Result<()> {
     let app = TestApp::new(Storage::single(drivers::mem::new())).await?;
     let body = "--empty-file\r\nContent-Disposition: form-data; name=\"file\"; filename=\"README\"\r\n\r\n\r\n--empty-file--\r\n";
@@ -189,7 +253,6 @@ async fn rejects_invalid_multipart_without_persisting_partial_uploads() -> Resul
         MultipartForm::new().add_text("other", "value"),
         MultipartForm::new().add_text("file", "not a file"),
         form("first.txt", "one").add_part("file", Part::bytes("two").file_name("second.txt")),
-        form("..", "bad name"),
     ] {
         app.server
             .post("/api/files")

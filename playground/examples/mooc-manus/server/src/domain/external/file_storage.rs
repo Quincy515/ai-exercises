@@ -43,6 +43,9 @@ pub struct InvalidFileUpload(pub &'static str);
 /// 文件存储桶协议。
 #[async_trait]
 pub trait FileStorage: Send + Sync {
+    /// 返回可直接读取文件内容的 URL，供截图等展示内容使用。
+    fn file_url(&self, file: &File) -> String;
+
     /// 根据传递的文件源上传文件后返回文件信息。
     async fn upload_file(&self, upload_file: UploadFile) -> Result<File>;
 

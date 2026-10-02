@@ -146,6 +146,26 @@ impl SessionRepository for SeaOrmSessionRepository {
         self.update_session(session_id, update).await
     }
 
+    /// 同时更新最新消息、消息时间与未读数，保持一次消息事件的元数据原子性。
+    async fn update_latest_message_and_increment_unread(
+        &self,
+        session_id: &str,
+        message: &str,
+        timestamp: DateTime<Utc>,
+    ) -> Result<()> {
+        // 1.同一条 UPDATE 完成消息和未读数更新，对应消息事件的一次短事务。
+        // 在数据库当前计数上加一；溢出等错误使三个字段一起回滚。
+        let update = Sessions::update_many()
+            .col_expr(Column::LatestMessage, Expr::value(message))
+            .col_expr(Column::LatestMessageAt, Expr::value(timestamp))
+            .col_expr(
+                Column::UnreadMessageCount,
+                Expr::cust("COALESCE(unread_message_count, 0) + 1"),
+            );
+        // 2.执行更新并检查会话是否存在，执行结束即释放连接。
+        self.update_session(session_id, update).await
+    }
+
     /// 设置会话的未读消息数。
     async fn update_unread_message_count(&self, session_id: &str, count: usize) -> Result<()> {
         // 1.领域计数是 usize，但数据库列是 i32，写入前必须检查上界。

@@ -139,6 +139,20 @@ async fn wait_finished(task: &RedisStreamTask) {
     .expect("任务应完成全部异步收尾");
 }
 
+#[test]
+#[serial(redis_stream_task)]
+fn idle_task_cancellation_succeeds_and_removes_registration() {
+    let runner = Arc::new(RecordingRunner::default());
+    let task = fixture(runner.clone());
+
+    assert!(task.done());
+    assert!(RedisStreamTask::get(task.id()).unwrap().is_some());
+    assert!(task.cancel());
+    assert!(RedisStreamTask::get(task.id()).unwrap().is_none());
+    assert!(task.cancel());
+    assert!(runner.calls().is_empty());
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[serial(redis_stream_task)]
 async fn cancellation_before_first_poll_still_runs_callbacks_once() {
@@ -148,7 +162,8 @@ async fn cancellation_before_first_poll_still_runs_callbacks_once() {
     // 当前线程尚未让出执行权，刚创建的执行任务还没有首次 poll。
     task.invoke().await.unwrap();
     assert!(task.cancel());
-    assert!(!task.cancel());
+    assert!(RedisStreamTask::get(task.id()).unwrap().is_none());
+    assert!(task.cancel());
     wait_finished(&task).await;
 
     assert_eq!(
@@ -160,7 +175,7 @@ async fn cancellation_before_first_poll_still_runs_callbacks_once() {
 
 #[tokio::test]
 #[serial(redis_stream_task)]
-async fn running_task_accepts_one_cancellation_and_finishes_once() {
+async fn repeated_running_task_cancellation_succeeds_and_finishes_once() {
     let runner = Arc::new(RecordingRunner {
         keep_running: true,
         ..RecordingRunner::default()
@@ -170,9 +185,10 @@ async fn running_task_accepts_one_cancellation_and_finishes_once() {
     wait_for(&runner.started).await;
 
     assert!(task.cancel());
-    assert!(!task.cancel());
+    assert!(RedisStreamTask::get(task.id()).unwrap().is_none());
+    assert!(task.cancel());
     wait_finished(&task).await;
-    assert!(!task.cancel());
+    assert!(task.cancel());
 
     assert_eq!(
         runner.calls(),
@@ -196,14 +212,15 @@ async fn normal_completion_does_not_call_cancellation_callback() {
     task.invoke().await.unwrap();
     wait_finished(&task).await;
 
-    assert!(!task.cancel());
+    assert!(task.cancel());
+    assert!(task.cancel());
     assert_eq!(runner.calls(), vec!["invoke", "done", "done_finished"]);
     assert!(RedisStreamTask::get(task.id()).unwrap().is_none());
 }
 
 #[tokio::test]
 #[serial(redis_stream_task)]
-async fn cancellation_callback_keeps_task_registered_and_prevents_restart() {
+async fn cancellation_removes_registration_before_callback_finishes_and_prevents_restart() {
     let runner = Arc::new(RecordingRunner {
         keep_running: true,
         block_cancel: true,
@@ -216,9 +233,9 @@ async fn cancellation_callback_keeps_task_registered_and_prevents_restart() {
     wait_for(&runner.cancel_started).await;
 
     assert!(!task.done());
-    assert!(RedisStreamTask::get(task.id()).unwrap().is_some());
+    assert!(RedisStreamTask::get(task.id()).unwrap().is_none());
     task.invoke().await.unwrap();
-    assert!(!task.cancel());
+    assert!(task.cancel());
     assert_eq!(runner.calls(), vec!["invoke", "cancel"]);
 
     runner.release_cancel.notify_one();
@@ -247,8 +264,8 @@ async fn late_cancellation_during_completion_does_not_change_normal_exit() {
     wait_for(&runner.done_started).await;
 
     assert!(!task.done());
-    assert!(!task.cancel());
-    assert!(RedisStreamTask::get(task.id()).unwrap().is_some());
+    assert!(task.cancel());
+    assert!(RedisStreamTask::get(task.id()).unwrap().is_none());
     task.invoke().await.unwrap();
     assert_eq!(runner.calls(), vec!["invoke", "done"]);
 

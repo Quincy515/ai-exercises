@@ -371,6 +371,10 @@ async fn missing_sessions_have_explicit_query_and_update_contracts() -> Result<(
         .await
         .is_err());
     assert!(repository
+        .update_latest_message_and_increment_unread(&missing, "消息", Utc::now())
+        .await
+        .is_err());
+    assert!(repository
         .update_unread_message_count(&missing, 0)
         .await
         .is_err());
@@ -401,6 +405,79 @@ async fn missing_sessions_have_explicit_query_and_update_contracts() -> Result<(
         .is_err());
     assert!(repository.get_memory(&missing, "planner").await.is_err());
     assert!(repository.get_by_id("invalid-uuid").await.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn latest_message_and_unread_count_update_together() -> Result<()> {
+    let fixture = TestDatabase::new().await?;
+    let repository = fixture.repository();
+    let session = Session {
+        latest_message: "旧消息".to_string(),
+        unread_message_count: 2,
+        ..Session::default()
+    };
+    repository.save(session.clone()).await?;
+    let timestamp = Utc.with_ymd_and_hms(2026, 10, 1, 12, 0, 0).unwrap();
+
+    repository
+        .update_latest_message_and_increment_unread(&session.id, "新的回复", timestamp)
+        .await?;
+    let saved = repository.get_by_id(&session.id).await?.unwrap();
+    assert_eq!(saved.latest_message, "新的回复");
+    assert_eq!(saved.latest_message_at, Some(timestamp));
+    assert_eq!(saved.unread_message_count, 3);
+
+    // 历史 NULL 计数按零处理，消息和时间仍随同一次更新写入。
+    fixture
+        .execute(
+            "UPDATE sessions SET unread_message_count = NULL WHERE uuid = $1",
+            vec![Uuid::parse_str(&session.id)?.into()],
+        )
+        .await?;
+    let next_timestamp = Utc.with_ymd_and_hms(2026, 10, 1, 12, 1, 0).unwrap();
+    repository
+        .update_latest_message_and_increment_unread(&session.id, "下一条回复", next_timestamp)
+        .await?;
+    let saved = repository.get_by_id(&session.id).await?.unwrap();
+    assert_eq!(saved.latest_message, "下一条回复");
+    assert_eq!(saved.latest_message_at, Some(next_timestamp));
+    assert_eq!(saved.unread_message_count, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn message_metadata_failure_keeps_previous_values_and_saved_event() -> Result<()> {
+    let fixture = TestDatabase::new().await?;
+    let repository = fixture.repository();
+    let timestamp = Utc.with_ymd_and_hms(2026, 10, 1, 12, 0, 0).unwrap();
+    let session = Session {
+        latest_message: "旧消息".to_string(),
+        latest_message_at: Some(timestamp),
+        unread_message_count: i32::MAX as usize,
+        ..Session::default()
+    };
+    repository.save(session.clone()).await?;
+
+    // Runner 先保存事件，再单独更新消息元数据；后者失败仍保留已交付的历史。
+    let event = Event::Message(MessageEvent {
+        message: "已经交付的新消息".to_string(),
+        ..MessageEvent::default()
+    });
+    repository.add_event(&session.id, event.clone()).await?;
+    let before = fixture.row(&session.id).await?;
+    let next_timestamp = Utc.with_ymd_and_hms(2026, 10, 1, 12, 1, 0).unwrap();
+    assert!(repository
+        .update_latest_message_and_increment_unread(&session.id, "已经交付的新消息", next_timestamp)
+        .await
+        .is_err());
+
+    // PostgreSQL 的 i32 溢出使整条 UPDATE 回滚，包括 updated_at。
+    assert_eq!(fixture.row(&session.id).await?, before);
+    assert_eq!(
+        repository.get_by_id(&session.id).await?.unwrap().events,
+        vec![event]
+    );
     Ok(())
 }
 

@@ -42,6 +42,7 @@ pub async fn get_agent_service(ctx: &AppContext) -> Result<AgentService> {
     let file_storage = Arc::new(LocoFileStorage::new(
         Arc::clone(&ctx.storage),
         Arc::clone(&file_repository),
+        ctx.config.server.full_url(),
     ));
 
     Ok(AgentService::new(
@@ -67,7 +68,11 @@ pub fn get_session_service(ctx: &AppContext) -> SessionService {
 /// 获取文件存储桶，复用 Loco 的存储驱动和数据库连接池。
 pub fn get_file_storage(ctx: &AppContext) -> LocoFileStorage {
     let file_repository = Arc::new(get_db_file_repository(ctx));
-    LocoFileStorage::new(Arc::clone(&ctx.storage), file_repository)
+    LocoFileStorage::new(
+        Arc::clone(&ctx.storage),
+        file_repository,
+        ctx.config.server.full_url(),
+    )
 }
 
 /// 获取文件服务，复用 Loco 上下文的存储驱动和数据库连接池。
@@ -77,6 +82,7 @@ pub fn get_file_service(ctx: &AppContext) -> FileService {
     let file_storage = Arc::new(LocoFileStorage::new(
         Arc::clone(&ctx.storage),
         Arc::clone(&file_repository),
+        ctx.config.server.full_url(),
     ));
 
     // 2.构建服务并返回。

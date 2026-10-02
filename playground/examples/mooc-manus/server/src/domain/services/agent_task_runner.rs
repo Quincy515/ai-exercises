@@ -21,6 +21,7 @@ use crate::domain::{
     },
     repositories::{FileRepository, SessionRepository},
     services::{
+        event_sink::{EventControl, EventSink},
         flows::{BaseFlow, PlannerReActFlow},
         tools::{A2ATool, McpTool},
     },
@@ -203,9 +204,9 @@ impl AgentTaskRunner {
 
             // 3.判断会话中的文件是否存在。
             if let Some(file) = existing_file {
-                // 当前仓库按文件 id 移除记录，路径用于上一步查找。
+                // 按课程调用传入文件路径；仓库按 id 匹配时旧版本记录会保留。
                 self.session_repository
-                    .remove_file(&self.session_id, &file.id)
+                    .remove_file(&self.session_id, &file.filepath)
                     .await?;
             }
 
@@ -256,7 +257,7 @@ impl AgentTaskRunner {
         event.attachments = attachments;
     }
 
-    /// 获取浏览器截图并返回截图文件对应的 id。
+    /// 获取浏览器截图并返回可直接加载的文件 URL。
     async fn get_browser_screenshot(&self) -> Result<String> {
         // 1.调用浏览器完成截图。
         let screenshot = self.browser.screenshot(None).await?;
@@ -270,7 +271,7 @@ impl AgentTaskRunner {
                 content: screenshot.into(),
             })
             .await?;
-        Ok(file.id)
+        Ok(self.file_storage.file_url(&file))
     }
 
     /// 额外处理工具消息，使其前端交互更友好。
@@ -314,10 +315,13 @@ impl AgentTaskRunner {
                             .read_shell_output(session_id, Some(true))
                             .await?;
                         // 现有沙箱适配器把 Shell 结构化数据编码为 JSON 字符串。
-                        let data = shell_result
-                            .data
-                            .ok_or_else(|| anyhow!("Shell 工具结果缺少 data"))?;
-                        let data: Value = serde_json::from_str(&data)?;
+                        let data = match shell_result.data {
+                            Some(data) if !data.is_empty() => serde_json::from_str(&data)?,
+                            _ => json!({}),
+                        };
+                        if has_tool_data(&data) && !data.is_object() {
+                            bail!("Shell 工具结果 data 必须是对象");
+                        }
                         data.get("console_records")
                             .cloned()
                             .unwrap_or_else(|| json!([]))
@@ -390,38 +394,37 @@ impl AgentTaskRunner {
     }
 
     /// 根据消息对象运行 PlannerReActFlow。
-    async fn run_flow(&self, flow: &mut dyn BaseFlow, message: Message) -> Result<Vec<Event>> {
+    async fn run_flow(
+        &self,
+        flow: &mut dyn BaseFlow,
+        message: Message,
+        sink: &mut dyn EventSink,
+    ) -> Result<EventControl> {
         // 1.判断传递的消息是否为空。
         if message.message.is_empty() {
             warn!("AgentTaskRunner接收了一条空消息");
-            return Ok(vec![Event::Error(ErrorEvent {
-                error: "空消息错误".to_string(),
-                ..ErrorEvent::default()
-            })]);
+            return sink
+                .emit(Event::Error(ErrorEvent {
+                    error: "空消息错误".to_string(),
+                    ..ErrorEvent::default()
+                }))
+                .await;
         }
 
         // 2.调用流并运行获取事件信息。
-        // 复用现有批量事件接口；flow 由调用方持锁后借入，避免重复锁定同一实例。
-        let mut events = flow.invoke(message).await?;
-        // 等待事件结束当前轮次，后续事件留给用户回复后的执行。
-        if let Some(index) = events
-            .iter()
-            .position(|event| matches!(event, Event::Wait(_)))
-        {
-            events.truncate(index + 1);
-        }
-        for event in &mut events {
-            match event {
-                // 3.判断是否为工具事件，如果是则额外处理。
-                Event::Tool(event) => self.handle_tool_event(event).await,
-                // 4.如果是消息事件则将 AI 消息事件中的附件同步到存储中。
-                Event::Message(event) => self.sync_message_attachments_to_storage(event).await,
-                _ => {}
-            }
-        }
+        // flow 由调用方持锁后借入；每次交付完成后才推进下一事件。
+        flow.invoke(message, sink).await
+    }
 
-        // 5.将事件直接返回。
-        Ok(events)
+    /// 补全当前事件的展示内容，保持快照与该工具动作发生时的状态对应。
+    async fn enrich_event(&self, event: &mut Event) {
+        match event {
+            // 3.判断是否为工具事件，如果是则额外处理。
+            Event::Tool(event) => self.handle_tool_event(event).await,
+            // 4.如果是消息事件则将 AI 消息事件中的附件同步到存储中。
+            Event::Message(event) => self.sync_message_attachments_to_storage(event).await,
+            _ => {}
+        }
     }
 
     /// 先写出并保存事件，再更新对应会话信息；返回是否需要等待用户。
@@ -438,10 +441,11 @@ impl AgentTaskRunner {
             // 9.如果事件为消息事件，则更新最新消息并新增未读消息数。
             Event::Message(event) => {
                 self.session_repository
-                    .update_latest_message(&self.session_id, &event.message, event.base.created_at)
-                    .await?;
-                self.session_repository
-                    .increment_unread_message_count(&self.session_id)
+                    .update_latest_message_and_increment_unread(
+                        &self.session_id,
+                        &event.message,
+                        event.base.created_at,
+                    )
                     .await?;
             }
             // 10.如果事件为等待，则更新会话状态并终止程序。
@@ -454,6 +458,33 @@ impl AgentTaskRunner {
             _ => {}
         }
         Ok(false)
+    }
+
+    /// 清理远程工具，每项失败记录日志，继续完成其他工具的清理。
+    async fn cleanup_tools(&self) {
+        if let Err(error) = self.flow.lock().await.cleanup_tools().await {
+            warn!(error = %error, "清理远程工具资源时出错");
+        }
+    }
+}
+
+/// 同一次执行内的事件接收者；交付、保存和停止判断均在下一动作之前完成。
+struct RunnerEventSink<'a> {
+    runner: &'a AgentTaskRunner,
+    task: &'a dyn Task,
+    waiting: bool,
+}
+
+#[async_trait]
+impl EventSink for RunnerEventSink<'_> {
+    async fn emit(&mut self, mut event: Event) -> Result<EventControl> {
+        self.runner.enrich_event(&mut event).await;
+        self.waiting = self.runner.publish_event(self.task, event).await?;
+        // Wait 结束本次运行；普通新输入只停止旧轮，交给外层输入循环。
+        if self.waiting || !self.task.input_stream().is_empty().await? {
+            return Ok(EventControl::Stop);
+        }
+        Ok(EventControl::Continue)
     }
 }
 
@@ -472,90 +503,103 @@ fn has_tool_data(value: &Value) -> bool {
 #[async_trait]
 impl TaskRunner for AgentTaskRunner {
     /// 根据传递的任务处理 Agent 消息队列并运行 Agent 流。
+    #[tracing::instrument(skip(self, task), fields(session_id = %self.session_id, task_id = %task.id()))]
     async fn invoke(&self, task: SharedTask) -> Result<()> {
-        let result: Result<()> = async {
-            // 同一次运行和销毁共用一把锁，避免资源在初始化或使用中被清理。
-            let mut flow = self.flow.lock().await;
+        let outcome: Result<()> = async {
+            let result: Result<()> = async {
+                // 同一次运行和销毁共用一把锁，避免资源在初始化或使用中被清理。
+                let mut flow = self.flow.lock().await;
 
-            // 1.确保沙箱、MCP、A2A 均初始化完成。
-            info!("AgentTaskRunner任务处理开始");
-            self.sandbox.ensure_sandbox().await?;
-            flow.initialize_tools().await?;
+                // 1.确保沙箱、MCP、A2A 均初始化完成。
+                info!("AgentTaskRunner任务处理开始");
+                self.sandbox.ensure_sandbox().await?;
+                flow.initialize_tools().await?;
 
-            // 2.循环读取任务中的输入消息队列。
-            while !task.input_stream().is_empty().await? {
-                // 3.从输入流中获取数据。
-                let Some(event) = Self::pop_event(task.as_ref()).await? else {
-                    continue;
-                };
+                // 2.循环读取任务中的输入消息队列。
+                while !task.input_stream().is_empty().await? {
+                    // 3.从输入流中获取数据。
+                    let Some(event) = Self::pop_event(task.as_ref()).await? else {
+                        bail!("任务输入事件不存在");
+                    };
 
-                // 4.判断事件类型是否为消息事件，如果是则处理消息并将附件同步到沙箱中。
-                let Event::Message(mut event) = event else {
-                    bail!("任务输入事件必须是消息事件");
-                };
-                self.sync_message_attachments_to_sandbox(&mut event).await;
-                info!(message = %event.message.chars().take(50).collect::<String>(),
+                    // 4.判断事件类型是否为消息事件，如果是则处理消息并将附件同步到沙箱中。
+                    let Event::Message(mut event) = event else {
+                        bail!("任务输入事件必须是消息事件");
+                    };
+                    self.sync_message_attachments_to_sandbox(&mut event).await;
+                    info!(message = %event.message.chars().take(50).collect::<String>(),
                     "AgentTaskRunner接收到新消息");
 
-                // 5.将消息事件转换成消息对象。
-                let message_obj = Message {
-                    message: event.message,
-                    attachments: event
-                        .attachments
-                        .into_iter()
-                        .map(|file| file.filepath)
-                        .collect(),
-                };
+                    // 5.将消息事件转换成消息对象。
+                    let message_obj = Message {
+                        message: event.message,
+                        attachments: event
+                            .attachments
+                            .into_iter()
+                            .map(|file| file.filepath)
+                            .collect(),
+                    };
 
-                // 6.传递消息对象并运行 PlannerReActFlow。
-                for event in self.run_flow(&mut *flow, message_obj).await? {
-                    if self.publish_event(task.as_ref(), event).await? {
+                    // 6.传递消息对象并运行 PlannerReActFlow。
+                    let mut sink = RunnerEventSink {
+                        runner: self,
+                        task: task.as_ref(),
+                        waiting: false,
+                    };
+                    self.run_flow(&mut *flow, message_obj, &mut sink).await?;
+                    if sink.waiting {
                         return Ok(());
                     }
-
-                    // 11.有新输入时结束本轮事件发布，外层循环继续处理下一条消息。
-                    if !task.input_stream().is_empty().await? {
-                        break;
-                    }
+                    // 11.普通 Stop 保留新输入，外层循环继续读取；自然完成也检查下一条。
                 }
+
+                // 12.更新会话状态为已完成。
+                self.session_repository
+                    .update_status(&self.session_id, SessionStatus::Completed)
+                    .await?;
+                Ok(())
+            }
+            .await;
+
+            if let Err(error) = result {
+                // 14.记录日志并往任务队列/消息队列中写入异常事件并更新会话状态。
+                error!(error = %error, "AgentTaskRunner运行出错");
+                self.put_and_add_event(
+                    task.as_ref(),
+                    Event::Error(ErrorEvent {
+                        error: format!("AgentTaskRunner出错: {error}"),
+                        ..ErrorEvent::default()
+                    }),
+                )
+                .await?;
+                self.session_repository
+                    .update_status(&self.session_id, SessionStatus::Completed)
+                    .await?;
             }
 
-            // 12.更新会话状态为已完成。
-            self.session_repository
-                .update_status(&self.session_id, SessionStatus::Completed)
-                .await?;
             Ok(())
         }
         .await;
-
-        if let Err(error) = result {
-            // 14.记录日志并往任务队列/消息队列中写入异常事件并更新会话状态。
-            error!(error = %error, "AgentTaskRunner运行出错");
-            self.put_and_add_event(
-                task.as_ref(),
-                Event::Error(ErrorEvent {
-                    error: format!("AgentTaskRunner出错: {error}"),
-                    ..ErrorEvent::default()
-                }),
-            )
-            .await?;
-            self.session_repository
-                .update_status(&self.session_id, SessionStatus::Completed)
-                .await?;
-        }
-
-        Ok(())
+        // 与 finally 对应：正常、错误和 Wait 出口均在返回前清理工具。
+        self.cleanup_tools().await;
+        outcome
     }
 
     /// 异步任务被取消，推送结束事件并更新状态。
     async fn on_cancel(&self, task: SharedTask) -> Result<()> {
         // 13.Tokio abort 会丢弃执行 future，由任务监督器等待取消完成后调用此方法。
         info!("AgentTaskRunner任务运行取消");
-        self.put_and_add_event(task.as_ref(), Event::Done(DoneEvent::default()))
-            .await?;
-        self.session_repository
-            .update_status(&self.session_id, SessionStatus::Completed)
-            .await
+        let outcome = async {
+            self.put_and_add_event(task.as_ref(), Event::Done(DoneEvent::default()))
+                .await?;
+            self.session_repository
+                .update_status(&self.session_id, SessionStatus::Completed)
+                .await
+        }
+        .await;
+        // Tokio abort 已丢弃 invoke future，由监督任务补上对应的 finally 清理。
+        self.cleanup_tools().await;
+        outcome
     }
 
     /// 销毁任务运行器并释放资源。
@@ -568,7 +612,9 @@ impl TaskRunner for AgentTaskRunner {
         self.sandbox.destroy().await?;
 
         // 2.清除 MCP 工具；3.清除 A2A 工具。由流按此顺序访问原工具实例。
-        flow.cleanup_tools().await?;
+        if let Err(error) = flow.cleanup_tools().await {
+            warn!(error = %error, "清理远程工具资源时出错");
+        }
         Ok(())
     }
 

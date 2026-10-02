@@ -2,7 +2,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::domain::models::{Event, Message};
+use crate::domain::{
+    models::Message,
+    services::event_sink::{EventControl, EventSink},
+};
 
 /// 流状态类型枚举。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,8 +29,8 @@ pub enum FlowStatus {
 /// 基础流协议，统一流的调用入口和结束状态判断。
 #[async_trait]
 pub trait BaseFlow: Send + Sync {
-    /// 传递用户消息运行流，按发生顺序返回本轮生成的事件。
-    async fn invoke(&mut self, message: Message) -> Result<Vec<Event>>;
+    /// 传递用户消息运行流，等待每条事件交付后再推进后续动作。
+    async fn invoke(&mut self, message: Message, sink: &mut dyn EventSink) -> Result<EventControl>;
 
     /// 返回流是否已经回到空闲状态。
     fn done(&self) -> bool;

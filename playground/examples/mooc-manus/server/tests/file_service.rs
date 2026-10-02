@@ -13,7 +13,7 @@ use loco_rs::storage::{drivers, Storage, StorageError};
 use server::{
     application::services::FileService,
     domain::{
-        external::{FileNotFound, InvalidFileUpload, UploadFile},
+        external::{FileNotFound, UploadFile},
         models::File,
         repositories::FileRepository,
     },
@@ -28,6 +28,7 @@ async fn gets_uploaded_metadata_and_downloads_content_through_file_service() -> 
     let storage = Arc::new(LocoFileStorage::new(
         Arc::new(Storage::single(drivers::mem::new())),
         repository.clone(),
+        "http://localhost:5150",
     ));
     let service = FileService::new(storage, repository);
 
@@ -78,6 +79,7 @@ async fn does_not_report_repository_failure_as_file_not_found() {
     let storage = Arc::new(LocoFileStorage::new(
         Arc::new(Storage::single(drivers::mem::new())),
         repository.clone(),
+        "http://localhost:5150",
     ));
     let service = FileService::new(storage, repository);
     let id = uuid::Uuid::new_v4().to_string();
@@ -91,11 +93,12 @@ async fn does_not_report_repository_failure_as_file_not_found() {
 }
 
 #[tokio::test]
-async fn preserves_storage_failure_and_invalid_upload_types() {
+async fn preserves_storage_failure_for_original_upload_metadata() {
     let repository: Arc<dyn FileRepository> = Arc::new(FailingReadRepository);
     let storage = Arc::new(LocoFileStorage::new(
         Arc::new(Storage::single(drivers::null::new())),
         repository.clone(),
+        "http://localhost:5150",
     ));
     let service = FileService::new(storage, repository);
     let error = service
@@ -108,7 +111,6 @@ async fn preserves_storage_failure_and_invalid_upload_types() {
         .unwrap_err();
     assert!(error.is::<StorageError>());
     assert!(!error.is::<FileNotFound>());
-    assert!(!error.is::<InvalidFileUpload>());
 
     let error = service
         .upload_file(UploadFile {
@@ -118,5 +120,5 @@ async fn preserves_storage_failure_and_invalid_upload_types() {
         })
         .await
         .unwrap_err();
-    assert!(error.is::<InvalidFileUpload>());
+    assert!(error.is::<StorageError>());
 }

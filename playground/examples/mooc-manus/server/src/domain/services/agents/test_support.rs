@@ -13,7 +13,22 @@ use chrono::{DateTime, Utc};
 use crate::domain::{
     models::{Event, File, Memory, Session, SessionStatus},
     repositories::SessionRepository,
+    services::event_sink::{EventControl, EventSink},
 };
+
+/// 测试用收集器；生产执行链通过 EventSink 逐条交付，测试可检查最终事件列表。
+#[derive(Default)]
+pub struct CollectedEvents {
+    pub events: Vec<Event>,
+}
+
+#[async_trait]
+impl EventSink for CollectedEvents {
+    async fn emit(&mut self, event: Event) -> Result<EventControl> {
+        self.events.push(event);
+        Ok(EventControl::Continue)
+    }
+}
 
 /// Agent 与 Flow 单元测试使用的内存仓库。
 #[derive(Default)]
@@ -105,6 +120,30 @@ impl SessionRepository for MemoryRepository {
             .ok_or_else(|| anyhow::anyhow!("会话[{session_id}]不存在"))?;
         session.latest_message = message.to_string();
         session.latest_message_at = Some(timestamp);
+        Ok(())
+    }
+
+    async fn update_latest_message_and_increment_unread(
+        &self,
+        session_id: &str,
+        message: &str,
+        timestamp: DateTime<Utc>,
+    ) -> Result<()> {
+        if self.fail_metadata.load(Ordering::SeqCst) {
+            bail!("模拟更新会话元数据失败");
+        }
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow::anyhow!("会话[{session_id}]不存在"))?;
+        // 完成所有检查后再一次性修改，模拟数据库原子更新的失败边界。
+        let unread = session
+            .unread_message_count
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("未读消息数溢出"))?;
+        session.latest_message = message.to_string();
+        session.latest_message_at = Some(timestamp);
+        session.unread_message_count = unread;
         Ok(())
     }
 

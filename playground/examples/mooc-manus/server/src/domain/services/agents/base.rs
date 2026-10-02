@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::time::sleep;
+use tokio::{sync::Mutex, time::sleep};
 use tracing::{error, warn};
 use uuid::Uuid;
 
@@ -15,7 +15,10 @@ use crate::domain::{
         ToolResult,
     },
     repositories::SessionRepository,
-    services::tools::{BaseTool, ToolArguments, ToolSchema},
+    services::{
+        event_sink::{EventControl, EventSink},
+        tools::{BaseTool, ToolArguments, ToolSchema},
+    },
 };
 
 /// 具体 Agent 可以覆盖的默认属性，对应 Python 基类中的类属性。
@@ -72,7 +75,7 @@ pub struct BaseAgent {
     /// JSON 输出解析器
     json_parser: Arc<dyn JsonParser>,
     /// 工具集
-    tools: Vec<Box<dyn BaseTool>>,
+    tools: Arc<Mutex<Vec<Box<dyn BaseTool>>>>,
 }
 
 impl BaseAgent {
@@ -94,7 +97,7 @@ impl BaseAgent {
             llm,
             memory: None,
             json_parser,
-            tools,
+            tools: Arc::new(Mutex::new(tools)),
         }
     }
 
@@ -109,13 +112,18 @@ impl BaseAgent {
     }
 
     /// 返回 JSON 输出解析器。
-    pub fn json_parser(&self) -> &dyn JsonParser {
-        self.json_parser.as_ref()
+    pub fn json_parser(&self) -> Arc<dyn JsonParser> {
+        Arc::clone(&self.json_parser)
     }
 
-    /// 按注册顺序初始化工具，使执行 Agent 直接使用初始化后的工具声明和连接。
+    /// 两个 Agent 共享同一工具集合，使工具声明、连接和调用状态一致。
+    pub(crate) fn share_tools_from(&mut self, other: &BaseAgent) {
+        self.tools = Arc::clone(&other.tools);
+    }
+
+    /// 按注册顺序初始化工具，使 Agent 直接使用初始化后的工具声明和连接。
     pub(crate) async fn initialize_tools(&mut self) -> Result<()> {
-        for tool in &mut self.tools {
+        for tool in self.tools.lock().await.iter_mut() {
             tool.initialize().await?;
         }
         Ok(())
@@ -123,12 +131,21 @@ impl BaseAgent {
 
     /// 按指定工具集名称及顺序释放长期资源。
     pub(crate) async fn cleanup_tools(&mut self, names: &[&str]) -> Result<()> {
+        let mut first_error = None;
+        let mut tools = self.tools.lock().await;
         for name in names {
-            if let Some(tool) = self.tools.iter_mut().find(|tool| tool.name() == *name) {
-                tool.cleanup().await?;
+            if let Some(tool) = tools.iter_mut().find(|tool| tool.name() == *name) {
+                if let Err(error) = tool.cleanup().await {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
             }
         }
-        Ok(())
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// 压缩 Agent 的记忆。
@@ -145,9 +162,10 @@ impl BaseAgent {
         // 1. 回滚前必须先取得数据库中的完整记忆
         let mut memory = self.ensure_memory().await?.clone();
         // 2. 取出记忆中的最后一条消息，检查是否是工具调用
-        let Some(tool_call) = memory
-            .get_last_message()
-            .and_then(get_tool_calls)
+        let Some(last_message) = memory.get_last_message() else {
+            return Ok(());
+        };
+        let Some(tool_call) = get_tool_calls(last_message)?
             .and_then(|tool_calls| tool_calls.first())
             .cloned()
         else {
@@ -187,15 +205,20 @@ impl BaseAgent {
         self.persist_memory(memory).await
     }
 
-    /// 传递消息和响应格式调用 Agent，返回本轮依次产生的事件。
-    pub async fn invoke(&mut self, query: &str, format: Option<&str>) -> Result<Vec<Event>> {
+    /// 传递消息和响应格式调用 Agent，等待每条事件交付后再推进后续动作。
+    pub async fn invoke(
+        &mut self,
+        query: &str,
+        format: Option<&str>,
+        sink: &mut dyn EventSink,
+    ) -> Result<EventControl> {
         // 1. 需要判断是否传递了 format
         let format = format
+            .filter(|format| !format.is_empty())
             .map(str::to_owned)
             .or_else(|| self.options.format.clone());
 
         // 2. 调用语言模型获取响应
-        let mut events = Vec::new();
         let mut message = self
             .invoke_llm(vec![text_message("user", query)], format.as_deref())
             .await?;
@@ -204,7 +227,7 @@ impl BaseAgent {
         let mut reached_max_iterations = true;
         for _ in 0..self.agent_config.max_iterations {
             // 4. 如果响应内容无法调用则表示 LLM 生成了文本回答，这个时候就是最终答案
-            let Some(tool_calls) = get_tool_calls(&message) else {
+            let Some(tool_calls) = get_tool_calls(&message)? else {
                 reached_max_iterations = false;
                 break;
             };
@@ -213,16 +236,22 @@ impl BaseAgent {
             let mut tool_messages = Vec::new();
             for tool_call in tool_calls {
                 // 解析工具调用参数，如果没有 function 参数，直接跳过
-                let Some(function) = tool_call.get("function").and_then(Value::as_object) else {
+                let Some(function) = tool_call
+                    .get("function")
+                    .and_then(Value::as_object)
+                    .filter(|function| !function.is_empty())
+                else {
                     continue;
                 };
                 // 6. 取出调用工具 id、名字、参数信息
-                let tool_call_id = tool_call
+                let id = tool_call
                     .get("id")
-                    .and_then(Value::as_str)
-                    .filter(|id| !id.is_empty())
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| Uuid::new_v4().to_string());
+                    .ok_or_else(|| anyhow!("工具调用缺少 id"))?;
+                let tool_call_id = if json_truthy(id) {
+                    serde_json::from_value::<String>(id.clone())?
+                } else {
+                    Uuid::new_v4().to_string()
+                };
                 let function_name = function
                     .get("name")
                     .and_then(Value::as_str)
@@ -241,39 +270,51 @@ impl BaseAgent {
                     .ok_or_else(|| anyhow!("工具[{function_name}]参数必须是 JSON 对象"))?;
 
                 // 7. 取出 Agent 中对应的工具
-                let tool = self.get_tool(&function_name)?;
-                let tool_name = tool.name().to_owned();
+                let (tool_index, tool_name) = self.get_tool(&function_name).await?;
 
                 // 8. 返回工具即将调用事件
                 // 其中 tool_content 比较特殊，需要在具体业务中进行实现
-                events.push(Event::Tool(ToolEvent {
-                    tool_call_id: tool_call_id.clone(),
-                    tool_name: tool_name.clone(),
-                    function_name: function_name.clone(),
-                    function_args: function_args.clone(),
-                    status: ToolEventStatus::Calling,
-                    ..ToolEvent::default()
-                }));
+                if sink
+                    .emit(Event::Tool(ToolEvent {
+                        tool_call_id: tool_call_id.clone(),
+                        tool_name: tool_name.clone(),
+                        function_name: function_name.clone(),
+                        function_args: function_args.clone(),
+                        status: ToolEventStatus::Calling,
+                        ..ToolEvent::default()
+                    }))
+                    .await?
+                    == EventControl::Stop
+                {
+                    return Ok(EventControl::Stop);
+                }
 
                 // 9. 调用工具并获取结果
-                let result = self
-                    .invoke_tool(tool, &function_name, function_args.clone())
-                    .await;
+                let result = {
+                    let tools = self.tools.lock().await;
+                    self.invoke_tool(
+                        tools[tool_index].as_ref(),
+                        &function_name,
+                        function_args.clone(),
+                    )
+                    .await
+                };
 
                 // 10. 返回工具调用结果，其中 tool_content 比较特殊，需要在具体业务中进行实现
-                events.push(Event::Tool(ToolEvent {
-                    tool_call_id: tool_call_id.clone(),
-                    tool_name,
-                    function_name: function_name.clone(),
-                    function_args,
-                    function_result: Some(result.clone()),
-                    status: ToolEventStatus::Called,
-                    ..ToolEvent::default()
-                }));
-
-                // message_ask_user 需要等待用户回复，保留待闭合的 assistant 工具调用。
-                if function_name == "message_ask_user" {
-                    return Ok(events);
+                if sink
+                    .emit(Event::Tool(ToolEvent {
+                        tool_call_id: tool_call_id.clone(),
+                        tool_name,
+                        function_name: function_name.clone(),
+                        function_args,
+                        function_result: Some(result.clone()),
+                        status: ToolEventStatus::Called,
+                        ..ToolEvent::default()
+                    }))
+                    .await?
+                    == EventControl::Stop
+                {
+                    return Ok(EventControl::Stop);
                 }
 
                 // 11. 组装工具响应
@@ -289,47 +330,59 @@ impl BaseAgent {
         }
 
         // 13. 超过最大迭代次数后，返回错误事件
-        if reached_max_iterations {
-            events.push(Event::Error(ErrorEvent {
-                error: format!(
-                    "Agent迭代超过最大迭代次数: {}, 任务处理失败",
-                    self.agent_config.max_iterations
-                ),
-                ..ErrorEvent::default()
-            }));
+        if reached_max_iterations
+            && sink
+                .emit(Event::Error(ErrorEvent {
+                    error: format!(
+                        "Agent迭代超过最大迭代次数: {}, 任务处理失败",
+                        self.agent_config.max_iterations
+                    ),
+                    ..ErrorEvent::default()
+                }))
+                .await?
+                == EventControl::Stop
+        {
+            return Ok(EventControl::Stop);
         }
 
         // 14. 在指定步骤内完成了迭代则返回消息事件
-        if let Some(content) = message.get("content").and_then(Value::as_str) {
-            events.push(Event::Message(MessageEvent {
-                message: content.to_owned(),
+        if let Some(content) = message.get("content").filter(|content| !content.is_null()) {
+            // 非空载荷需要符合消息字段的字符串类型，校验失败向调用方返回错误。
+            let content = serde_json::from_value::<String>(content.clone())?;
+            sink.emit(Event::Message(MessageEvent {
+                message: content,
                 ..MessageEvent::default()
-            }));
+            }))
+            .await
         } else {
-            events.push(Event::Error(ErrorEvent {
+            sink.emit(Event::Error(ErrorEvent {
                 error: "Agent未能生成有效回复内容".to_string(),
                 ..ErrorEvent::default()
-            }));
+            }))
+            .await
         }
-
-        Ok(events)
     }
 
     /// 获取 Agent 所有可用工具的参数声明。
-    fn get_available_tools(&self) -> Vec<ToolSchema> {
+    async fn get_available_tools(&self) -> Vec<ToolSchema> {
         self.tools
+            .lock()
+            .await
             .iter()
             .flat_map(|tool| tool.get_tools())
             .collect()
     }
 
-    /// 获取对应工具所在的工具集。
-    fn get_tool(&self, tool_name: &str) -> Result<&dyn BaseTool> {
-        // 循环遍历所有工具包
+    /// 获取对应工具集的位置和名字，交付事件时释放工具集合的锁。
+    async fn get_tool(&self, tool_name: &str) -> Result<(usize, String)> {
+        // 循环遍历所有工具包，判断工具包中是否存在该工具。
         self.tools
+            .lock()
+            .await
             .iter()
-            .find(|tool| tool.has_tool(tool_name)) // 判断工具包中是否存在该工具
-            .map(AsRef::as_ref) // 转换为 trait 对象
+            .enumerate()
+            .find(|(_, tool)| tool.has_tool(tool_name))
+            .map(|(index, tool)| (index, tool.name().to_owned()))
             .ok_or_else(|| anyhow!("未知工具: {tool_name}"))
     }
 
@@ -343,55 +396,64 @@ impl BaseAgent {
         self.add_to_memory(messages).await?;
 
         // 2. 组装语言模型的响应格式
-        let response_format = format.map(|format| {
+        let response_format = format.filter(|format| !format.is_empty()).map(|format| {
             ResponseFormat::from_iter([("type".to_string(), Value::String(format.to_string()))])
         });
-        let available_tools = self.get_available_tools();
-        let tools = (!available_tools.is_empty()).then_some(available_tools);
-        let mut last_error = "LLM连续返回空内容".to_string();
+        let mut last_error = "调用语言模型发生错误".to_string();
 
         // 3. 循环向 LLM 发起提问直到最大重试次数
         for _ in 0..self.agent_config.max_retries {
-            // 4. 调用语言模型获取响应内容
-            // 每次请求都传递完整记忆，使模型能够理解历史上下文。
-            let memory_messages = self.ensure_memory().await?.get_messages().to_vec();
-            match self
-                .llm
-                .invoke(
-                    memory_messages,
-                    tools.clone(),
-                    response_format.clone(),
-                    self.options.tool_choice.clone(),
-                )
-                .await
-            {
+            // 每次尝试包含模型调用和响应记忆保存，两者发生错误都按相同次数重试。
+            let attempt: Result<Option<LlmMessage>> = async {
+                // 4. 调用语言模型获取响应内容
+                // 每次请求都传递完整记忆，使模型能够理解历史上下文。
+                let memory_messages = self.ensure_memory().await?.get_messages().to_vec();
+                let message = self
+                    .llm
+                    .invoke(
+                        memory_messages,
+                        Some(self.get_available_tools().await),
+                        response_format.clone(),
+                        self.options.tool_choice.clone(),
+                    )
+                    .await?;
+
                 // 5. 处理单次 AI 响应内容，避免空回复
-                Ok(message) if is_empty_assistant_message(&message) => {
+                if is_empty_assistant_message(&message) {
                     warn!("LLM回复了空内容，执行重试");
                     self.add_to_memory(vec![
                         text_message("assistant", ""),
                         text_message("user", "AI无响应内容，请继续。"),
                     ])
                     .await?;
-                    sleep(self.options.retry_interval).await;
+                    return Ok(None);
                 }
+
                 // 6. 取出非空消息并处理工具调用
-                Ok(message) => {
-                    let filtered_message = filter_llm_message(message);
-                    // 9. 将消息添加到记忆中
-                    self.add_to_memory(vec![filtered_message.clone()]).await?;
-                    return Ok(filtered_message);
-                }
+                let filtered_message = filter_llm_message(message)?;
+                // 9. 将消息添加到记忆中
+                self.add_to_memory(vec![filtered_message.clone()]).await?;
+                Ok(Some(filtered_message))
+            }
+            .await;
+
+            match attempt {
+                Ok(Some(message)) => return Ok(message),
+                Ok(None) => {}
                 Err(err) => {
                     // 10. 记录日志并睡眠指定的时间
                     last_error = err.to_string();
                     error!(error = %err, "调用语言模型发生错误");
-                    sleep(self.options.retry_interval).await;
                 }
             }
+            sleep(self.options.retry_interval).await;
         }
 
-        Err(anyhow!("调用语言模型失败: {last_error}"))
+        // 11. 所有重试均已耗尽仍未获得有效响应，返回错误。
+        Err(anyhow!(
+            "调用语言模型失败, 已达到最大重试次数({}): {last_error}",
+            self.agent_config.max_retries
+        ))
     }
 
     /// 传递工具集、工具名字和参数调用指定工具。
@@ -438,20 +500,12 @@ impl BaseAgent {
             .ok_or_else(|| anyhow!("Agent记忆加载失败"))
     }
 
-    /// 保存记忆，并且只在仓库保存成功后更新本地缓存。
+    /// 更新当前 Agent 的记忆后保存到仓库；保存失败时保留本轮内存状态。
     async fn persist_memory(&mut self, memory: Memory) -> Result<()> {
-        if let Err(error) = self
-            .session_repository
-            .save_memory(&self.session_id, &self.options.name, memory.clone())
+        self.memory = Some(memory.clone());
+        self.session_repository
+            .save_memory(&self.session_id, &self.options.name, memory)
             .await
-        {
-            // 保存结果不确定时清空缓存，下次操作重新以仓库数据为准。
-            self.memory = None;
-            return Err(error);
-        }
-
-        self.memory = Some(memory);
-        Ok(())
     }
 
     /// 将对应的信息添加到记忆中。
@@ -504,8 +558,13 @@ pub trait Agent: Send + Sync {
     }
 
     /// 传递消息和响应格式调用 Agent，返回本轮依次产生的事件。
-    async fn invoke(&mut self, query: &str, format: Option<&str>) -> Result<Vec<Event>> {
-        self.base_mut().invoke(query, format).await
+    async fn invoke(
+        &mut self,
+        query: &str,
+        format: Option<&str>,
+        sink: &mut dyn EventSink,
+    ) -> Result<EventControl> {
+        self.base_mut().invoke(query, format, sink).await
     }
 }
 
@@ -535,36 +594,42 @@ fn tool_message(tool_call_id: String, function_name: String, content: String) ->
     ])
 }
 
-fn get_tool_calls(message: &LlmMessage) -> Option<&[Value]> {
-    message
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .filter(|tool_calls| !tool_calls.is_empty())
-        .map(Vec::as_slice)
+fn get_tool_calls(message: &LlmMessage) -> Result<Option<&[Value]>> {
+    let Some(tool_calls) = message.get("tool_calls").filter(|value| json_truthy(value)) else {
+        return Ok(None);
+    };
+    tool_calls
+        .as_array()
+        .map(|tool_calls| Some(tool_calls.as_slice()))
+        .ok_or_else(|| anyhow!("模型响应 tool_calls 必须是数组"))
 }
 
 fn is_empty_assistant_message(message: &LlmMessage) -> bool {
     message.get("role").and_then(Value::as_str) == Some("assistant")
-        && !has_content(message)
-        && get_tool_calls(message).is_none()
+        && !message.get("content").is_some_and(json_truthy)
+        && !message.get("tool_calls").is_some_and(json_truthy)
 }
 
-fn has_content(message: &LlmMessage) -> bool {
-    message.get("content").is_some_and(|content| match content {
+/// JSON 值的真假判断与模型响应过滤规则一致，空容器和数值零也视为空。
+fn json_truthy(value: &Value) -> bool {
+    match value {
         Value::Null => false,
-        Value::String(content) => !content.is_empty(),
-        _ => true,
-    })
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64() != Some(0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
+    }
 }
 
-fn filter_llm_message(message: LlmMessage) -> LlmMessage {
+fn filter_llm_message(message: LlmMessage) -> Result<LlmMessage> {
     // 8. 非 AI 消息则记录日志，并存储 message
     if message.get("role").and_then(Value::as_str) != Some("assistant") {
         warn!(
             role = ?message.get("role"),
             "LLM响应内容无法确认消息角色"
         );
-        return message;
+        return Ok(message);
     }
 
     // 7. 取出工具调用结果，限制 LLM 一次只调用一个工具
@@ -579,44 +644,57 @@ fn filter_llm_message(message: LlmMessage) -> LlmMessage {
     // 保留非空推理内容，供后续模型调用继续使用；其余额外字段仍按白名单过滤。
     if let Some(reasoning_content) = message
         .get("reasoning_content")
-        .and_then(Value::as_str)
-        .filter(|content| !content.is_empty())
+        .filter(|content| json_truthy(content))
     {
-        filtered_message.insert(
-            "reasoning_content".to_string(),
-            Value::String(reasoning_content.to_owned()),
-        );
+        filtered_message.insert("reasoning_content".to_string(), reasoning_content.clone());
     }
 
-    if let Some(tool_calls) = get_tool_calls(&message) {
+    if let Some(tool_calls) = get_tool_calls(&message)? {
         filtered_message.insert(
             "tool_calls".to_string(),
             Value::Array(tool_calls.iter().take(1).cloned().collect()),
         );
     }
 
-    filtered_message
+    Ok(filtered_message)
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
         collections::VecDeque,
-        sync::{Arc, Mutex},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
     };
 
     use anyhow::{anyhow, Result};
     use async_trait::async_trait;
     use serde_json::{json, Value};
+    use tokio::sync::oneshot;
 
     use super::*;
     use crate::domain::{
         external::{Response, Tool, ToolChoice},
         services::{
             agents::test_support::MemoryRepository,
-            tools::{tool, ToolDefinition},
+            tools::{tool, MessageTool, ToolDefinition},
         },
     };
+
+    impl BaseAgent {
+        pub(crate) async fn invoke_collect(
+            &mut self,
+            query: &str,
+            format: Option<&str>,
+        ) -> Result<Vec<Event>> {
+            let mut sink =
+                crate::domain::services::agents::test_support::CollectedEvents::default();
+            self.invoke(query, format, &mut sink).await?;
+            Ok(sink.events)
+        }
+    }
 
     type Requests = Arc<Mutex<Vec<Vec<LlmMessage>>>>;
     type ToolCounts = Arc<Mutex<Vec<usize>>>;
@@ -674,6 +752,7 @@ mod tests {
     struct EchoTool {
         definitions: Vec<ToolDefinition>,
         should_fail: bool,
+        calls: Arc<AtomicUsize>,
     }
 
     impl EchoTool {
@@ -686,6 +765,7 @@ mod tests {
                     vec!["text".to_string()],
                 )],
                 should_fail,
+                calls: Arc::new(AtomicUsize::new(0)),
             }
         }
     }
@@ -705,6 +785,7 @@ mod tests {
             tool_name: &str,
             kwargs: ToolArguments,
         ) -> Result<ToolResult<Value>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             if self.should_fail {
                 return Err(anyhow!("工具执行失败"));
             }
@@ -723,6 +804,7 @@ mod tests {
         name: &'static str,
         definitions: Vec<ToolDefinition>,
         calls: Arc<Mutex<Vec<String>>>,
+        fail_cleanup: bool,
     }
 
     impl LifecycleTool {
@@ -731,6 +813,7 @@ mod tests {
                 name,
                 definitions: Vec::new(),
                 calls,
+                fail_cleanup: false,
             }
         }
     }
@@ -780,7 +863,36 @@ mod tests {
                 .unwrap()
                 .push(format!("cleanup:{}", self.name));
             self.definitions.clear();
+            if self.fail_cleanup {
+                return Err(anyhow!("cleanup:{} failed", self.name));
+            }
             Ok(())
+        }
+    }
+
+    struct ToolEventSink {
+        events: Vec<Event>,
+        status: ToolEventStatus,
+        entered: Option<oneshot::Sender<()>>,
+        release: Option<oneshot::Receiver<()>>,
+        control: EventControl,
+    }
+
+    #[async_trait]
+    impl EventSink for ToolEventSink {
+        async fn emit(&mut self, event: Event) -> Result<EventControl> {
+            let matches = matches!(&event, Event::Tool(tool) if tool.status == self.status);
+            self.events.push(event);
+            if matches {
+                if let Some(entered) = self.entered.take() {
+                    entered.send(()).unwrap();
+                }
+                if let Some(release) = self.release.take() {
+                    release.await.unwrap();
+                }
+                return Ok(self.control);
+            }
+            Ok(EventControl::Continue)
         }
     }
 
@@ -888,34 +1000,148 @@ mod tests {
                 expected.insert("reasoning_content".to_string(), json!(reasoning));
             }
 
-            assert_eq!(filter_llm_message(message), expected);
+            assert_eq!(filter_llm_message(message).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn response_fields_follow_json_truthiness_and_keep_reasoning_values() {
+        for empty in [
+            Value::Null,
+            json!(false),
+            json!(0),
+            json!(0.0),
+            json!(""),
+            json!([]),
+            json!({}),
+        ] {
+            let mut message = assistant_message(empty.clone());
+            message.insert("tool_calls".into(), empty.clone());
+            message.insert("reasoning_content".into(), empty);
+            assert!(is_empty_assistant_message(&message));
+            assert!(get_tool_calls(&message).unwrap().is_none());
+            assert!(!filter_llm_message(message)
+                .unwrap()
+                .contains_key("reasoning_content"));
+        }
+        for reasoning in [
+            json!(true),
+            json!(1),
+            json!(" "),
+            json!(["reason"]),
+            json!({"reason":"value"}),
+        ] {
+            let mut message = assistant_message(json!("answer"));
+            message.insert("reasoning_content".into(), reasoning.clone());
+            assert_eq!(
+                filter_llm_message(message).unwrap()["reasoning_content"],
+                reasoning
+            );
         }
     }
 
     #[tokio::test]
-    async fn initialized_tool_definitions_are_available_to_the_same_agent() {
+    async fn numeric_and_false_assistant_content_retry_as_empty_responses() {
+        for empty in [json!(0), json!(false)] {
+            let (mut agent, requests, _, _) = agent(
+                vec![assistant_message(empty), assistant_message(json!("answer"))],
+                Vec::new(),
+            );
+            let events = agent.invoke_collect("hello", None).await.unwrap();
+            assert!(matches!(&events[0], Event::Message(event) if event.message == "answer"));
+            assert_eq!(requests.lock().unwrap().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_final_content_preserves_earlier_tool_events_and_returns_error() {
+        let (mut agent, _, _, repository) = agent(
+            vec![tool_call_message(), assistant_message(json!(123))],
+            vec![Box::new(EchoTool::new(false))],
+        );
+        let mut sink = crate::domain::services::agents::test_support::CollectedEvents::default();
+
+        let error = agent
+            .invoke("echo hello", None, &mut sink)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("expected a string"));
+        assert_eq!(sink.events.len(), 2);
+        assert!(
+            matches!(&sink.events[0], Event::Tool(event) if event.status == ToolEventStatus::Calling)
+        );
+        assert!(
+            matches!(&sink.events[1], Event::Tool(event) if event.status == ToolEventStatus::Called)
+        );
+        // 响应先加入记忆，随后构造领域消息事件时才校验字符串字段。
+        assert_eq!(
+            repository
+                .memory(SESSION_ID, "base")
+                .messages
+                .last()
+                .unwrap()["content"],
+            123
+        );
+    }
+
+    #[tokio::test]
+    async fn non_array_tool_calls_fail_validation_instead_of_emitting_a_final_answer() {
+        for invalid in [
+            json!("invalid"),
+            json!({"id":"call-1"}),
+            json!(true),
+            json!(1),
+        ] {
+            let mut response = assistant_message(json!("cannot treat this as a final answer"));
+            response.insert("tool_calls".into(), invalid);
+            let (mut agent, requests, _, repository) =
+                agent(vec![response.clone(), response], Vec::new());
+            let mut sink =
+                crate::domain::services::agents::test_support::CollectedEvents::default();
+
+            let error = agent.invoke("hello", None, &mut sink).await.unwrap_err();
+
+            assert!(error.to_string().contains("tool_calls 必须是数组"));
+            assert!(sink.events.is_empty());
+            assert_eq!(requests.lock().unwrap().len(), 2);
+            assert_eq!(repository.memory(SESSION_ID, "base").messages.len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn agents_share_initialized_tool_definitions_connections_and_cleanup() {
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let (mut agent, _, _, _) = agent(
+        let (mut owner, _, _, _) = agent(
             Vec::new(),
             vec![Box::new(LifecycleTool::new("mcp", calls.clone()))],
         );
-        assert!(agent.get_available_tools().is_empty());
-        assert!(agent.get_tool("mcp_call").is_err());
+        let (mut planner, _, _, _) = agent(Vec::new(), Vec::new());
+        planner.share_tools_from(&owner);
+        assert!(planner.get_available_tools().await.is_empty());
+        assert!(planner.get_tool("mcp_call").await.is_err());
 
-        agent.initialize_tools().await.unwrap();
+        owner.initialize_tools().await.unwrap();
 
         assert_eq!(
-            agent.get_available_tools()[0]["function"]["name"],
+            planner.get_available_tools().await,
+            owner.get_available_tools().await
+        );
+        assert_eq!(
+            planner.get_available_tools().await[0]["function"]["name"],
             "mcp_call"
         );
-        let result = agent
-            .get_tool("mcp_call")
-            .unwrap()
+        let (index, _) = planner.get_tool("mcp_call").await.unwrap();
+        let result = planner.tools.lock().await[index]
             .invoke("mcp_call", ToolArguments::new())
             .await
             .unwrap();
         assert_eq!(result.data, Some(json!("mcp")));
-        assert_eq!(*calls.lock().unwrap(), ["initialize:mcp", "call:mcp"]);
+        owner.cleanup_tools(&["mcp"]).await.unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["initialize:mcp", "call:mcp", "cleanup:mcp"]
+        );
     }
 
     #[tokio::test]
@@ -933,6 +1159,243 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_cleanup_attempts_all_targets_and_returns_first_error() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut mcp = LifecycleTool::new("mcp", calls.clone());
+        mcp.fail_cleanup = true;
+        let mut a2a = LifecycleTool::new("a2a", calls.clone());
+        a2a.fail_cleanup = true;
+        let (mut agent, _, _, _) = agent(
+            Vec::new(),
+            vec![
+                Box::new(mcp),
+                Box::new(a2a),
+                Box::new(LifecycleTool::new("browser", calls.clone())),
+            ],
+        );
+
+        let error = agent
+            .cleanup_tools(&["mcp", "a2a", "browser"])
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "cleanup:mcp failed");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["cleanup:mcp", "cleanup:a2a", "cleanup:browser"]
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_events_wait_for_delivery_before_tool_or_memory_progress() {
+        for status in [ToolEventStatus::Calling, ToolEventStatus::Called] {
+            let tool = EchoTool::new(false);
+            let calls = tool.calls.clone();
+            let (mut agent, requests, _, repository) = agent(
+                vec![tool_call_message(), assistant_message(json!("done"))],
+                vec![Box::new(tool)],
+            );
+            let (entered_tx, entered_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let expected_calls = usize::from(status == ToolEventStatus::Called);
+            let task = tokio::spawn(async move {
+                let mut sink = ToolEventSink {
+                    events: Vec::new(),
+                    status,
+                    entered: Some(entered_tx),
+                    release: Some(release_rx),
+                    control: EventControl::Continue,
+                };
+                let control = agent.invoke("echo hello", None, &mut sink).await.unwrap();
+                (control, sink.events)
+            });
+
+            entered_rx.await.unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
+            assert_eq!(requests.lock().unwrap().len(), 1);
+            assert_eq!(repository.writes.load(Ordering::SeqCst), 2);
+            assert!(repository
+                .memory(SESSION_ID, "base")
+                .get_last_message()
+                .is_some_and(|message| message.contains_key("tool_calls")));
+
+            release_tx.send(()).unwrap();
+            let (control, events) = task.await.unwrap();
+            assert_eq!(control, EventControl::Continue);
+            assert_eq!(events.len(), 3);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(requests.lock().unwrap().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_on_tool_event_prevents_next_action_and_tool_reply_write() {
+        for status in [ToolEventStatus::Calling, ToolEventStatus::Called] {
+            let tool = EchoTool::new(false);
+            let calls = tool.calls.clone();
+            let (mut agent, requests, _, repository) = agent(
+                vec![tool_call_message(), assistant_message(json!("unreached"))],
+                vec![Box::new(tool)],
+            );
+            let expected_calls = usize::from(status == ToolEventStatus::Called);
+            let mut sink = ToolEventSink {
+                events: Vec::new(),
+                status,
+                entered: None,
+                release: None,
+                control: EventControl::Stop,
+            };
+
+            let control = agent.invoke("echo hello", None, &mut sink).await.unwrap();
+
+            assert_eq!(control, EventControl::Stop);
+            assert_eq!(sink.events.len(), expected_calls + 1);
+            assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
+            assert_eq!(requests.lock().unwrap().len(), 1);
+            assert_eq!(repository.writes.load(Ordering::SeqCst), 2);
+            assert!(repository
+                .memory(SESSION_ID, "base")
+                .get_last_message()
+                .is_some_and(|message| message.contains_key("tool_calls")));
+        }
+    }
+
+    #[tokio::test]
+    async fn later_llm_failure_preserves_delivered_tool_events() {
+        let (mut agent, requests, _, _) = agent(
+            vec![tool_call_message()],
+            vec![Box::new(EchoTool::new(false))],
+        );
+        let mut sink = crate::domain::services::agents::test_support::CollectedEvents::default();
+
+        let error = agent
+            .invoke("echo hello", None, &mut sink)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("缺少 Mock LLM 响应"));
+        assert_eq!(requests.lock().unwrap().len(), 3);
+        assert_eq!(sink.events.len(), 2);
+        assert!(
+            matches!(&sink.events[0], Event::Tool(tool) if tool.status == ToolEventStatus::Calling)
+        );
+        assert!(
+            matches!(&sink.events[1], Event::Tool(tool) if tool.status == ToolEventStatus::Called)
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_user_records_tool_reply_and_continues_llm_when_the_sink_continues() {
+        let (mut agent, requests, _, repository) = agent(
+            vec![
+                tool_call_message_named("message_ask_user"),
+                assistant_message(json!("已记录工具回复，继续总结")),
+            ],
+            vec![Box::new(MessageTool::new())],
+        );
+        let mut sink = crate::domain::services::agents::test_support::CollectedEvents::default();
+
+        let control = agent.invoke("ask user", None, &mut sink).await.unwrap();
+
+        assert_eq!(control, EventControl::Continue);
+        assert_eq!(sink.events.len(), 3);
+        assert!(
+            matches!(&sink.events[0], Event::Tool(tool) if tool.status == ToolEventStatus::Calling)
+        );
+        assert!(
+            matches!(&sink.events[1], Event::Tool(tool) if tool.status == ToolEventStatus::Called)
+        );
+        assert!(matches!(&sink.events[2], Event::Message(event)
+            if event.message == "已记录工具回复，继续总结"));
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].last().unwrap()["role"], "tool");
+        assert_eq!(
+            requests[1].last().unwrap()["function_name"],
+            "message_ask_user"
+        );
+        assert_eq!(repository.writes.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            repository
+                .memory(SESSION_ID, "base")
+                .get_last_message()
+                .unwrap()["role"],
+            "assistant"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_tool_call_ids_generate_uuid_and_truthy_invalid_ids_stop_before_execution() {
+        for empty in [
+            Value::Null,
+            json!(false),
+            json!(0),
+            json!(""),
+            json!([]),
+            json!({}),
+        ] {
+            let mut response = tool_call_message();
+            response["tool_calls"][0]["id"] = empty;
+            let (mut agent, _, _, _) = agent(
+                vec![response, assistant_message(json!("done"))],
+                vec![Box::new(EchoTool::new(false))],
+            );
+
+            let events = agent.invoke_collect("echo hello", None).await.unwrap();
+
+            let Event::Tool(calling) = &events[0] else {
+                panic!("应先产生Calling")
+            };
+            let Event::Tool(called) = &events[1] else {
+                panic!("应随后产生Called")
+            };
+            assert!(Uuid::parse_str(&calling.tool_call_id).is_ok());
+            assert_eq!(calling.tool_call_id, called.tool_call_id);
+        }
+        for invalid in [json!(true), json!(1), json!(["id"]), json!({"id":"value"})] {
+            let mut response = tool_call_message();
+            response["tool_calls"][0]["id"] = invalid;
+            let tool = EchoTool::new(false);
+            let calls = tool.calls.clone();
+            let (mut agent, requests, _, _) = agent(vec![response], vec![Box::new(tool)]);
+            let mut sink =
+                crate::domain::services::agents::test_support::CollectedEvents::default();
+
+            let error = agent
+                .invoke("echo hello", None, &mut sink)
+                .await
+                .unwrap_err();
+
+            assert!(error.to_string().contains("expected a string"));
+            assert!(sink.events.is_empty());
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert_eq!(requests.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_tool_call_id_errors_before_tool_events() {
+        let mut response = tool_call_message();
+        response["tool_calls"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("id");
+        let tool = EchoTool::new(false);
+        let calls = tool.calls.clone();
+        let (mut agent, _, _, _) = agent(vec![response], vec![Box::new(tool)]);
+        let mut sink = crate::domain::services::agents::test_support::CollectedEvents::default();
+
+        let error = agent
+            .invoke("echo hello", None, &mut sink)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("工具调用缺少 id"));
+        assert!(sink.events.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn invoke_runs_tool_and_records_complete_memory() {
         let mut tool_response = tool_call_message();
         tool_response.insert("reasoning_content".to_string(), json!("先调用工具再总结"));
@@ -942,7 +1405,7 @@ mod tests {
             vec![Box::new(EchoTool::new(false))],
         );
 
-        let events = agent.invoke("echo hello", None).await.unwrap();
+        let events = agent.invoke_collect("echo hello", None).await.unwrap();
 
         assert_eq!(events.len(), 3);
         let Event::Tool(calling) = &events[0] else {
@@ -1013,7 +1476,7 @@ mod tests {
             Vec::new(),
         );
 
-        let events = agent.invoke("hello", None).await.unwrap();
+        let events = agent.invoke_collect("hello", None).await.unwrap();
 
         assert_eq!(events.len(), 1);
         let Event::Message(message) = &events[0] else {
@@ -1043,7 +1506,7 @@ mod tests {
             vec![Box::new(EchoTool::new(true))],
         );
 
-        let events = agent.invoke("echo hello", None).await.unwrap();
+        let events = agent.invoke_collect("echo hello", None).await.unwrap();
 
         let Event::Tool(called) = &events[1] else {
             panic!("第二个事件必须是工具调用完毕事件");
@@ -1065,7 +1528,7 @@ mod tests {
             vec![Box::new(EchoTool::new(false))],
         );
 
-        let events = agent.invoke("echo hello", None).await.unwrap();
+        let events = agent.invoke_collect("echo hello", None).await.unwrap();
 
         assert_eq!(events.len(), 8);
         let Event::Error(error) = &events[6] else {
@@ -1090,7 +1553,7 @@ mod tests {
             vec![Box::new(EchoTool::new(false))],
         );
 
-        let events = agent.invoke("echo hello", None).await.unwrap();
+        let events = agent.invoke_collect("echo hello", None).await.unwrap();
 
         assert_eq!(events.len(), 8);
         let Event::Error(error) = &events[7] else {
@@ -1199,7 +1662,7 @@ mod tests {
             repository.clone(),
         );
 
-        agent.invoke("new question", None).await.unwrap();
+        agent.invoke_collect("new question", None).await.unwrap();
 
         let requests = requests.lock().unwrap();
         assert_eq!(requests[0].len(), 4);
@@ -1214,25 +1677,110 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repository_errors_stop_the_llm_call_and_allow_reload() {
+    async fn repository_errors_keep_in_memory_messages_for_next_invocation() {
         let (mut agent, requests, _, repository) =
             agent(vec![assistant_message(json!("answer"))], Vec::new());
         repository
             .fail_save
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
-        let error = agent.invoke("hello", None).await.unwrap_err();
+        let error = agent.invoke_collect("hello", None).await.unwrap_err();
 
         assert!(error.to_string().contains("模拟保存记忆失败"));
         assert!(requests.lock().unwrap().is_empty());
 
-        // 保存失败会清空缓存，重试时重新读取仓库并可以继续执行。
-        let events = agent.invoke("hello again", None).await.unwrap();
+        // 保存失败保留已加入的消息，下次调用继续使用同一份内存记忆。
+        let events = agent.invoke_collect("hello again", None).await.unwrap();
         assert!(matches!(events[0], Event::Message(_)));
         assert_eq!(
             repository.reads.load(std::sync::atomic::Ordering::SeqCst),
-            2
+            1
         );
+        let saved = repository.memory(SESSION_ID, "base");
+        assert_eq!(saved.messages[1]["content"], "hello");
+        assert_eq!(saved.messages[2]["content"], "hello again");
+    }
+
+    struct ResponseSaveFailureLlm {
+        repository: Arc<MemoryRepository>,
+        requests: Requests,
+        formats: Arc<Mutex<Vec<Option<ResponseFormat>>>>,
+    }
+
+    #[async_trait]
+    impl Llm for ResponseSaveFailureLlm {
+        async fn invoke(
+            &self,
+            messages: Vec<LlmMessage>,
+            _tools: Option<Vec<Tool>>,
+            response_format: Option<ResponseFormat>,
+            _tool_choice: Option<ToolChoice>,
+        ) -> Result<Response> {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(messages);
+            self.formats.lock().unwrap().push(response_format);
+            if requests.len() == 1 {
+                self.repository.fail_save.store(true, Ordering::SeqCst);
+                Ok(assistant_message(json!("第一次回复")))
+            } else {
+                Ok(assistant_message(json!("保存失败后的回复")))
+            }
+        }
+
+        fn model_name(&self) -> String {
+            "mock".into()
+        }
+        fn temperature(&self) -> f32 {
+            0.0
+        }
+        fn max_tokens(&self) -> usize {
+            1024
+        }
+    }
+
+    #[tokio::test]
+    async fn response_save_failure_retries_with_the_updated_memory_and_default_format() {
+        let repository = Arc::new(MemoryRepository::default());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let formats = Arc::new(Mutex::new(Vec::new()));
+        let mut agent = BaseAgent::new(
+            AgentOptions {
+                name: "base".into(),
+                format: Some("json_object".into()),
+                retry_interval: Duration::ZERO,
+                ..AgentOptions::default()
+            },
+            SESSION_ID,
+            repository.clone(),
+            AgentConfig {
+                max_iterations: 3,
+                max_retries: 2,
+                max_search_results: 10,
+            },
+            Arc::new(ResponseSaveFailureLlm {
+                repository: repository.clone(),
+                requests: requests.clone(),
+                formats: formats.clone(),
+            }),
+            Arc::new(MockJsonParser),
+            Vec::new(),
+        );
+
+        let events = agent.invoke_collect("hello", Some("")).await.unwrap();
+
+        assert!(matches!(&events[0], Event::Message(event) if event.message == "保存失败后的回复"));
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].last().unwrap()["content"], "第一次回复");
+        assert!(formats
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|format| format.as_ref().unwrap()["type"] == "json_object"));
+        let memory = repository.memory(SESSION_ID, "base");
+        assert_eq!(memory.messages[2]["content"], "第一次回复");
+        assert_eq!(memory.messages[3]["content"], "保存失败后的回复");
+        assert_eq!(repository.reads.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1243,7 +1791,7 @@ mod tests {
             .fail_read
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
-        let error = agent.invoke("hello", None).await.unwrap_err();
+        let error = agent.invoke_collect("hello", None).await.unwrap_err();
 
         assert!(error.to_string().contains("模拟读取记忆失败"));
         assert!(requests.lock().unwrap().is_empty());

@@ -28,11 +28,52 @@ use crate::domain::{
         TitleEvent, ToolContent, ToolEvent, ToolEventStatus, ToolResult, WaitEvent,
     },
     repositories::FileRepository,
-    services::{agents::test_support::MemoryRepository, flows::BaseFlow},
+    services::{
+        agents::test_support::MemoryRepository,
+        event_sink::{EventControl, EventSink},
+        flows::BaseFlow,
+    },
 };
+
+impl AgentTaskRunner {
+    async fn run_flow_collect(
+        &self,
+        flow: &mut dyn BaseFlow,
+        message: Message,
+    ) -> Result<Vec<Event>> {
+        let mut sink = EnrichedTestEvents {
+            runner: self,
+            events: Vec::new(),
+        };
+        self.run_flow(flow, message, &mut sink).await?;
+        Ok(sink.events)
+    }
+}
+
+struct EnrichedTestEvents<'a> {
+    runner: &'a AgentTaskRunner,
+    events: Vec<Event>,
+}
+
+#[async_trait]
+impl EventSink for EnrichedTestEvents<'_> {
+    async fn emit(&mut self, mut event: Event) -> Result<EventControl> {
+        self.runner.enrich_event(&mut event).await;
+        let waiting = matches!(event, Event::Wait(_));
+        self.events.push(event);
+        Ok(if waiting {
+            EventControl::Stop
+        } else {
+            EventControl::Continue
+        })
+    }
+}
 
 const SESSION_ID: &str = "runner-session";
 const SCREENSHOT_BYTES: &[u8] = &[137, 80, 78, 71, 13, 10, 26, 10, 0, 255, 128];
+
+#[path = "agent_task_runner_lifecycle_tests.rs"]
+mod lifecycle;
 
 #[derive(Default)]
 struct MemoryQueue {
@@ -43,6 +84,7 @@ struct MemoryQueue {
     fail_pop: AtomicBool,
     empty_pop_once: AtomicBool,
     on_wait: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    on_called: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl MemoryQueue {
@@ -66,10 +108,16 @@ impl MessageQueue for MemoryQueue {
         }
         let id = format!("{}-0", self.next_id.fetch_add(1, Ordering::SeqCst) + 1);
         let is_wait = message["type"] == "wait";
+        let is_called = message["type"] == "tool" && message["status"] == "called";
         self.push(&id, message);
         if is_wait {
             if let Some(on_wait) = self.on_wait.lock().unwrap().take() {
                 on_wait();
+            }
+        }
+        if is_called {
+            if let Some(on_called) = self.on_called.lock().unwrap().take() {
+                on_called();
             }
         }
         Ok(id)
@@ -189,6 +237,10 @@ impl JsonParser for UnusedDependency {
 
 #[async_trait]
 impl FileStorage for UnusedDependency {
+    fn file_url(&self, _file: &File) -> String {
+        panic!("当前测试不应读取文件 URL");
+    }
+
     async fn upload_file(&self, _upload_file: UploadFile) -> Result<File> {
         panic!("本节尚未上传文件");
     }
@@ -305,6 +357,14 @@ struct LifecycleSandbox {
     shell_reads: Mutex<Vec<(String, Option<bool>)>>,
     fail_shell_read: AtomicBool,
     file_reads: Mutex<Vec<String>>,
+    writes: Mutex<Vec<(String, String)>>,
+    write_gate: Mutex<Option<FileWriteGate>>,
+}
+
+struct FileWriteGate {
+    content: String,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
 }
 
 #[async_trait]
@@ -359,14 +419,35 @@ impl Sandbox for LifecycleSandbox {
 
     async fn write_file(
         &self,
-        _file_path: &str,
-        _content: &str,
+        file_path: &str,
+        content: &str,
         _append: Option<bool>,
         _leading_newline: Option<bool>,
         _trailing_newline: Option<bool>,
         _sudo: Option<bool>,
     ) -> Result<ToolResult<String>> {
-        panic!("本节尚未写入沙箱文件");
+        // gate 暂停真实工具动作，供测试观察已发布的前置事件与文件快照。
+        let gate = {
+            let mut gate = self.write_gate.lock().unwrap();
+            if gate.as_ref().is_some_and(|gate| gate.content == content) {
+                gate.take()
+            } else {
+                None
+            }
+        };
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+        self.writes
+            .lock()
+            .unwrap()
+            .push((file_path.to_string(), content.to_string()));
+        self.files
+            .lock()
+            .unwrap()
+            .insert(file_path.to_string(), content.as_bytes().to_vec());
+        Ok(ToolResult::default())
     }
 
     async fn read_file(
@@ -625,13 +706,10 @@ async fn invoke_consumes_empty_messages_without_calling_llm() {
             serde_json::to_value(Event::Message(MessageEvent::default())).unwrap(),
         );
     }
-    // is_empty 后的 pop 仍可能暂时为空，运行器应继续读取剩余消息。
-    task.input.empty_pop_once.store(true, Ordering::SeqCst);
-
     runner.invoke(task.clone()).await.unwrap();
 
     assert_eq!(*sandbox.calls.lock().unwrap(), vec!["ensure"]);
-    assert_eq!(task.input.pop_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(task.input.pop_calls.load(Ordering::SeqCst), 2);
     assert!(task.input.entries().is_empty());
     assert_eq!(task.output.entries().len(), 2);
     let session = repository.session(SESSION_ID).unwrap();
@@ -642,6 +720,22 @@ async fn invoke_consumes_empty_messages_without_calling_llm() {
         .all(|event| matches!(event, Event::Error(e) if e.error == "空消息错误")));
     assert_eq!(session.status, SessionStatus::Completed);
     assert_eq!(repository.reads.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn empty_pop_enters_the_error_exit_and_keeps_pending_input() {
+    let (runner, repository, _) = fixture();
+    let task = Arc::new(MemoryTask::default());
+    task.input
+        .push("input-1", serde_json::to_value(message()).unwrap());
+    task.input.empty_pop_once.store(true, Ordering::SeqCst);
+    runner.invoke(task.clone()).await.unwrap();
+    assert_eq!(task.input.pop_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(task.input.entries().len(), 1);
+    let session = repository.session(SESSION_ID).unwrap();
+    assert_eq!(session.status, SessionStatus::Completed);
+    assert!(matches!(&session.events[..], [Event::Error(error)]
+        if error.error.contains("任务输入事件不存在")));
 }
 
 #[tokio::test]
@@ -788,6 +882,10 @@ impl MemoryFiles {
 
 #[async_trait]
 impl FileStorage for MemoryFiles {
+    fn file_url(&self, file: &File) -> String {
+        format!("https://files.test/api/files/{}/download", file.id)
+    }
+
     async fn upload_file(&self, upload: UploadFile) -> Result<File> {
         if self.fail_upload.load(Ordering::SeqCst) {
             bail!("模拟存储上传失败");
@@ -955,7 +1053,7 @@ async fn input_attachment_add_failure_keeps_original_event_and_stops_iteration()
 }
 
 #[tokio::test]
-async fn sync_to_storage_replaces_old_id_and_preserves_binary_and_missing_mime() {
+async fn sync_to_storage_matches_reference_path_removal_and_preserves_file_versions() {
     let (runner, repository, sandbox, storage) = file_fixture();
     let old = File {
         id: "old-id".to_string(),
@@ -986,7 +1084,7 @@ async fn sync_to_storage_replaces_old_id_and_preserves_binary_and_missing_mime()
     assert_eq!(file.filepath, old.filepath);
     assert_eq!(
         repository.session(SESSION_ID).unwrap().files,
-        vec![unrelated, file.clone()]
+        vec![old, unrelated, file.clone()]
     );
     let uploads = storage.uploaded.lock().unwrap();
     assert_eq!(uploads.len(), 1);
@@ -1040,8 +1138,9 @@ async fn sync_to_storage_failure_respects_download_remove_upload_add_order() {
 
         match failure {
             "lookup" => assert!(storage.uploaded.lock().unwrap().is_empty()),
-            "download" => assert_eq!(repository.session(SESSION_ID).unwrap().files, vec![old]),
-            "upload" | "add" => assert!(repository.session(SESSION_ID).unwrap().files.is_empty()),
+            "download" | "upload" | "add" => {
+                assert_eq!(repository.session(SESSION_ID).unwrap().files, vec![old]);
+            }
             _ => unreachable!(),
         }
         assert_eq!(
@@ -1102,12 +1201,17 @@ struct RecordingFlow {
 
 #[async_trait]
 impl BaseFlow for RecordingFlow {
-    async fn invoke(&mut self, message: Message) -> Result<Vec<Event>> {
+    async fn invoke(&mut self, message: Message, sink: &mut dyn EventSink) -> Result<EventControl> {
         self.messages.push(message);
         if self.fail {
             bail!("模拟 Flow 失败");
         }
-        Ok(self.events.clone())
+        for event in self.events.clone() {
+            if sink.emit(event).await? == EventControl::Stop {
+                return Ok(EventControl::Stop);
+            }
+        }
+        Ok(EventControl::Continue)
     }
 
     fn done(&self) -> bool {
@@ -1120,7 +1224,7 @@ async fn run_flow_rejects_only_empty_text_and_propagates_flow_errors() {
     let (runner, _, _) = fixture();
     let mut flow = RecordingFlow::default();
     let events = runner
-        .run_flow(&mut flow, Message::default())
+        .run_flow_collect(&mut flow, Message::default())
         .await
         .unwrap();
     assert!(matches!(&events[..], [Event::Error(error)] if error.error == "空消息错误"));
@@ -1131,13 +1235,13 @@ async fn run_flow_rejects_only_empty_text_and_propagates_flow_errors() {
         ..Message::default()
     };
     runner
-        .run_flow(&mut flow, whitespace.clone())
+        .run_flow_collect(&mut flow, whitespace.clone())
         .await
         .unwrap();
     assert_eq!(flow.messages, vec![whitespace.clone()]);
     flow.fail = true;
     assert!(runner
-        .run_flow(&mut flow, whitespace)
+        .run_flow_collect(&mut flow, whitespace)
         .await
         .unwrap_err()
         .to_string()
@@ -1174,7 +1278,10 @@ async fn run_flow_syncs_message_attachments_and_preserves_other_events() {
         attachments: vec!["/home/ubuntu/upload/source.txt".to_string()],
     };
 
-    let events = runner.run_flow(&mut flow, input.clone()).await.unwrap();
+    let events = runner
+        .run_flow_collect(&mut flow, input.clone())
+        .await
+        .unwrap();
 
     assert_eq!(flow.messages, vec![input]);
     assert_eq!(events[0], tool);
@@ -1236,6 +1343,339 @@ impl JsonParser for TestJsonParser {
     async fn invoke(&self, text: &str, _default_value: Option<Value>) -> Result<Value> {
         Ok(serde_json::from_str(text)?)
     }
+}
+
+/// 固定回复序列使测试只验证事件时序，不依赖模型输出的随机性。
+struct FileRoundLlm {
+    responses: Mutex<VecDeque<Value>>,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl Llm for FileRoundLlm {
+    async fn invoke(
+        &self,
+        _messages: Vec<LlmMessage>,
+        _tools: Option<Vec<Tool>>,
+        _response_format: Option<ResponseFormat>,
+        _tool_choice: Option<ToolChoice>,
+    ) -> Result<Response> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        serde_json::from_value(
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("旧轮停止后应按固定序列处理新输入"),
+        )
+        .map_err(Into::into)
+    }
+
+    fn model_name(&self) -> String {
+        "file-round-test".into()
+    }
+    fn temperature(&self) -> f32 {
+        0.0
+    }
+    fn max_tokens(&self) -> usize {
+        1024
+    }
+}
+
+fn structured_reply(content: Value) -> Value {
+    json!({"role": "assistant", "content": content.to_string()})
+}
+
+fn file_round_llm(interrupted: bool) -> Arc<FileRoundLlm> {
+    let mut responses = VecDeque::from([
+        structured_reply(json!({
+            "title": "文件快照", "message": "开始写入", "language": "中文",
+            "steps": [{"id": "step-1", "description": "两次写入同一文件"}]
+        })),
+        json!({"role": "assistant", "content": null, "tool_calls": [
+            {"id": "write-1", "type": "function", "function": {
+                "name": "write_file", "arguments": json!({
+                    "filepath": "/tmp/progress.txt", "content": "v1"
+                }).to_string()
+            }}
+        ]}),
+    ]);
+    if interrupted {
+        responses.push_back(structured_reply(json!({
+            "title": "新任务", "message": "旧轮已停止", "steps": []
+        })));
+    } else {
+        responses.extend([
+            // 当前 Agent 每次模型响应只执行第一个工具；第二次写入由下一响应发起。
+            json!({"role": "assistant", "content": null, "tool_calls": [
+                {"id": "write-2", "type": "function", "function": {
+                    "name": "write_file", "arguments": json!({
+                        "filepath": "/tmp/progress.txt", "content": "v2"
+                    }).to_string()
+                }}
+            ]}),
+            structured_reply(json!({"success": true, "result": "写入完成"})),
+            structured_reply(json!({"steps": []})),
+            structured_reply(json!({"message": "任务完成", "attachments": []})),
+        ]);
+    }
+    Arc::new(FileRoundLlm {
+        responses: Mutex::new(responses),
+        calls: AtomicUsize::new(0),
+    })
+}
+
+fn file_round_runner(
+    llm: Arc<dyn Llm>,
+    repository: Arc<MemoryRepository>,
+    sandbox: Arc<LifecycleSandbox>,
+    storage: Arc<MemoryFiles>,
+) -> Arc<AgentTaskRunner> {
+    Arc::new(AgentTaskRunner::new(
+        llm,
+        AgentConfig {
+            max_retries: 1,
+            ..AgentConfig::default()
+        },
+        McpConfig::default(),
+        A2aConfig::default(),
+        SESSION_ID,
+        repository,
+        storage.clone(),
+        storage,
+        Arc::new(TestJsonParser),
+        Box::new(UnusedDependency),
+        Box::new(UnusedDependency),
+        sandbox,
+    ))
+}
+
+#[tokio::test]
+async fn calling_and_file_snapshot_are_persisted_before_the_next_tool_completes() {
+    for blocked_content in ["v1", "v2"] {
+        let (_, repository, sandbox, storage) = file_fixture();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *sandbox.write_gate.lock().unwrap() = Some(FileWriteGate {
+            content: blocked_content.into(),
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        let runner = file_round_runner(
+            file_round_llm(false),
+            repository.clone(),
+            sandbox.clone(),
+            storage.clone(),
+        );
+        let task = Arc::new(MemoryTask::default());
+        task.input
+            .push("input-1", serde_json::to_value(message()).unwrap());
+        let handle = tokio::spawn({
+            let task = task.clone();
+            async move { runner.invoke(task).await }
+        });
+        let reached = timeout(Duration::from_secs(2), entered.notified()).await;
+        let prefix = repository.session(SESSION_ID).unwrap().events;
+        let output = task.output.entries();
+        let writes = sandbox.writes.lock().unwrap().clone();
+        let uploads = storage
+            .uploaded
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|upload| upload.content.clone())
+            .collect::<Vec<_>>();
+        let running = !handle.is_finished();
+        release.notify_one();
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        assert!(reached.is_ok() && running, "{blocked_content}");
+        assert_eq!(prefix.len(), output.len());
+        assert!(matches!(prefix.last(), Some(Event::Tool(tool))
+            if tool.status == ToolEventStatus::Calling));
+        for ((id, _), event) in output.iter().zip(&prefix) {
+            assert_eq!(serde_json::to_value(event).unwrap()["id"], *id);
+        }
+        if blocked_content == "v1" {
+            assert!(writes.is_empty() && uploads.is_empty());
+        } else {
+            assert_eq!(writes, [("/tmp/progress.txt".into(), "v1".into())]);
+            assert_eq!(uploads.len(), 1);
+            assert_eq!(uploads[0].as_ref(), b"v1");
+            assert!(matches!(&prefix[prefix.len() - 2], Event::Tool(tool)
+                if tool.tool_content == Some(ToolContent::File(FileToolContent { content: "v1".into() }))));
+        }
+        let after = repository.session(SESSION_ID).unwrap();
+        assert_eq!(&after.events[..prefix.len()], prefix.as_slice());
+        let snapshots = after
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Tool(tool) => match &tool.tool_content {
+                    Some(ToolContent::File(content)) => Some(content.content.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(snapshots, ["v1", "v2"]);
+        assert_eq!(after.status, SessionStatus::Completed);
+        // 教师按路径调用按 id 删除的仓库，因此同一路径的两次上传均保留。
+        assert_eq!(after.files.len(), 2);
+        assert_eq!(after.files[0].size, 2);
+    }
+}
+
+#[tokio::test]
+async fn new_input_after_called_prevents_the_old_round_second_tool() {
+    let (_, repository, sandbox, storage) = file_fixture();
+    let llm = file_round_llm(true);
+    let runner = file_round_runner(llm.clone(), repository.clone(), sandbox.clone(), storage);
+    let task = Arc::new(MemoryTask::default());
+    task.input
+        .push("input-1", serde_json::to_value(message()).unwrap());
+    *task.output.on_called.lock().unwrap() = Some(Box::new({
+        let input = task.input.clone();
+        move || input.push("input-2", serde_json::to_value(message()).unwrap())
+    }));
+
+    timeout(Duration::from_secs(2), runner.invoke(task.clone()))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        *sandbox.writes.lock().unwrap(),
+        [("/tmp/progress.txt".into(), "v1".into())]
+    );
+    assert_eq!(llm.calls.load(Ordering::SeqCst), 3);
+    assert!(task.input.entries().is_empty());
+    let session = repository.session(SESSION_ID).unwrap();
+    assert_eq!(session.title, "新任务");
+    assert_eq!(session.status, SessionStatus::Completed);
+    assert!(session
+        .events
+        .iter()
+        .all(|event| !matches!(event, Event::Tool(tool) if tool.tool_call_id == "write-2")));
+}
+
+struct BlockingPlanLlm {
+    calls: AtomicUsize,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl Llm for BlockingPlanLlm {
+    async fn invoke(
+        &self,
+        _messages: Vec<LlmMessage>,
+        _tools: Option<Vec<Tool>>,
+        _response_format: Option<ResponseFormat>,
+        _tool_choice: Option<ToolChoice>,
+    ) -> Result<Response> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(Response::from_iter([
+                ("role".into(), json!("assistant")),
+                (
+                    "content".into(),
+                    json!(json!({
+                        "title": "逐事件测试", "message": "开始任务", "language": "中文",
+                        "steps": [{"id": "step-1", "description": "等待后续模型"}]
+                    })
+                    .to_string()),
+                ),
+            ]));
+        }
+        self.entered.notify_one();
+        self.release.notified().await;
+        bail!("模拟后续模型失败")
+    }
+
+    fn model_name(&self) -> String {
+        "blocked-model-test".into()
+    }
+    fn temperature(&self) -> f32 {
+        0.0
+    }
+    fn max_tokens(&self) -> usize {
+        1024
+    }
+}
+
+#[tokio::test]
+async fn planning_prefix_is_visible_while_next_llm_is_blocked() {
+    let (_, repository, sandbox, storage) = file_fixture();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let llm = Arc::new(BlockingPlanLlm {
+        calls: AtomicUsize::new(0),
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+    let runner = Arc::new(AgentTaskRunner::new(
+        llm,
+        AgentConfig {
+            max_retries: 1,
+            ..AgentConfig::default()
+        },
+        McpConfig::default(),
+        A2aConfig::default(),
+        SESSION_ID,
+        repository.clone(),
+        storage.clone(),
+        storage,
+        Arc::new(TestJsonParser),
+        Box::new(UnusedDependency),
+        Box::new(UnusedDependency),
+        sandbox,
+    ));
+    let task = Arc::new(MemoryTask::default());
+    task.input
+        .push("input-1", serde_json::to_value(message()).unwrap());
+    let handle = tokio::spawn({
+        let task = task.clone();
+        async move { runner.invoke(task).await }
+    });
+    let reached = timeout(Duration::from_secs(2), entered.notified()).await;
+    let prefix = task.output.entries();
+    let before = repository.session(SESSION_ID).unwrap();
+    let still_running = !handle.is_finished();
+    // 先释放 gate 并等待收尾，再断言，避免失败时留下阻塞的后台任务。
+    release.notify_one();
+    timeout(Duration::from_secs(2), handle)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    assert!(reached.is_ok(), "应进入后续模型调用");
+    assert!(still_running, "观察前缀时任务仍在运行");
+    assert_eq!(before.status, SessionStatus::Running);
+    assert_eq!(
+        prefix
+            .iter()
+            .map(|(_, event)| event["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["title", "message", "plan", "step"]
+    );
+    assert_eq!(before.events.len(), prefix.len());
+    for ((id, _), event) in prefix.iter().zip(&before.events) {
+        assert_eq!(serde_json::to_value(event).unwrap()["id"], *id);
+    }
+    let after = repository.session(SESSION_ID).unwrap();
+    assert_eq!(
+        &after.events[..before.events.len()],
+        before.events.as_slice()
+    );
+    assert!(
+        matches!(after.events.last(), Some(Event::Error(_))),
+        "后续错误应保留前缀"
+    );
 }
 
 #[tokio::test]
@@ -1395,12 +1835,17 @@ async fn tool_content_is_added_only_after_call_and_screenshot_is_uploaded() {
     uuid::Uuid::parse_str(uploads[0].filename.strip_suffix(".png").unwrap()).unwrap();
     assert_eq!(uploads[0].content.as_ref(), SCREENSHOT_BYTES);
     assert_eq!(uploads[0].mime_type, None);
-    assert_eq!(
-        storage.files.lock().unwrap()[&content.screenshot]
-            .0
-            .filename,
-        uploads[0].filename
-    );
+    let screenshot_file = storage
+        .files
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap()
+        .0
+        .clone();
+    assert_eq!(content.screenshot, storage.file_url(&screenshot_file));
+    assert_eq!(screenshot_file.filename, uploads[0].filename);
     assert!(repository.session(SESSION_ID).unwrap().files.is_empty());
 }
 
@@ -1442,9 +1887,12 @@ async fn search_shell_and_file_content_follow_existing_tool_contracts() {
             matches!(&shell.tool_content, Some(ToolContent::Shell(c)) if c.console == expected)
         );
     }
+    *sandbox.shell_output.lock().unwrap() = None;
+    runner.handle_tool_event(&mut shell).await;
+    assert!(matches!(&shell.tool_content, Some(ToolContent::Shell(c)) if c.console == json!([])));
     assert_eq!(
         *sandbox.shell_reads.lock().unwrap(),
-        vec![("shell-1".into(), Some(true)); 2]
+        vec![("shell-1".into(), Some(true)); 3]
     );
 
     let mut file = called_tool("file");
@@ -1474,6 +1922,36 @@ fn remote_content(event: &ToolEvent) -> &Value {
         ToolContent::Mcp(c) => &c.result,
         ToolContent::A2a(c) => &c.a2a_result,
         _ => panic!("应生成远程工具内容"),
+    }
+}
+
+#[tokio::test]
+async fn shell_empty_results_fall_back_but_nonempty_invalid_types_keep_missing_content() {
+    let (runner, _, sandbox, _) = file_fixture();
+    for (data, empty_console) in [
+        (json!(null), true),
+        (json!(false), true),
+        (json!(0), true),
+        (json!(""), true),
+        (json!([]), true),
+        (json!({}), true),
+        (json!(["invalid"]), false),
+        (json!(1), false),
+        (json!("invalid"), false),
+    ] {
+        let mut event = called_tool("shell");
+        event
+            .function_args
+            .insert("session_id".into(), json!("shell-1"));
+        *sandbox.shell_output.lock().unwrap() = Some(data.to_string());
+        runner.handle_tool_event(&mut event).await;
+        if empty_console {
+            assert!(
+                matches!(event.tool_content, Some(ToolContent::Shell(c)) if c.console == json!([]))
+            );
+        } else {
+            assert!(event.tool_content.is_none());
+        }
     }
 }
 
@@ -1523,7 +2001,7 @@ async fn enriched_tool_content_reaches_output_queue_and_session_history() {
         ..RecordingFlow::default()
     };
     let events = runner
-        .run_flow(
+        .run_flow_collect(
             &mut flow,
             Message {
                 message: "生成章节总结".into(),
@@ -1631,7 +2109,7 @@ async fn tool_enrichment_failure_keeps_original_payload_and_flow_continues() {
             ..RecordingFlow::default()
         };
         let events = runner
-            .run_flow(
+            .run_flow_collect(
                 &mut flow,
                 Message {
                     message: "执行".into(),
@@ -1759,7 +2237,7 @@ async fn wait_stops_enrichment_and_side_effects_of_following_events() {
         ..RecordingFlow::default()
     };
     let events = runner
-        .run_flow(
+        .run_flow_collect(
             &mut flow,
             Message {
                 message: "等待".into(),

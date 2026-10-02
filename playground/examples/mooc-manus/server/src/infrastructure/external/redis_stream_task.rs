@@ -131,7 +131,7 @@ impl RedisStreamTask {
     async fn on_task_done(&self) {
         let task = Arc::new(self.clone()) as SharedTask;
 
-        // 完成回调结束后再移除注册表，确保异步收尾期间仍能访问任务。
+        // 监督任务持有任务实例，取消时移除注册表后仍可完成异步收尾。
         if let Err(err) = self.task_runner.on_done(task).await {
             error!("任务 [{}] 完成回调执行失败: {err}", self.id);
         }
@@ -230,21 +230,23 @@ impl Task for RedisStreamTask {
             return false;
         };
 
-        let Some(running) = execution_task.running.as_mut() else {
-            drop(execution_task);
-            if let Err(err) = self.cleanup_registry() {
-                error!("任务 [{:?}] 清理注册表失败: {err}", self.id);
+        if let Some(running) = execution_task.running.as_mut() {
+            if !running.cancel_requested && !running.execution_abort.is_finished() {
+                // 1.只取消执行任务；监督任务继续完成取消回调和完成回调。
+                running.cancel_requested = true;
+                running.execution_abort.abort();
+                info!("任务 [{:?}] 已发出取消请求", self.id);
             }
-            return false;
-        };
-        if running.cancel_requested || running.execution_abort.is_finished() {
+        }
+        drop(execution_task);
+
+        // 2.调用取消时立即移除注册表，空闲、结束或重复取消同样完成清理。
+        if let Err(err) = self.cleanup_registry() {
+            error!("任务 [{:?}] 清理注册表失败: {err}", self.id);
             return false;
         }
 
-        // 只取消执行任务；监督任务继续完成取消回调、完成回调和注册表清理。
-        running.cancel_requested = true;
-        running.execution_abort.abort();
-        info!("任务 [{:?}] 已发出取消请求", self.id);
+        // 3.任务已结束时无需重复取消，仍返回成功。
         true
     }
 

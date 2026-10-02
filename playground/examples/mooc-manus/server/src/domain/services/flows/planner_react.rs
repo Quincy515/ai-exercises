@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::domain::{
     external::{Browser, JsonParser, Llm, Sandbox, SearchEngine},
@@ -13,6 +13,7 @@ use crate::domain::{
     repositories::SessionRepository,
     services::{
         agents::{Agent, PlannerAgent, ReActAgent},
+        event_sink::{EventControl, EventSink},
         tools::{
             A2ATool, BaseTool, BrowserTool, FileTool, McpTool, MessageTool, SearchTool, ShellTool,
         },
@@ -20,6 +21,52 @@ use crate::domain::{
 };
 
 use super::{BaseFlow, FlowStatus};
+
+/// 创建计划时同步保存快照，按教师事件流顺序交付标题、消息和计划。
+struct PlanningSink<'a> {
+    plan: &'a mut Option<Plan>,
+    sink: &'a mut dyn EventSink,
+}
+
+#[async_trait]
+impl EventSink for PlanningSink<'_> {
+    async fn emit(&mut self, event: Event) -> Result<EventControl> {
+        // 10. 创建成功时更新当前计划，并派生标题和初始 AI 消息事件。
+        if let Event::Plan(plan_event) = &event {
+            if plan_event.status == PlanEventStatus::Created {
+                *self.plan = Some(plan_event.plan.clone());
+                info!(
+                    steps = plan_event.plan.steps.len(),
+                    "Planner&ReAct流成功创建计划"
+                );
+                if self
+                    .sink
+                    .emit(Event::Title(TitleEvent {
+                        title: plan_event.plan.title.clone(),
+                        ..TitleEvent::default()
+                    }))
+                    .await?
+                    == EventControl::Stop
+                {
+                    return Ok(EventControl::Stop);
+                }
+                if self
+                    .sink
+                    .emit(Event::Message(MessageEvent {
+                        role: MessageRole::Assistant,
+                        message: plan_event.plan.message.clone(),
+                        ..MessageEvent::default()
+                    }))
+                    .await?
+                    == EventControl::Stop
+                {
+                    return Ok(EventControl::Stop);
+                }
+            }
+        }
+        self.sink.emit(event).await
+    }
+}
 
 /// 规划与执行流：使用状态机协调规划 Agent 和执行 Agent。
 pub struct PlannerReActFlow {
@@ -93,8 +140,8 @@ impl PlannerReActFlow {
             Box::new(a2a_tool),
         ];
 
-        // 2. 创建规划 Agent。规划只负责生成结构化计划，不暴露工具。
-        let planner = PlannerAgent::new(
+        // 2. 创建规划 Agent。工具选择保持 none，同时提供与执行 Agent 相同的工具声明。
+        let mut planner = PlannerAgent::new(
             session_id.clone(),
             session_repository.clone(),
             agent_config.clone(),
@@ -113,27 +160,10 @@ impl PlannerReActFlow {
             tools,
         );
         debug!(session_id, "创建执行Agent成功");
+        planner.base_mut().share_tools_from(react.base());
 
         Self {
             session_id,
-            session_repository,
-            status: FlowStatus::Idle,
-            plan: None,
-            planner,
-            react,
-        }
-    }
-
-    /// 使用已经组装好的两个 Agent 创建测试流。
-    #[cfg(test)]
-    fn from_agents(
-        session_id: impl Into<String>,
-        session_repository: Arc<dyn SessionRepository>,
-        planner: PlannerAgent,
-        react: ReActAgent,
-    ) -> Self {
-        Self {
-            session_id: session_id.into(),
             session_repository,
             status: FlowStatus::Idle,
             plan: None,
@@ -152,7 +182,7 @@ impl PlannerReActFlow {
         self.plan.as_ref()
     }
 
-    /// 初始化执行 Agent 独占的工具，确保后续调用使用同一实例。
+    /// 初始化两个 Agent 共享的工具集合一次，确保后续调用使用同一实例。
     pub(crate) async fn initialize_tools(&mut self) -> Result<()> {
         self.react.base_mut().initialize_tools().await
     }
@@ -161,18 +191,23 @@ impl PlannerReActFlow {
     pub(crate) async fn cleanup_tools(&mut self) -> Result<()> {
         // 2.清除 mcp 工具
         info!("销毁AgentTaskRunner中的mcp工具");
-        self.react.base_mut().cleanup_tools(&["mcp"]).await?;
+        if let Err(error) = self.react.base_mut().cleanup_tools(&["mcp"]).await {
+            warn!(error = %error, "清理MCP工具失败");
+        }
 
         // 3.清除 a2a 工具
         info!("销毁AgentTaskRunner中的a2a工具");
-        self.react.base_mut().cleanup_tools(&["a2a"]).await
+        if let Err(error) = self.react.base_mut().cleanup_tools(&["a2a"]).await {
+            warn!(error = %error, "清理A2A工具失败");
+        }
+        Ok(())
     }
 }
 
 #[async_trait]
 impl BaseFlow for PlannerReActFlow {
-    /// 传递消息运行流，在流中调用 Planner 和 ReAct Agent 组合完成任务并返回对应事件。
-    async fn invoke(&mut self, message: Message) -> Result<Vec<Event>> {
+    /// 传递消息运行流，在流中调用 Planner 和 ReAct Agent 组合完成任务并逐条交付事件。
+    async fn invoke(&mut self, message: Message, sink: &mut dyn EventSink) -> Result<EventControl> {
         // 1. 调用会话仓库查询会话是否存在
         let session = self
             .session_repository
@@ -222,7 +257,6 @@ impl BaseFlow for PlannerReActFlow {
             "Planner&ReAct流接收消息"
         );
 
-        let mut output = Vec::new();
         // 更新计划发生在下一次状态循环中，因此保留刚执行步骤的快照。
         // 这里持有 Step 的所有权，避免跨 `.await` 保存对 Plan 内部字段的借用。
         let mut current_step: Option<Step> = None;
@@ -238,27 +272,17 @@ impl BaseFlow for PlannerReActFlow {
                 // 9. 规划阶段调用规划 Agent 创建计划。
                 FlowStatus::Planning => {
                     info!("Planner&ReAct流开始创建计划");
-                    for event in self.planner.create_plan(message.clone()).await? {
-                        // 10. 创建成功时更新当前计划，并派生标题和初始 AI 消息事件。
-                        if let Event::Plan(plan_event) = &event {
-                            if plan_event.status == PlanEventStatus::Created {
-                                self.plan = Some(plan_event.plan.clone());
-                                info!(
-                                    steps = plan_event.plan.steps.len(),
-                                    "Planner&ReAct流成功创建计划"
-                                );
-                                output.push(Event::Title(TitleEvent {
-                                    title: plan_event.plan.title.clone(),
-                                    ..TitleEvent::default()
-                                }));
-                                output.push(Event::Message(MessageEvent {
-                                    role: MessageRole::Assistant,
-                                    message: plan_event.plan.message.clone(),
-                                    ..MessageEvent::default()
-                                }));
-                            }
-                        }
-                        output.push(event);
+                    let mut planning_sink = PlanningSink {
+                        plan: &mut self.plan,
+                        sink: &mut *sink,
+                    };
+                    if self
+                        .planner
+                        .create_plan(message.clone(), &mut planning_sink)
+                        .await?
+                        == EventControl::Stop
+                    {
+                        return Ok(EventControl::Stop);
                     }
 
                     // 11. 计划创建后进入执行阶段；无计划或无步骤则直接标记完成。
@@ -291,20 +315,14 @@ impl BaseFlow for PlannerReActFlow {
                     let plan_context = plan.clone();
                     let step = &mut plan.steps[step_index];
                     info!(step_id = step.id, description = %step.description.chars().take(50).collect::<String>(), "Planner&ReAct流开始执行步骤");
-                    let step_events = self
+                    if self
                         .react
-                        .execute_step(&plan_context, step, &message)
-                        .await?;
-                    let waiting_for_user = step_events
-                        .iter()
-                        .any(|event| matches!(event, Event::Wait(_)));
-                    output.extend(step_events);
-
-                    // Vec<Event> 无法像异步事件流一样停在一次 yield 上。
-                    // 遇到 WaitEvent 时主动结束本轮调用，等待用户回复后从 Executing 恢复。
-                    if waiting_for_user {
-                        info!("Planner&ReAct流等待用户回复");
-                        return Ok(output);
+                        .execute_step(&plan_context, step, &message, sink)
+                        .await?
+                        == EventControl::Stop
+                    {
+                        // 保留执行阶段，等待用户回复后从 Executing 恢复。
+                        return Ok(EventControl::Stop);
                     }
                     current_step = Some(step.clone());
 
@@ -323,7 +341,9 @@ impl BaseFlow for PlannerReActFlow {
                         .plan
                         .as_mut()
                         .ok_or_else(|| anyhow!("规划与执行流缺少可更新计划"))?;
-                    output.extend(self.planner.update_plan(plan, step).await?);
+                    if self.planner.update_plan(plan, step, sink).await? == EventControl::Stop {
+                        return Ok(EventControl::Stop);
+                    }
 
                     // 24. 更新完成后重新进入执行状态，读取新的首个未完成步骤。
                     info!("Planner&ReAct流状态从updating变成executing");
@@ -332,7 +352,9 @@ impl BaseFlow for PlannerReActFlow {
                 FlowStatus::Summarizing => {
                     // 25. 流状态为总结中，表示全部子步骤已经执行完成。
                     info!("Planner&ReAct流开始总结");
-                    output.extend(self.react.summarize().await?);
+                    if self.react.summarize(sink).await? == EventControl::Stop {
+                        return Ok(EventControl::Stop);
+                    }
 
                     // 26. 总结完成，流进入完成状态。
                     info!("Planner&ReAct流状态从summarizing变成completed");
@@ -340,26 +362,35 @@ impl BaseFlow for PlannerReActFlow {
                 }
                 FlowStatus::Completed => {
                     // 27. 同步计划状态，并发送完成事件通知上层应用。
-                    if let Some(plan) = self.plan.as_mut() {
-                        plan.status = ExecutionStatus::Completed;
-                        output.push(Event::Plan(PlanEvent {
+                    let plan = self
+                        .plan
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("规划与执行流缺少待完成计划"))?;
+                    plan.status = ExecutionStatus::Completed;
+                    // 教师在完成计划事件交付时，done 已经为 true。
+                    self.status = FlowStatus::Idle;
+                    if sink
+                        .emit(Event::Plan(PlanEvent {
                             plan: plan.clone(),
                             status: PlanEventStatus::Completed,
                             ..PlanEvent::default()
-                        }));
+                        }))
+                        .await?
+                        == EventControl::Stop
+                    {
+                        return Ok(EventControl::Stop);
                     }
 
                     // 本次任务已经结束，回到空闲状态并跳出控制循环。
-                    self.status = FlowStatus::Idle;
                     break;
                 }
             }
         }
 
         // 28. DoneEvent 是整条事件流的结束标记，必须在退出控制循环后发送。
-        output.push(Event::Done(DoneEvent::default()));
+        let control = sink.emit(Event::Done(DoneEvent::default())).await?;
         info!("Planner&ReAct流处理任务消息已完毕");
-        Ok(output)
+        Ok(control)
     }
 
     fn done(&self) -> bool {
@@ -371,7 +402,7 @@ impl BaseFlow for PlannerReActFlow {
 mod tests {
     use std::{
         collections::VecDeque,
-        sync::{Arc, Mutex},
+        sync::{atomic::Ordering, Arc, Mutex},
         time::Duration,
     };
 
@@ -383,9 +414,39 @@ mod tests {
     use super::*;
     use crate::domain::{
         external::{LlmMessage, Response, ResponseFormat, Tool, ToolChoice},
-        models::{Memory, PlanEvent, Session, Step},
-        services::agents::test_support::MemoryRepository,
+        models::{Memory, PlanEvent, Session, Step, StepEventStatus, ToolResult},
+        services::{
+            agents::test_support::{CollectedEvents, MemoryRepository},
+            tools::{ToolArguments, ToolDefinition},
+        },
     };
+
+    impl PlannerReActFlow {
+        /// 使用已经组装好的两个 Agent 创建测试流。
+        pub(crate) fn from_agents(
+            session_id: impl Into<String>,
+            session_repository: Arc<dyn SessionRepository>,
+            mut planner: PlannerAgent,
+            react: ReActAgent,
+        ) -> Self {
+            planner.base_mut().share_tools_from(react.base());
+            Self {
+                session_id: session_id.into(),
+                session_repository,
+                status: FlowStatus::Idle,
+                plan: None,
+                planner,
+                react,
+            }
+        }
+
+        /// 测试中收集本轮事件，生产执行链使用逐事件交付接口。
+        async fn invoke_collect(&mut self, message: Message) -> Result<Vec<Event>> {
+            let mut sink = CollectedEvents::default();
+            self.invoke(message, &mut sink).await?;
+            Ok(sink.events)
+        }
+    }
 
     type Requests = Arc<Mutex<Vec<Vec<LlmMessage>>>>;
 
@@ -430,6 +491,69 @@ mod tests {
     impl JsonParser for MockJsonParser {
         async fn invoke(&self, text: &str, _default_value: Option<Value>) -> Result<Value> {
             Ok(serde_json::from_str(text)?)
+        }
+    }
+
+    struct StopAt {
+        events: Vec<Event>,
+        at: usize,
+        repository: Arc<MemoryRepository>,
+        writes_at_stop: Option<usize>,
+    }
+
+    #[async_trait]
+    impl EventSink for StopAt {
+        async fn emit(&mut self, event: Event) -> Result<EventControl> {
+            self.events.push(event);
+            if self.events.len() == self.at {
+                self.writes_at_stop = Some(self.repository.writes.load(Ordering::SeqCst));
+                return Ok(EventControl::Stop);
+            }
+            Ok(EventControl::Continue)
+        }
+    }
+
+    struct FailAfterTitle {
+        events: Vec<Event>,
+    }
+
+    #[async_trait]
+    impl EventSink for FailAfterTitle {
+        async fn emit(&mut self, event: Event) -> Result<EventControl> {
+            if matches!(event, Event::Message(_)) {
+                return Err(anyhow!("模拟初始消息交付失败"));
+            }
+            self.events.push(event);
+            Ok(EventControl::Continue)
+        }
+    }
+
+    struct CleanupTool {
+        name: &'static str,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl BaseTool for CleanupTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn tool_definitions(&self) -> &[ToolDefinition] {
+            &[]
+        }
+
+        async fn call_tool(
+            &self,
+            _tool_name: &str,
+            _kwargs: ToolArguments,
+        ) -> Result<ToolResult<Value>> {
+            Err(anyhow!("清理测试中不应调用工具"))
+        }
+
+        async fn cleanup(&mut self) -> Result<()> {
+            self.calls.lock().unwrap().push(self.name);
+            Err(anyhow!("{}清理失败", self.name))
         }
     }
 
@@ -487,6 +611,14 @@ mod tests {
         repository: Arc<MemoryRepository>,
         responses: Vec<Response>,
     ) -> (PlannerReActFlow, Requests) {
+        flow_with_tools(repository, responses, vec![Box::new(MessageTool::new())])
+    }
+
+    fn flow_with_tools(
+        repository: Arc<MemoryRepository>,
+        responses: Vec<Response>,
+        tools: Vec<Box<dyn BaseTool>>,
+    ) -> (PlannerReActFlow, Requests) {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let llm: Arc<dyn Llm> = Arc::new(MockLlm {
             responses: Mutex::new(VecDeque::from(responses)),
@@ -511,7 +643,7 @@ mod tests {
             config,
             llm,
             json_parser,
-            vec![Box::new(MessageTool::new())],
+            tools,
         );
 
         (
@@ -525,7 +657,7 @@ mod tests {
         let repository = Arc::new(MemoryRepository::default());
         let (mut flow, requests) = flow(repository, Vec::new());
 
-        let error = flow.invoke(Message::default()).await.unwrap_err();
+        let error = flow.invoke_collect(Message::default()).await.unwrap_err();
 
         assert!(error.to_string().contains("会话[session-1]不存在"));
         assert!(requests.lock().unwrap().is_empty());
@@ -551,7 +683,7 @@ mod tests {
 
         let events = timeout(
             Duration::from_secs(1),
-            flow.invoke(Message {
+            flow.invoke_collect(Message {
                 message: "帮我整理项目".to_string(),
                 attachments: Vec::new(),
             }),
@@ -604,6 +736,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn summary_ask_user_records_result_then_continues_to_final_message_and_done() {
+        let repository = Arc::new(MemoryRepository::default());
+        repository.insert_session(Session {
+            id: "session-1".to_string(),
+            ..Session::default()
+        });
+        let (mut flow, requests) = flow(
+            repository.clone(),
+            vec![
+                plan_response(vec![Step::new("检查项目结构")]),
+                step_response("检查完成"),
+                plan_response(Vec::new()),
+                ask_user_tool_call(),
+                summary_response("汇总阶段的工具结果已处理。"),
+            ],
+        );
+
+        let events = flow.invoke_collect(Message::default()).await.unwrap();
+
+        // 汇总阶段原样交付工具事件；等待人类输入的转换只在执行子步骤时发生。
+        assert!(matches!(&events[7], Event::Tool(event)
+            if event.status == crate::domain::models::ToolEventStatus::Calling
+                && event.function_name == "message_ask_user"));
+        assert!(matches!(&events[8], Event::Tool(event)
+            if event.status == crate::domain::models::ToolEventStatus::Called));
+        assert!(matches!(&events[9], Event::Message(event)
+            if event.message == "汇总阶段的工具结果已处理。"));
+        assert!(matches!(&events[10], Event::Plan(event)
+            if event.status == PlanEventStatus::Completed));
+        assert!(matches!(&events[11], Event::Done(_)));
+        assert!(!events.iter().any(|event| matches!(event, Event::Wait(_))));
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        let tool_reply = requests[4].last().unwrap();
+        assert_eq!(tool_reply["role"], "tool");
+        assert_eq!(tool_reply["function_name"], "message_ask_user");
+        let result: Value = serde_json::from_str(tool_reply["content"].as_str().unwrap()).unwrap();
+        assert_eq!(result["success"], true);
+        let memory = repository.memory("session-1", "react");
+        assert!(memory.messages.contains(tool_reply));
+        assert_eq!(memory.messages.last().unwrap()["role"], "assistant");
+        assert!(flow.done());
+    }
+
+    #[tokio::test]
+    async fn missing_created_plan_errors_after_preserving_published_events() {
+        let repository = Arc::new(MemoryRepository::default());
+        repository.insert_session(Session {
+            id: "session-1".to_string(),
+            ..Session::default()
+        });
+        let (mut flow, _) = flow(
+            repository,
+            vec![Response::from_iter([("role".to_string(), json!("tool"))])],
+        );
+        let mut sink = CollectedEvents::default();
+
+        let error = flow
+            .invoke(Message::default(), &mut sink)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("缺少待完成计划"));
+        assert!(matches!(sink.events.as_slice(), [Event::Error(_)]));
+        assert_eq!(flow.status(), FlowStatus::Completed);
+        assert!(!flow.done());
+    }
+
+    #[tokio::test]
     async fn wait_event_pauses_before_updating_the_plan() {
         let repository = Arc::new(MemoryRepository::default());
         repository.insert_session(Session {
@@ -619,7 +820,7 @@ mod tests {
         );
 
         let events = flow
-            .invoke(Message {
+            .invoke_collect(Message {
                 message: "执行前请确认".to_string(),
                 attachments: Vec::new(),
             })
@@ -655,7 +856,7 @@ mod tests {
         });
         let (mut flow, requests) = flow(repository, vec![plan_response(Vec::new())]);
 
-        let events = flow.invoke(Message::default()).await.unwrap();
+        let events = flow.invoke_collect(Message::default()).await.unwrap();
 
         assert_eq!(flow.status(), FlowStatus::Idle);
         assert!(flow.done());
@@ -713,7 +914,7 @@ mod tests {
         );
 
         let events = flow
-            .invoke(Message {
+            .invoke_collect(Message {
                 message: "继续".to_string(),
                 attachments: Vec::new(),
             })
@@ -736,5 +937,178 @@ mod tests {
         );
         assert_eq!(flow.plan().unwrap().status, ExecutionStatus::Completed);
         assert!(matches!(events.last(), Some(Event::Done(_))));
+    }
+
+    #[tokio::test]
+    async fn stop_preserves_each_delivery_boundary_and_prevents_later_work() {
+        for (at, expected_status, expected_requests) in [
+            (1, FlowStatus::Planning, 1),
+            (2, FlowStatus::Planning, 1),
+            (3, FlowStatus::Planning, 1),
+            (4, FlowStatus::Executing, 1),
+            (5, FlowStatus::Executing, 2),
+            (6, FlowStatus::Executing, 2),
+            (7, FlowStatus::Updating, 3),
+            (8, FlowStatus::Summarizing, 4),
+            (9, FlowStatus::Idle, 4),
+            (10, FlowStatus::Idle, 4),
+        ] {
+            let repository = Arc::new(MemoryRepository::default());
+            repository.insert_session(Session {
+                id: "session-1".to_string(),
+                ..Session::default()
+            });
+            let (mut flow, requests) = flow(
+                repository.clone(),
+                vec![
+                    plan_response(vec![Step::new("检查项目结构")]),
+                    step_response("检查完成"),
+                    plan_response(Vec::new()),
+                    summary_response("项目整理完成。"),
+                ],
+            );
+            let mut sink = StopAt {
+                events: Vec::new(),
+                at,
+                repository: repository.clone(),
+                writes_at_stop: None,
+            };
+
+            let control = flow.invoke(Message::default(), &mut sink).await.unwrap();
+
+            assert_eq!(control, EventControl::Stop, "交付边界 {at}");
+            assert_eq!(sink.events.len(), at, "交付边界 {at}");
+            assert_eq!(flow.status(), expected_status, "交付边界 {at}");
+            assert_eq!(flow.done(), at >= 9, "交付边界 {at}");
+            assert_eq!(
+                requests.lock().unwrap().len(),
+                expected_requests,
+                "交付边界 {at}"
+            );
+            assert_eq!(
+                Some(repository.writes.load(Ordering::SeqCst)),
+                sink.writes_at_stop,
+                "交付边界 {at} 后应保持记忆写入次数"
+            );
+
+            // 标题交付前保存计划快照，停止后仍能读取已经创建的计划。
+            let plan = flow.plan().unwrap();
+            assert_eq!(plan.id, "plan-1");
+            assert_eq!(
+                plan.steps[0].status,
+                match at {
+                    1..=3 => ExecutionStatus::Pending,
+                    4 => ExecutionStatus::Running,
+                    _ => ExecutionStatus::Completed,
+                },
+                "交付边界 {at}"
+            );
+            if at < 10 {
+                assert!(sink
+                    .events
+                    .iter()
+                    .all(|event| !matches!(event, Event::Done(_))));
+            }
+            if at == 4 {
+                assert!(matches!(
+                    sink.events.last(),
+                    Some(Event::Step(step_event)) if step_event.status == StepEventStatus::Started
+                ));
+                assert!(repository.memory("session-1", "react").messages.is_empty());
+            }
+            if at == 9 {
+                assert!(matches!(
+                    sink.events.last(),
+                    Some(Event::Plan(plan_event)) if plan_event.status == PlanEventStatus::Completed
+                ));
+                assert_eq!(plan.status, ExecutionStatus::Completed);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn delivery_error_keeps_the_title_and_created_plan_snapshot() {
+        let repository = Arc::new(MemoryRepository::default());
+        repository.insert_session(Session {
+            id: "session-1".to_string(),
+            ..Session::default()
+        });
+        let (mut flow, requests) = flow(
+            repository,
+            vec![plan_response(vec![Step::new("检查项目结构")])],
+        );
+        let mut sink = FailAfterTitle { events: Vec::new() };
+
+        let error = flow
+            .invoke(Message::default(), &mut sink)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "模拟初始消息交付失败");
+        assert_eq!(sink.events.len(), 1);
+        assert!(matches!(sink.events[0], Event::Title(_)));
+        assert_eq!(flow.status(), FlowStatus::Planning);
+        assert_eq!(flow.plan().unwrap().id, "plan-1");
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn react_parse_error_keeps_the_already_delivered_event_prefix() {
+        let repository = Arc::new(MemoryRepository::default());
+        repository.insert_session(Session {
+            id: "session-1".to_string(),
+            ..Session::default()
+        });
+        let (mut flow, requests) = flow(
+            repository,
+            vec![
+                plan_response(vec![Step::new("检查项目结构")]),
+                Response::from_iter([
+                    ("role".to_string(), json!("assistant")),
+                    ("content".to_string(), json!("invalid json")),
+                ]),
+            ],
+        );
+        let mut sink = CollectedEvents::default();
+
+        let error = flow
+            .invoke(Message::default(), &mut sink)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("expected value"));
+        assert_eq!(sink.events.len(), 4);
+        assert!(matches!(sink.events[0], Event::Title(_)));
+        assert!(matches!(sink.events[1], Event::Message(_)));
+        assert!(matches!(sink.events[2], Event::Plan(_)));
+        assert!(matches!(
+            sink.events[3],
+            Event::Step(ref step_event) if step_event.status == StepEventStatus::Started
+        ));
+        assert_eq!(flow.status(), FlowStatus::Executing);
+        assert_eq!(requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn cleanup_attempts_mcp_then_a2a_and_logs_each_error_without_failing() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let (mut flow, _) = flow_with_tools(
+            Arc::new(MemoryRepository::default()),
+            Vec::new(),
+            vec![
+                Box::new(CleanupTool {
+                    name: "a2a",
+                    calls: calls.clone(),
+                }),
+                Box::new(CleanupTool {
+                    name: "mcp",
+                    calls: calls.clone(),
+                }),
+            ],
+        );
+
+        flow.cleanup_tools().await.unwrap();
+
+        assert_eq!(calls.lock().unwrap().as_slice(), ["mcp", "a2a"]);
     }
 }
