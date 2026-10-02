@@ -9,7 +9,10 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use bollard::{
     errors::Error as BollardError,
-    models::{ContainerCreateBody, ContainerInspectResponse, EndpointSettings, HostConfig},
+    models::{
+        ContainerCreateBody, ContainerInspectResponse, ContainerStateStatusEnum, EndpointSettings,
+        HostConfig,
+    },
     query_parameters::{CreateContainerOptionsBuilder, RemoveContainerOptionsBuilder},
     Docker,
 };
@@ -35,15 +38,12 @@ const DEFAULT_SANDBOX_ID: &str = "lenexus-sandbox";
 const SANDBOX_API_PORT: u16 = 3000;
 const SANDBOX_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 const HOSTNAME_CACHE_CAPACITY: usize = 128;
-const SANDBOX_CACHE_CAPACITY: usize = 128;
 const SANDBOX_STATUS_MAX_RETRIES: usize = 30;
 const SANDBOX_STATUS_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 const SANDBOX_STATUS_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
 
 static HOSTNAME_CACHE: LazyLock<Mutex<HostnameCache>> =
     LazyLock::new(|| Mutex::new(HostnameCache::default()));
-static SANDBOX_CACHE: LazyLock<Mutex<SandboxCache>> =
-    LazyLock::new(|| Mutex::new(SandboxCache::default()));
 
 /// 基于 Docker 的沙箱服务。
 #[derive(Debug, Clone)]
@@ -75,11 +75,9 @@ impl SandboxFactory for DockerSandboxFactory {
     }
 
     async fn get(&self, id: &str) -> Result<Option<Box<dyn Sandbox>>> {
-        match DockerSandbox::get(&self.settings, id).await {
-            Ok(sandbox) => Ok(Some(Box::new(sandbox))),
-            Err(error) if is_missing_container(&error) => Ok(None),
-            Err(error) => Err(error),
-        }
+        Ok(DockerSandbox::get(&self.settings, id)
+            .await
+            .map(|sandbox| Box::new(sandbox) as Box<dyn Sandbox>))
     }
 }
 
@@ -127,53 +125,88 @@ impl DockerSandbox {
     }
 
     /// 根据传递的 id 获取沙箱实例。
-    pub async fn get(settings: &SandboxSettings, id: &str) -> Result<Self> {
-        let cache_enabled = settings.address.is_some();
-        let cache_key = SandboxCacheKey::new(settings, id);
-        if cache_enabled {
-            if let Some(sandbox) = lock_sandbox_cache().get(&cache_key) {
-                return Ok(sandbox);
-            }
-        }
+    pub async fn get(settings: &SandboxSettings, id: &str) -> Option<Self> {
+        Self::get_with_connector(settings, id, Docker::connect_with_defaults).await
+    }
 
-        // 1.先获取系统配置并判断是否直连沙箱
-        let sandbox = if let Some(address) = settings.address.as_deref() {
-            let ip = Self::resolve_hostname_to_ip(address)
-                .await
-                .ok_or_else(|| anyhow!("无法将沙箱主机地址 {address} 解析成 IPv4"))?;
-            Self::from_client(ip, id.to_string(), None, build_http_client()?)
-        } else {
+    async fn get_with_connector(
+        settings: &SandboxSettings,
+        id: &str,
+        connect: impl FnOnce() -> std::result::Result<Docker, BollardError>,
+    ) -> Option<Self> {
+        let result: Result<Option<Self>> = async {
+            // 1.先获取系统配置并判断是否直连沙箱
+            if let Some(address) = settings.address.as_deref() {
+                let Some(ip) = Self::resolve_hostname_to_ip(address).await else {
+                    error!(sandbox_id = id, address, "解析沙箱地址失败");
+                    return Ok(None);
+                };
+                return Ok(Some(Self::from_client(
+                    ip,
+                    id.to_string(),
+                    None,
+                    build_http_client()?,
+                )));
+            }
+
             // 2.创建 Docker 客户端并根据容器名字获取容器
             let name_prefix =
                 required_setting(&settings.name_prefix, "settings.sandbox.name_prefix")?;
             validate_managed_container_id(id, name_prefix)?;
-            let docker = Docker::connect_with_defaults().context("创建 Docker 客户端失败")?;
+            let docker = connect().context("创建 Docker 客户端失败")?;
+
+            // 3.根据 id 获取容器；每次重新 inspect，及时发现容器退出或被销毁。
             let container = docker
                 .inspect_container(id, None)
                 .await
                 .with_context(|| format!("获取 Docker 沙箱容器 {id} 失败"))?;
 
-            // 3.获取容器的 IP 地址
-            let ip = Self::get_container_ip(&container, settings.network.as_deref())
-                .ok_or_else(|| anyhow!("Docker 沙箱容器 {id} 没有可用的 IPv4 地址"))?;
-            Self::from_client(
+            // 4.检查容器是否正常运行，再获取容器的 IP 地址。
+            if container
+                .state
+                .as_ref()
+                .and_then(|state| state.status.as_ref())
+                != Some(&ContainerStateStatusEnum::RUNNING)
+            {
+                warn!(sandbox_id = id, "容器存在但未运行");
+                return Ok(None);
+            }
+            let Some(ip) = Self::get_container_ip(&container, settings.network.as_deref()) else {
+                warn!(sandbox_id = id, "Docker 沙箱容器没有可用的 IPv4 地址");
+                return Ok(None);
+            };
+
+            // 7.Bollard 客户端由 Rust 所有权管理，离开作用域时自动释放。
+            Ok(Some(Self::from_client(
                 ip,
                 id.to_string(),
                 Some(id.to_string()),
                 build_http_client()?,
-            )
-        };
-
-        if cache_enabled {
-            lock_sandbox_cache().insert(cache_key, sandbox.clone());
+            )))
         }
-        Ok(sandbox)
+        .await;
+
+        match result {
+            Ok(sandbox) => sandbox,
+            Err(err) => {
+                match err.downcast_ref::<BollardError>() {
+                    // 5.找不到容器（容器被销毁）。
+                    Some(error) if is_container_not_found(error) => {
+                        warn!(sandbox_id = id, "该容器找不到可能被销毁");
+                    }
+                    // 6.Docker 容器守护进程出错。
+                    Some(error) => error!(sandbox_id = id, error = %error, "Docker API 出错"),
+                    // 8.其他错误统一记录，返回未找到沙箱。
+                    None => error!(sandbox_id = id, error = %err, "获取沙箱发生未知错误"),
+                }
+                None
+            }
+        }
     }
 
     /// 销毁当前的 DockerSandbox 实例。
     pub async fn destroy(&self) -> Result<bool> {
         // reqwest::Client 使用共享所有权，最后一个句柄释放时会自动关闭连接池。
-        lock_sandbox_cache().remove_by_id(&self.id);
 
         // 1.关闭并移除由当前服务管理的容器
         if let Some(container_id) = self.container_id.as_deref() {
@@ -424,7 +457,7 @@ impl DockerSandbox {
         retry_interval: Duration,
         total_timeout: Duration,
     ) -> Result<bool> {
-        let result = match tokio::time::timeout(
+        match tokio::time::timeout(
             total_timeout,
             self.ensure_sandbox_with_policy(max_retries, retry_interval),
         )
@@ -439,13 +472,7 @@ impl DockerSandbox {
                 error!(sandbox_id = %self.id, "{message}");
                 Err(anyhow!(message))
             }
-        };
-
-        if result.is_err() {
-            lock_sandbox_cache().remove_by_id(&self.id);
         }
-
-        result
     }
 
     async fn load_supervisor_status(&self) -> Result<ToolResult<Vec<SupervisorProcess>>> {
@@ -854,53 +881,6 @@ struct HostnameCache {
     entries: VecDeque<(String, Ipv4Addr)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SandboxCacheKey {
-    id: String,
-    address: Option<String>,
-    network: Option<String>,
-}
-
-impl SandboxCacheKey {
-    fn new(settings: &SandboxSettings, id: &str) -> Self {
-        Self {
-            id: id.to_string(),
-            address: settings.address.clone(),
-            network: settings.network.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct SandboxCache {
-    entries: VecDeque<(SandboxCacheKey, DockerSandbox)>,
-}
-
-impl SandboxCache {
-    fn get(&mut self, key: &SandboxCacheKey) -> Option<DockerSandbox> {
-        let index = self.entries.iter().position(|(cached, _)| cached == key)?;
-        let entry = self.entries.remove(index)?;
-        let sandbox = entry.1.clone();
-        self.entries.push_back(entry);
-        Some(sandbox)
-    }
-
-    fn insert(&mut self, key: SandboxCacheKey, sandbox: DockerSandbox) {
-        if let Some(index) = self.entries.iter().position(|(cached, _)| cached == &key) {
-            self.entries.remove(index);
-        }
-
-        if self.entries.len() == SANDBOX_CACHE_CAPACITY {
-            self.entries.pop_front();
-        }
-        self.entries.push_back((key, sandbox));
-    }
-
-    fn remove_by_id(&mut self, id: &str) {
-        self.entries.retain(|(key, _)| key.id != id);
-    }
-}
-
 impl HostnameCache {
     fn get(&mut self, hostname: &str) -> Option<Ipv4Addr> {
         let index = self
@@ -933,10 +913,6 @@ fn lock_hostname_cache() -> MutexGuard<'static, HostnameCache> {
     HOSTNAME_CACHE
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-}
-
-fn lock_sandbox_cache() -> MutexGuard<'static, SandboxCache> {
-    SANDBOX_CACHE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn build_container_name(name_prefix: &str) -> String {
@@ -1046,17 +1022,10 @@ fn is_container_not_found(error: &BollardError) -> bool {
     )
 }
 
-/// 保留 Docker 错误类型穿过 anyhow 上下文，只将容器 404 识别为已释放。
-fn is_missing_container(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<BollardError>()
-        .is_some_and(is_container_not_found)
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashMap,
+        collections::{HashMap, VecDeque},
         future::pending,
         net::Ipv4Addr,
         sync::{Arc, Mutex as StdMutex},
@@ -1073,17 +1042,20 @@ mod tests {
     };
     use bollard::{
         models::{ContainerInspectResponse, EndpointSettings, NetworkSettings},
-        Docker,
+        Docker, API_DEFAULT_VERSION,
     };
     use serde_json::{json, Value};
     use tokio::{net::TcpListener, task::JoinHandle};
 
     use super::{
-        build_container_config, build_container_name, is_container_not_found, is_missing_container,
-        validate_managed_container_id, BollardError, DockerSandbox, HostnameCache,
-        HOSTNAME_CACHE_CAPACITY,
+        build_container_config, build_container_name, is_container_not_found,
+        validate_managed_container_id, BollardError, DockerSandbox, DockerSandboxFactory,
+        HostnameCache, HOSTNAME_CACHE_CAPACITY,
     };
-    use crate::{domain::external::Sandbox, infrastructure::settings::SandboxSettings};
+    use crate::{
+        domain::external::{Sandbox, SandboxFactory},
+        infrastructure::settings::SandboxSettings,
+    };
 
     #[derive(Debug, Clone)]
     struct RecordedRequest {
@@ -1291,23 +1263,142 @@ mod tests {
         assert!(is_container_not_found(&error));
     }
 
-    #[test]
-    fn sandbox_lookup_only_treats_docker_404_as_missing() {
-        for status_code in [403, 404, 500] {
-            let error = anyhow::Error::new(BollardError::DockerResponseServerError {
-                status_code,
-                message: "Docker response".to_owned(),
-            })
-            .context("获取 Docker 沙箱容器失败");
-            assert_eq!(is_missing_container(&error), status_code == 404);
+    #[tokio::test]
+    async fn lookup_reinspects_container_state_and_address() {
+        let mock = MockDocker::start(vec![
+            (StatusCode::OK, inspect_response("running", "172.20.0.2")),
+            (StatusCode::OK, inspect_response("running", "172.20.0.3")),
+            (StatusCode::OK, inspect_response("exited", "172.20.0.3")),
+            (
+                StatusCode::NOT_FOUND,
+                json!({"message": "No such container"}).to_string(),
+            ),
+        ])
+        .await;
+        let settings = managed_sandbox_settings();
+
+        for expected_ip in [
+            Some(Ipv4Addr::new(172, 20, 0, 2)),
+            Some(Ipv4Addr::new(172, 20, 0, 3)),
+            None,
+            None,
+        ] {
+            let sandbox =
+                DockerSandbox::get_with_connector(&settings, "lenexus-sandbox-lookup", || {
+                    Ok(mock.docker.clone())
+                })
+                .await;
+            assert_eq!(sandbox.map(|sandbox| sandbox.ip()), expected_ip);
         }
 
-        let network_error = anyhow::Error::new(std::io::Error::new(
-            std::io::ErrorKind::ConnectionRefused,
-            "Docker connection refused",
-        ));
-        assert!(!is_missing_container(&network_error));
-        assert!(!is_missing_container(&anyhow::anyhow!("沙箱配置缺失")));
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(requests.iter().all(|(method, path)| {
+            *method == Method::GET && path.ends_with("/containers/lenexus-sandbox-lookup/json")
+        }));
+    }
+
+    #[tokio::test]
+    async fn lookup_requires_running_container_and_usable_ipv4() {
+        let responses = [
+            inspect_response("created", "172.20.0.2"),
+            inspect_response("paused", "172.20.0.2"),
+            inspect_response("restarting", "172.20.0.2"),
+            inspect_response("dead", "172.20.0.2"),
+            inspect_response("running", ""),
+            inspect_response("running", "::1"),
+            json!({"State": {"Status": "running"}}).to_string(),
+            json!({"NetworkSettings": {"Networks": {}}}).to_string(),
+        ];
+        let request_count = responses.len();
+        let mock = MockDocker::start(
+            responses
+                .into_iter()
+                .map(|body| (StatusCode::OK, body))
+                .collect(),
+        )
+        .await;
+
+        for _ in 0..request_count {
+            assert!(DockerSandbox::get_with_connector(
+                &managed_sandbox_settings(),
+                "lenexus-sandbox-lookup",
+                || Ok(mock.docker.clone()),
+            )
+            .await
+            .is_none());
+        }
+        assert_eq!(mock.requests.lock().unwrap().len(), request_count);
+    }
+
+    #[tokio::test]
+    async fn lookup_returns_none_on_docker_api_and_decode_errors() {
+        let mock = MockDocker::start(vec![
+            (
+                StatusCode::FORBIDDEN,
+                json!({"message": "Access denied"}).to_string(),
+            ),
+            (
+                StatusCode::NOT_FOUND,
+                json!({"message": "No such container"}).to_string(),
+            ),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"message": "Docker unavailable"}).to_string(),
+            ),
+            (StatusCode::OK, "invalid-json".to_string()),
+        ])
+        .await;
+
+        for _ in 0..4 {
+            assert!(DockerSandbox::get_with_connector(
+                &managed_sandbox_settings(),
+                "lenexus-sandbox-lookup",
+                || Ok(mock.docker.clone()),
+            )
+            .await
+            .is_none());
+        }
+        assert_eq!(mock.requests.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn lookup_handles_invalid_settings_and_docker_client_failure() {
+        for (settings, id) in [
+            (SandboxSettings::default(), "lenexus-sandbox-lookup"),
+            (managed_sandbox_settings(), "postgres"),
+        ] {
+            assert!(DockerSandbox::get_with_connector(&settings, id, || {
+                panic!("invalid settings must be rejected before contacting Docker")
+            })
+            .await
+            .is_none());
+        }
+
+        assert!(DockerSandbox::get_with_connector(
+            &managed_sandbox_settings(),
+            "lenexus-sandbox-lookup",
+            || Err(BollardError::IOError {
+                err: std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "Docker unavailable"
+                ),
+            }),
+        )
+        .await
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn factory_returns_none_on_invalid_direct_address_but_create_remains_an_error() {
+        // 内含 NUL 的地址在本地解析阶段失败，避免依赖外部 DNS 或修改进程环境变量。
+        let factory = DockerSandboxFactory::new(SandboxSettings {
+            address: Some("invalid\0hostname".to_string()),
+            ..Default::default()
+        });
+
+        assert!(factory.get("shared-sandbox").await.unwrap().is_none());
+        assert!(factory.create().await.is_err());
     }
 
     #[test]
@@ -1545,6 +1636,64 @@ mod tests {
         let docker = Docker::connect_with_defaults().unwrap();
 
         docker.ping().await.unwrap();
+    }
+
+    struct MockDocker {
+        docker: Docker,
+        requests: Arc<StdMutex<Vec<(Method, String)>>>,
+        server: JoinHandle<()>,
+    }
+
+    impl MockDocker {
+        async fn start(responses: Vec<(StatusCode, String)>) -> Self {
+            let responses = Arc::new(StdMutex::new(VecDeque::from(responses)));
+            let requests = Arc::new(StdMutex::new(Vec::new()));
+            let recorded = Arc::clone(&requests);
+            let app = Router::new().fallback(move |request: Request<Body>| {
+                let responses = Arc::clone(&responses);
+                let recorded = Arc::clone(&recorded);
+                async move {
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push((request.method().clone(), request.uri().path().to_string()));
+                    responses.lock().unwrap().pop_front().unwrap()
+                }
+            });
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let docker =
+                Docker::connect_with_http(&format!("http://{address}"), 2, API_DEFAULT_VERSION)
+                    .unwrap();
+            Self {
+                docker,
+                requests,
+                server,
+            }
+        }
+    }
+
+    impl Drop for MockDocker {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    fn managed_sandbox_settings() -> SandboxSettings {
+        SandboxSettings {
+            name_prefix: Some("lenexus-sandbox".to_string()),
+            network: Some("sandbox".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn inspect_response(status: &str, ip: &str) -> String {
+        json!({
+            "State": {"Status": status},
+            "NetworkSettings": {"Networks": {"sandbox": {"IPAddress": ip}}}
+        })
+        .to_string()
     }
 
     async fn sandbox_with_supervisor_response(response: Value) -> (DockerSandbox, JoinHandle<()>) {

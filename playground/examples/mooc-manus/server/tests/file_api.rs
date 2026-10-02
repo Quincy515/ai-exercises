@@ -189,6 +189,7 @@ async fn uploaded_screenshot_url_returns_original_png_over_http() -> Result<()> 
         })
         .await?;
     assert!(file.mime_type.is_empty());
+    assert_eq!(file.size, content.len());
     assert_eq!(repository.get_by_id(&file.id).await?, Some(file.clone()));
     let url = storage.file_url(&file);
     assert_eq!(

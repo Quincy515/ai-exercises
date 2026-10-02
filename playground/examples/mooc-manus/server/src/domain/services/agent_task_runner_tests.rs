@@ -357,6 +357,7 @@ struct LifecycleSandbox {
     shell_reads: Mutex<Vec<(String, Option<bool>)>>,
     fail_shell_read: AtomicBool,
     file_reads: Mutex<Vec<String>>,
+    omit_file_read_data: AtomicBool,
     writes: Mutex<Vec<(String, String)>>,
     write_gate: Mutex<Option<FileWriteGate>>,
 }
@@ -463,6 +464,9 @@ impl Sandbox for LifecycleSandbox {
             (None, None, None, None)
         );
         self.file_reads.lock().unwrap().push(file_path.to_string());
+        if self.omit_file_read_data.load(Ordering::SeqCst) {
+            return Ok(ToolResult::default());
+        }
         let content = self
             .files
             .lock()
@@ -1923,6 +1927,36 @@ fn remote_content(event: &ToolEvent) -> &Value {
         ToolContent::A2a(c) => &c.a2a_result,
         _ => panic!("应生成远程工具内容"),
     }
+}
+
+#[tokio::test]
+async fn file_missing_read_data_uses_empty_content_and_still_syncs_to_storage() {
+    let (runner, repository, sandbox, storage) = file_fixture();
+    let filepath = "/tmp/结果.txt";
+    let content = "文件正文\n".as_bytes();
+    sandbox
+        .files
+        .lock()
+        .unwrap()
+        .insert(filepath.into(), content.to_vec());
+    // 文件展示接口返回空 data 时，附件下载仍可以取得实际内容。
+    sandbox.omit_file_read_data.store(true, Ordering::SeqCst);
+    let mut event = called_tool("file");
+    event
+        .function_args
+        .insert("filepath".into(), json!(filepath));
+
+    runner.handle_tool_event(&mut event).await;
+
+    assert!(matches!(event.tool_content, Some(ToolContent::File(c)) if c.content.is_empty()));
+    let uploads = storage.uploaded.lock().unwrap();
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(uploads[0].filename, "结果.txt");
+    assert_eq!(uploads[0].content.as_ref(), content);
+    let session = repository.session(SESSION_ID).unwrap();
+    assert_eq!(session.files.len(), 1);
+    assert_eq!(session.files[0].filepath, filepath);
+    assert_eq!(session.files[0].size, content.len());
 }
 
 #[tokio::test]

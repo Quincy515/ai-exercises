@@ -1,0 +1,64 @@
+# 容器开发配置：数据库、Redis 和动态沙箱位于同一个 Docker 网络。
+logger:
+  enable: true
+  pretty_backtrace: false
+  level: info
+  format: compact
+
+server:
+  binding: 0.0.0.0
+  port: <%= get_env(name="SERVER_PORT", default="5150") %>
+  # 用于生成客户端可直接访问的截图下载 URL，按实际访问地址覆盖。
+  host: '<%= get_env(name="SERVER_HOST", default="http://localhost") %>'
+  middlewares:
+
+workers:
+  mode: BackgroundAsync
+
+initializers:
+  openapi:
+    redoc:
+      url: /redoc
+      spec_json_url: /redoc/openapi.json
+    swagger:
+      url: /swagger
+      spec_json_url: /api-docs/openapi.json
+
+database:
+  uri: '<%= get_env(name="DATABASE_URL", default="postgres://postgres:postgres@manus-db-dev:5432/manus") %>'
+  enable_logging: false
+  connect_timeout: 10
+  idle_timeout: 500
+  min_connections: 1
+  max_connections: 5
+  # 启动时运行既有迁移，保留已有数据。
+  auto_migrate: true
+  dangerously_truncate: false
+  dangerously_recreate: false
+
+auth:
+  jwt:
+    secret: '<%= get_env(name="JWT_SECRET", default="manus-docker-local-development-only") %>'
+    expiration: 604800
+
+cache:
+  kind: Redis
+  uri: '<%= get_env(name="REDIS_URL", default="redis://manus-redis-dev:6379") %>'
+  max_size: 10
+
+settings:
+  # 开发环境文件使用独立数据卷持久化，继续复用现有下载 API。
+  storage:
+    kind: local
+    path: /app/storage
+  sandbox:
+    # 留空时动态创建沙箱，API 与沙箱通过 Docker 网络中的 IP 通信。
+    address: '<%= get_env(name="SANDBOX_ADDRESS", default="") %>'
+    image: '<%= get_env(name="SANDBOX_IMAGE", default="sandbox-dev") %>'
+    name_prefix: '<%= get_env(name="SANDBOX_NAME_PREFIX", default="lenexus-sandbox") %>'
+    ttl_minutes: <%= get_env(name="SANDBOX_TTL_MINUTES", default=60) %>
+    network: '<%= get_env(name="SANDBOX_NETWORK", default="manus-network-dev") %>'
+    chrome_args: '<%= get_env(name="SANDBOX_CHROME_ARGS", default="") %>'
+    https_proxy: '<%= get_env(name="SANDBOX_HTTPS_PROXY", default="") %>'
+    http_proxy: '<%= get_env(name="SANDBOX_HTTP_PROXY", default="") %>'
+    no_proxy: '<%= get_env(name="SANDBOX_NO_PROXY", default="") %>'

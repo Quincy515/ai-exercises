@@ -184,6 +184,32 @@ mod tests {
     }
 
     #[test]
+    fn loads_container_config_with_safe_migrations_and_shared_network() {
+        let config_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config");
+        let config = Config::from_folder(&Environment::Any("docker".into()), &config_dir).unwrap();
+        let settings = AppSettings::from_config(&config).unwrap();
+        assert_eq!(config.server.binding, "0.0.0.0");
+        assert!(config.database.auto_migrate);
+        assert!(!config.database.dangerously_truncate);
+        assert!(!config.database.dangerously_recreate);
+        assert!(
+            matches!(settings.storage, StorageSettings::Local { ref path } if path == &PathBuf::from("/app/storage"))
+        );
+        assert_eq!(
+            settings.sandbox.address,
+            optional_env("SANDBOX_ADDRESS", "")
+        );
+        assert_eq!(
+            settings.sandbox.image,
+            optional_env("SANDBOX_IMAGE", "sandbox-dev")
+        );
+        assert_eq!(
+            settings.sandbox.network,
+            optional_env("SANDBOX_NETWORK", "manus-network-dev")
+        );
+    }
+
+    #[test]
     fn parses_r2_storage_settings_with_default_region() {
         let settings = AppSettings::from_json(&json!({
             "storage": {

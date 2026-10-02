@@ -1,0 +1,26 @@
+# Rust 编译产物和本地缓存
+target/
+debug/
+.cargo/
+.omx/
+node_modules/
+
+# 环境变量和本地运行数据；构建只复制受版本管理的容器配置。
+.env
+.env.*
+config/*
+!config/docker.yaml
+storage/
+logs/
+tmp/
+*.log
+*.db
+*.sqlite*
+
+# 测试、编辑器和版本库信息
+tests/
+.git/
+.DS_Store
+.idea/
+.vscode/
+**/*.rs.bk

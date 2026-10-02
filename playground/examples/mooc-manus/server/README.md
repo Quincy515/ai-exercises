@@ -241,3 +241,56 @@ Loco 的 `App::on_shutdown` 先通知列表 SSE、聊天 SSE 和 VNC 结束，�
 ```sh
 cargo test --locked --lib --test agent_service --test chat_stream_api --test session_api --test session_service --test event_response
 ```
+
+## 17-13：在 Docker / Ubuntu 中运行 API
+
+在 `server` 目录构建。镜像分为 Rust 编译阶段和 Ubuntu 运行阶段，最终携带
+`server-cli`、`config/docker.yaml`、`run.sh` 和 Node/npm。Node 供 `npx` 类型的 MCP
+工具使用；浏览器能力通过 Rust CDP 客户端连接沙箱。运行入口使用 `exec` 传递停止信号。
+
+```sh
+# 1.构建 API；sandbox-dev 使用 sandbox 目录中的 Dockerfile 预先构建
+docker build -t manus-api-dev .
+
+# 2.创建开发网络
+docker network create manus-network-dev
+
+# 3.启动 Redis 与 PostgreSQL，数据存放在独立 Docker volume
+docker run -d --name manus-redis-dev --network manus-network-dev \
+  -v manus_redis_data_dev:/data redis:8.2
+docker run -d --name manus-db-dev --network manus-network-dev \
+  -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=manus \
+  -v manus_postgres_data_dev:/var/lib/postgresql/data postgres:17.6
+
+# 4.确认依赖已就绪，再启动 API
+docker exec manus-db-dev pg_isready -U postgres
+docker exec manus-redis-dev redis-cli ping
+docker run -d --name manus-api-dev --network manus-network-dev \
+  -p 5150:5150 --stop-timeout 40 \
+  -v manus_api_files_dev:/app/storage \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro manus-api-dev
+
+# 5.查看启动、自动迁移与请求日志
+docker logs -f manus-api-dev
+# 另开终端检查 API 文档
+curl --fail http://localhost:5150/api-docs/openapi.json
+
+# 6.应用关闭时预留 Agent 的30秒收尾时间
+docker stop --timeout 40 manus-api-dev
+```
+
+API 使用 Docker 网络里的 `manus-db-dev` / `manus-redis-dev`，动态沙箱也加入
+`manus-network-dev`。数据库和 Redis 默认只供这个网络访问；需要宿主机工具连接时，
+可分别增加未占用的端口映射。现有同名容器重用 `docker start`，网络只需创建一次。
+挂载 Docker socket 让 API 可以管理沙箱容器；`:ro` 限制挂载文件写入，Docker API
+仍然具备容器管理能力，以上配置用于本地开发。
+
+`config/docker.yaml` 启用 `auto_migrate`，保留已有数据库数据。环境变量可覆盖
+`DATABASE_URL`、`REDIS_URL`、`SANDBOX_IMAGE`、`SANDBOX_NETWORK`、`SANDBOX_ADDRESS`。
+`SERVER_HOST` 和 `SERVER_PORT` 组成截图下载 URL，应填写客户端可访问的地址；
+更改端口时同步容器端口映射。开发配置中的 JWT 默认值可通过 `JWT_SECRET` 覆盖。
+`.dockerignore` 排除 `.env`、本地配置、存储与编译产物，镜像中只复制容器配置。
+
+沙箱查找每次重新 inspect，检查运行状态和 IP；获取失败会记录日志并返回 `None`，
+由已有任务流程创建新沙箱。截图继续返回既有文件下载 URL，size 按真实字节数计算。
+修改源码后重新 `docker build` 并重建 API 容器，命名数据卷继续保留文件和数据库内容。
