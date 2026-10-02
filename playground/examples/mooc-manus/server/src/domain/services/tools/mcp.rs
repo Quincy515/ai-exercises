@@ -397,7 +397,8 @@ impl McpClientManager {
         }
     }
 
-    /// 当退出MCP服务时，清除对应资源
+    /// 当退出MCP服务时，清除对应资源。
+    /// 逐个关闭会话，失败时继续清理；缓存和初始化标识始终重置，支持重复调用。
     pub async fn cleanup(&mut self) {
         let mut cleanup_failed = false;
         for (server_name, mut session) in self.clients.drain() {
@@ -575,6 +576,39 @@ fn http_headers(headers: Option<&Map<String, Value>>) -> Result<HashMap<HeaderNa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    /// 使用真实 rmcp 后台服务验证关闭路径，传输层在内存中模拟关闭失败。
+    struct CleanupTransport {
+        closed: Arc<AtomicUsize>,
+        fail_close: bool,
+    }
+
+    impl rmcp::transport::Transport<RoleClient> for CleanupTransport {
+        type Error = std::io::Error;
+
+        fn send(
+            &mut self,
+            _item: rmcp::service::TxJsonRpcMessage<RoleClient>,
+        ) -> impl Future<Output = std::result::Result<(), Self::Error>> + Send + 'static {
+            std::future::ready(Ok(()))
+        }
+
+        async fn receive(&mut self) -> Option<rmcp::service::RxJsonRpcMessage<RoleClient>> {
+            std::future::pending().await
+        }
+
+        async fn close(&mut self) -> std::result::Result<(), Self::Error> {
+            self.closed.fetch_add(1, Ordering::SeqCst);
+            // RunningService::close 的错误是后台服务的 JoinError。
+            assert!(!self.fail_close, "模拟 MCP 后台服务关闭失败");
+            Ok(())
+        }
+    }
 
     fn manager_with_servers(server_names: &[&str]) -> McpClientManager {
         let mut config = McpConfig::default();
@@ -599,6 +633,39 @@ mod tests {
 
         manager.cleanup().await;
         assert!(!manager.initialized);
+    }
+
+    #[tokio::test]
+    async fn cleanup_closes_all_clients_clears_caches_and_can_be_repeated_after_failure() {
+        for fail_close in [false, true] {
+            let mut manager = McpClientManager::new(None);
+            let closed = Arc::new(AtomicUsize::new(0));
+            for (name, fails) in [("first", fail_close), ("second", false)] {
+                let session = rmcp::service::serve_directly(
+                    ClientInfo::default(),
+                    CleanupTransport {
+                        closed: closed.clone(),
+                        fail_close: fails,
+                    },
+                    None,
+                );
+                manager.clients.insert(name.into(), session);
+                manager
+                    .tools
+                    .insert(name.into(), vec![Tool::new("search", "搜索", Map::new())]);
+            }
+            manager.initialized = true;
+
+            for _ in 0..2 {
+                tokio::time::timeout(std::time::Duration::from_secs(2), manager.cleanup())
+                    .await
+                    .unwrap();
+                assert_eq!(closed.load(Ordering::SeqCst), 2);
+                assert!(manager.clients.is_empty());
+                assert!(manager.tools.is_empty());
+                assert!(!manager.initialized);
+            }
+        }
     }
 
     #[tokio::test]

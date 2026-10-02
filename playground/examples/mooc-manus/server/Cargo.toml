@@ -81,6 +81,7 @@ path = "src/bin/tool.rs"
 required-features = []
 
 [dev-dependencies]
+tokio = { version = "1.45", features = ["test-util"] }
 axum-test = "17.3"
 loco-rs = { workspace = true, features = ["testing"] }
 serial_test = { version = "3.1.1" }

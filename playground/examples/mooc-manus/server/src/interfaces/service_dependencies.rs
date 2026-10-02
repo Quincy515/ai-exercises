@@ -23,6 +23,7 @@ use crate::{
 };
 
 use super::repository_dependencies::{get_db_file_repository, get_db_session_repository};
+use crate::application::shutdown::ShutdownSignal;
 
 /// 获取 Agent 服务，按请求读取配置快照并组装既有领域能力。
 pub async fn get_agent_service(ctx: &AppContext) -> Result<AgentService> {
@@ -57,6 +58,7 @@ pub async fn get_agent_service(ctx: &AppContext) -> Result<AgentService> {
         Arc::new(BingSearchEngine::new()),
         file_storage,
         file_repository,
+        ctx.shared_store.get::<ShutdownSignal>().unwrap_or_default(),
     ))
 }
 

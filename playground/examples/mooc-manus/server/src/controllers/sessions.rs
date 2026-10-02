@@ -17,6 +17,7 @@ use crate::{
     application::{
         error::AppError,
         services::session_service::{SessionNotFound, SessionSandboxError},
+        shutdown::ShutdownSignal,
     },
     interfaces::service_dependencies::{get_agent_service, get_session_service},
     openapi::{openapi, routes},
@@ -73,6 +74,10 @@ pub async fn create_session(State(ctx): State<AppContext>) -> Result<Response> {
 #[debug_handler]
 pub async fn stream_sessions(State(ctx): State<AppContext>) -> Result<Response> {
     let service = get_session_service(&ctx)?;
+    let shutdown = ctx
+        .shared_store
+        .get::<ShutdownSignal>()
+        .expect("应用路由已初始化关闭标记");
     // 定义事件生成器：首轮立即读取，后续在上次事件交付后等待五秒。
     // 请求断开时生成器被丢弃，数据库查询结束后再等待，不持有长事务。
     let events = stream::try_unfold((service, false), |(service, should_sleep)| async move {
@@ -90,7 +95,7 @@ pub async fn stream_sessions(State(ctx): State<AppContext>) -> Result<Response> 
         let event = SseEvent::default().event("sessions").json_data(data)?;
         Ok::<_, axum::Error>(Some((event, (service, true))))
     });
-    Ok(Sse::new(events).into_response())
+    Ok(Sse::new(events.take_until(shutdown.cancelled())).into_response())
 }
 
 /// 获取项目中所有任务会话的基础信息列表。
@@ -227,7 +232,13 @@ pub async fn chat(
     );
     // 定义事件生成器，配合 Sse 生成流式响应数据。
     // 2.将 Agent 领域事件转换为统一响应，再将事件名与数据分别写入 SSE 帧。
-    let stream = events.map(encode_sse_event);
+    let shutdown = ctx
+        .shared_store
+        .get::<ShutdownSignal>()
+        .expect("应用路由已初始化关闭标记");
+    let stream = events
+        .map(encode_sse_event)
+        .take_until(shutdown.cancelled());
     Ok(Sse::new(stream).into_response())
 }
 
@@ -416,6 +427,10 @@ pub async fn vnc_websocket(
     websocket: WebSocketUpgrade,
 ) -> Result<Response> {
     let service = get_session_service(&ctx)?;
+    let shutdown = ctx
+        .shared_store
+        .get::<ShutdownSignal>()
+        .expect("应用路由已初始化关闭标记");
     tracing::info!(session_id, "为会话开启 WebSocket 连接");
     // 1.从客户端 noVNC 接收子协议；2.binary 优先，base64 次选。
     // Axum 按服务端提供的顺序选择客户端支持的协议。
@@ -425,9 +440,16 @@ pub async fn vnc_websocket(
         .on_upgrade(move |mut socket| async move {
             let result: anyhow::Result<()> = async {
                 // 4.获取对应会话的 VNC 链接。
-                let sandbox_vnc_url = service.get_vnc_url(&session_id).await?;
+                let sandbox_vnc_url = tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => {
+                        let _ = tokio::time::timeout(Duration::from_secs(1), socket.close()).await;
+                        return Ok(());
+                    }
+                    url = service.get_vnc_url(&session_id) => url?,
+                };
                 tracing::info!(session_id, sandbox_vnc_url, "连接 WebSocket VNC");
-                forward_vnc(&mut socket, &sandbox_vnc_url).await
+                forward_vnc(&mut socket, &sandbox_vnc_url, &shutdown).await
             }
             .await;
             if let Err(error) = result {
@@ -438,15 +460,24 @@ pub async fn vnc_websocket(
         }))
 }
 
-async fn forward_vnc(websocket: &mut WebSocket, sandbox_vnc_url: &str) -> anyhow::Result<()> {
+async fn forward_vnc(
+    websocket: &mut WebSocket,
+    sandbox_vnc_url: &str,
+    shutdown: &ShutdownSignal,
+) -> anyhow::Result<()> {
     use anyhow::Context;
 
     // 5.连接到 VNC；沿用客户端连接的十秒握手等待上限。
-    let (sandbox_ws, _) =
-        tokio::time::timeout(Duration::from_secs(10), connect_async(sandbox_vnc_url))
-            .await
+    let (sandbox_ws, _) = tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => {
+            let _ = tokio::time::timeout(Duration::from_secs(1), websocket.close()).await;
+            return Ok(());
+        }
+        connection = tokio::time::timeout(Duration::from_secs(10), connect_async(sandbox_vnc_url)) => connection
             .context("连接沙箱环境超时")?
-            .context("连接沙箱环境失败")?;
+            .context("连接沙箱环境失败")?,
+    };
     let (mut web_sender, mut web_receiver) = websocket.split();
     let (mut sandbox_sender, mut sandbox_receiver) = sandbox_ws.split();
 
@@ -483,6 +514,8 @@ async fn forward_vnc(websocket: &mut WebSocket, sandbox_vnc_url: &str) -> anyhow
     // 7.并行运行两个方向；8.等待任意方向结束，表示连接已中断。
     // select! 返回时丢弃另一方向的 future，对应取消剩余转发任务。
     let (direction, result) = tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => ("应用关闭", Ok(())),
         result = forward_to_sandbox => ("Web->VNC", result),
         result = forward_from_sandbox => ("VNC->Web", result),
     };

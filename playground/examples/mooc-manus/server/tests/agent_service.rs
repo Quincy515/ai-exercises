@@ -19,10 +19,10 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use loco_rs::storage::{drivers, Storage};
 use migration::{Migrator, MigratorTrait, SchemaManager};
-use sea_orm::ConnectionTrait;
+use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use serde_json::{json, Value};
 use server::{
-    application::services::AgentService,
+    application::{services::AgentService, shutdown::ShutdownSignal},
     domain::{
         external::{
             JsonParser, Llm, LlmMessage, MessageQueue, Response, ResponseFormat, Sandbox,
@@ -358,6 +358,7 @@ impl Fixture {
                 "http://localhost:5150",
             )),
             self.file_repository.clone(),
+            ShutdownSignal::default(),
         )
     }
 
@@ -389,6 +390,21 @@ impl Fixture {
         self.repository.save(session.clone()).await?;
         let task = self.tasks.task(&task_id);
         Ok((session, task))
+    }
+
+    async fn wait_for_unread_count(&self, session_id: &str, expected: usize) -> Result<()> {
+        // finally 的清零由独立任务执行，只在断言需要观察完成时等待。
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let saved = self.repository.get_by_id(session_id).await?.unwrap();
+                if saved.unread_message_count == expected {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await??;
+        Ok(())
     }
 }
 
@@ -434,6 +450,7 @@ async fn missing_or_empty_messages_only_look_up_the_existing_task() -> Result<()
         for message in [None, Some("")] {
             // 仅订阅或空消息时，Running 会话缺失 Task 也只执行查询。
             assert!(fixture.chat(&session, message).await.is_empty());
+            fixture.wait_for_unread_count(&session.id, 0).await?;
             let saved = fixture.repository.get_by_id(&session.id).await?.unwrap();
             let mut expected = before.clone();
             expected.unread_message_count = 0;
@@ -543,6 +560,7 @@ async fn running_sessions_rebuild_missing_tasks_and_preserve_existing_session_da
             Some(timestamp),
         );
         assert!(stream.collect::<Vec<_>>().await.is_empty());
+        fixture.wait_for_unread_count(&session.id, 0).await?;
         let saved = fixture.repository.get_by_id(&session.id).await?.unwrap();
         let [_, Event::Message(message)] = saved.events.as_slice() else {
             panic!("应保留历史事件并追加人类消息事件")
@@ -606,6 +624,7 @@ async fn non_running_sessions_create_and_invoke_tasks_while_reusing_the_sandbox(
                 .chat(session.id.clone(), Some("   ".to_owned()), None, None, None);
         assert_eq!(fixture.tasks.0.lock().unwrap().creates, index);
         assert!(stream.collect::<Vec<_>>().await.is_empty());
+        fixture.wait_for_unread_count(&session.id, 0).await?;
         let saved = fixture.repository.get_by_id(&session.id).await?.unwrap();
         assert_eq!(saved.task_id, Some(format!("created-task-{}", index + 1)));
         assert_eq!(saved.sandbox_id, session.sandbox_id);
@@ -754,6 +773,7 @@ async fn enqueues_user_attachments_and_persists_the_queue_id_before_invoking() -
     assert_eq!(task.invokes.load(Ordering::SeqCst), 0);
     assert!(stream.collect::<Vec<_>>().await.is_empty());
 
+    fixture.wait_for_unread_count(&session.id, 0).await?;
     let saved = fixture.repository.get_by_id(&session.id).await?.unwrap();
     assert_eq!(saved.latest_message, "读取附件");
     assert_eq!(saved.latest_message_at, Some(timestamp));
@@ -896,9 +916,15 @@ async fn dropping_a_waiting_subscription_keeps_the_task_and_new_unread_messages(
             .is_err()
     );
     let reads_before_drop = task.output.0.lock().unwrap().reads.len();
+    // 模拟断开前最后一次事件传递之后累计的未读消息。
+    fixture
+        .repository
+        .update_unread_message_count(&session.id, 3)
+        .await?;
     drop(stream);
+    fixture.wait_for_unread_count(&session.id, 0).await?;
 
-    // 注册表仍持有任务；模拟后台在订阅结束后继续写入新事件和未读数。
+    // finally 清零完成后，后台新增的未读数应保留；清零只安排一次。
     assert!(Arc::ptr_eq(&task, &fixture.tasks.task(&task.id)));
     fixture
         .repository
@@ -919,6 +945,35 @@ async fn dropping_a_waiting_subscription_keeps_the_task_and_new_unread_messages(
     assert_eq!(task.output.size().await?, 2);
     assert!(!task.done());
     assert_eq!(task.cancels.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn dropping_an_unpolled_subscription_has_no_side_effects() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let (session, task) = fixture.subscription().await?;
+    task.done.store(false, Ordering::SeqCst);
+    let before = fixture.repository.get_by_id(&session.id).await?.unwrap();
+    let stream = fixture.service().chat(
+        session.id.clone(),
+        Some("尚未开始的消息".to_owned()),
+        None,
+        None,
+        None,
+    );
+    drop(stream);
+    // 让可能误启动的后台任务有机会运行，再检查惰性创建的边界。
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        fixture.repository.get_by_id(&session.id).await?.unwrap(),
+        before
+    );
+    assert!(fixture.tasks.0.lock().unwrap().ids.is_empty());
+    assert!(task.input.0.lock().unwrap().entries.is_empty());
+    assert!(task.output.0.lock().unwrap().reads.is_empty());
+    assert_eq!(task.invokes.load(Ordering::SeqCst), 0);
+    assert_eq!(task.cancels.load(Ordering::SeqCst), 0);
+    assert!(!task.done());
     Ok(())
 }
 
@@ -1083,6 +1138,7 @@ async fn malformed_output_and_queue_failures_become_persisted_error_events() -> 
             "output" => assert_eq!(message, "模拟队列读取失败"),
             _ => assert!(message.contains("future_event")),
         }
+        fixture.wait_for_unread_count(&session.id, 0).await?;
         let saved = fixture.repository.get_by_id(&session.id).await?.unwrap();
         assert_eq!(saved.events, events);
         assert_eq!(saved.unread_message_count, 0);
@@ -1099,11 +1155,81 @@ async fn final_unread_reset_failure_keeps_the_original_queue_error() -> Result<(
     fixture.database.db.execute_unprepared(
         "ALTER TABLE sessions ADD CONSTRAINT test_unread_nonzero CHECK (unread_message_count > 0)"
     ).await?;
+    // 序列递增不会随失败语句回滚，用它确认后台清零确实执行过。
+    fixture
+        .database
+        .db
+        .execute_unprepared(
+            "CREATE SEQUENCE test_unread_reset_attempts;
+         CREATE FUNCTION record_unread_reset() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           PERFORM nextval('test_unread_reset_attempts');
+           RETURN NEW;
+         END;
+         $$;
+         CREATE TRIGGER test_unread_reset BEFORE UPDATE OF unread_message_count ON sessions
+         FOR EACH ROW EXECUTE FUNCTION record_unread_reset();",
+        )
+        .await?;
+    task.done.store(false, Ordering::SeqCst);
     task.output.0.lock().unwrap().fail_get = true;
     let events = fixture.chat(&session, None).await;
     assert_eq!(error_message(&events), "模拟队列读取失败");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let row = fixture
+                .database
+                .db
+                .query_one_raw(Statement::from_string(
+                    DbBackend::Postgres,
+                    "SELECT is_called FROM test_unread_reset_attempts",
+                ))
+                .await?
+                .unwrap();
+            if row.try_get::<bool>("", "is_called")? {
+                return Ok::<_, anyhow::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await??;
     let saved = fixture.repository.get_by_id(&session.id).await?.unwrap();
     assert_eq!(saved.events, events);
     assert_eq!(saved.unread_message_count, 5);
+    assert_eq!(task.cancels.load(Ordering::SeqCst), 0);
+    assert!(!task.done());
+    // 后台 SQL 失败已隔离，连接池仍可用于后续仓库操作。
+    fixture
+        .repository
+        .update_title(&session.id, "后续更新成功")
+        .await?;
+    assert_eq!(
+        fixture
+            .repository
+            .get_by_id(&session.id)
+            .await?
+            .unwrap()
+            .title,
+        "后续更新成功"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_error_event_persistence_keeps_the_original_queue_error() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let (session, task) = fixture.subscription().await?;
+    // 错误事件保存失败与未读数清零相互独立，约束仅作用于私有测试数据库。
+    fixture.database.db.execute_unprepared(
+        "ALTER TABLE sessions ADD CONSTRAINT test_no_events CHECK (jsonb_array_length(events) = 0)"
+    ).await?;
+    task.output.0.lock().unwrap().fail_get = true;
+    let events = fixture.chat(&session, None).await;
+    assert_eq!(error_message(&events), "模拟队列读取失败");
+    fixture.wait_for_unread_count(&session.id, 0).await?;
+    let saved = fixture.repository.get_by_id(&session.id).await?.unwrap();
+    assert!(saved.events.is_empty());
+    assert_eq!(saved.unread_message_count, 0);
+    assert_eq!(task.cancels.load(Ordering::SeqCst), 0);
     Ok(())
 }

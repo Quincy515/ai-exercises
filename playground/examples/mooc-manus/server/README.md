@@ -220,3 +220,24 @@ cargo test --locked --lib --test session_service --test session_api --test agent
 cargo test --locked --lib controllers::sessions::vnc_tests
 cargo test --locked --test session_service
 ```
+
+## 17-12：应用关闭与 Agent 优雅退出
+
+Loco 的 `App::on_shutdown` 先通知列表 SSE、聊天 SSE 和 VNC 结束，再等待
+`AgentService::shutdown::<RedisStreamTask>(&shutdown)` 清理仍在注册表中的任务，最多等待
+30 秒。任务执行取消后，监督器完成取消/结束回调，再销毁 Runner 的沙箱与工具。
+关闭标记与任务准备读写锁配合，确保销毁快照包含已经进入准备过程的任务。
+超时或清理错误会记录日志，部分资源可能未完成释放。连接池在收尾期间保持可用，
+数据库、Redis 与存储句柄随后由 Loco 上下文和 Rust 所有权管理。
+
+聊天流正常结束、异常或客户端断开时，独立 Tokio 任务执行一次未读数清零。
+后台 Agent 继续运行；清零失败仅记录警告，清零完成后的新消息继续计入未读。
+错误事件保存失败时仍返回原始错误事件。应用退出可使用运行服务终端的 Ctrl+C。
+
+已有 `Memory::compact` 会移除消息的 `reasoning_content`，保留工具调用轮次中需要的
+推理字段直到压缩发生；Runner 和 MCP 清理沿用既有幂等实现。SeaORM 默认启用
+连接取用前探活，数据库继续采用连接池与短操作。
+
+```sh
+cargo test --locked --lib --test agent_service --test chat_stream_api --test session_api --test session_service --test event_response
+```

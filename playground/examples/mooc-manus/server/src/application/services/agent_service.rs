@@ -4,9 +4,11 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use futures::{stream, stream::BoxStream, StreamExt};
 
+use crate::application::shutdown::ShutdownSignal;
+
 use crate::domain::{
     external::{
-        FileStorage, JsonParser, Llm, SandboxFactory, SearchEngine, SharedTask, TaskFactory,
+        FileStorage, JsonParser, Llm, SandboxFactory, SearchEngine, SharedTask, Task, TaskFactory,
     },
     models::{
         A2aConfig, AgentConfig, ErrorEvent, Event, File, McpConfig, MessageEvent, MessageRole,
@@ -18,6 +20,7 @@ use crate::domain::{
 
 /// Manus 智能体服务，编排会话、沙箱与后台任务。
 pub struct AgentService {
+    shutdown: ShutdownSignal,
     session_repository: Arc<dyn SessionRepository>,
     llm: Arc<dyn Llm>,
     agent_config: AgentConfig,
@@ -32,6 +35,31 @@ pub struct AgentService {
 }
 
 impl AgentService {
+    /// 关闭 Agent 服务，清除所有会话任务资源。
+    /// Task 的静态销毁入口由应用装配层指定，退出时复用已注册的任务。
+    pub async fn shutdown<T: Task>(shutdown: &ShutdownSignal) -> Result<()> {
+        tracing::info!("正在清除所有会话任务资源并释放");
+        shutdown.notify();
+        let _preparations = shutdown.finish_preparations().await;
+        T::destroy().await?;
+        tracing::info!("所有会话任务资源清除成功");
+        Ok(())
+    }
+
+    /// 在独立后台任务中安全更新未读数，任务拥有连接池仓库句柄。
+    /// HTTP Stream 被丢弃时，该任务继续执行自己的短数据库操作。
+    async fn safe_update_unread_count(
+        session_repository: Arc<dyn SessionRepository>,
+        session_id: String,
+    ) {
+        if let Err(error) = session_repository
+            .update_unread_message_count(&session_id, 0)
+            .await
+        {
+            tracing::warn!(session_id, error = %error, "后台更新未读消息计数失败");
+        }
+    }
+
     /// 构造函数，完成 Agent 服务初始化。
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -46,9 +74,11 @@ impl AgentService {
         search_engine: Arc<dyn SearchEngine>,
         file_storage: Arc<dyn FileStorage>,
         file_repository: Arc<dyn FileRepository>,
+        shutdown: ShutdownSignal,
     ) -> Self {
         tracing::info!("AgentService 初始化成功");
         Self {
+            shutdown,
             session_repository,
             llm,
             agent_config,
@@ -166,21 +196,24 @@ impl AgentService {
             task: None,
             latest_event_id,
             finished: false,
+            started: false,
+            cleanup_scheduled: false,
         };
         // Stream 被读取时才启动本轮；丢弃订阅后后台任务继续运行。
         stream::unfold(state, |mut state| async move {
             if state.finished {
                 return None;
             }
+            state.started = true;
             match state.next_event().await {
                 Ok(Some(event)) => {
                     // 15.返回事件，Done、Error、Wait 均结束本轮订阅。
                     state.finished = matches!(event, Event::Done(_) | Event::Error(_) | Event::Wait(_));
-                    if state.finished { state.finish().await; }
+                    if state.finished { state.finish(); }
                     Some((event, state))
                 }
                 Ok(None) => {
-                    state.finish().await;
+                    state.finish();
                     None
                 }
                 Err(error) => {
@@ -193,10 +226,10 @@ impl AgentService {
                     if let Err(save_error) = state.service.session_repository
                         .add_event(&state.session_id, event.clone()).await
                     {
-                        tracing::error!(session_id = %state.session_id, error = %save_error, "保存会话错误事件失败");
+                        tracing::warn!(session_id = %state.session_id, error = %save_error, "保存会话错误事件失败");
                     }
                     state.finished = true;
-                    state.finish().await;
+                    state.finish();
                     Some((event, state))
                 }
             }
@@ -208,6 +241,12 @@ impl AgentService {
         session_id: &str,
         request: ChatInput,
     ) -> Result<Option<SharedTask>> {
+        // 与关闭时的任务快照同步，防止快照之后才注册新任务。
+        let _preparing = self
+            .shutdown
+            .begin_preparation()
+            .await
+            .context("Agent服务正在关闭")?;
         // 1.检查会话是否存在。
         let mut session = self
             .session_repository
@@ -281,6 +320,8 @@ struct ChatStream {
     task: Option<SharedTask>,
     latest_event_id: Option<String>,
     finished: bool,
+    started: bool,
+    cleanup_scheduled: bool,
 }
 
 impl ChatStream {
@@ -319,18 +360,33 @@ impl ChatStream {
         }
     }
 
-    async fn finish(&mut self) {
+    fn finish(&mut self) {
+        if self.cleanup_scheduled {
+            return;
+        }
+        self.cleanup_scheduled = true;
         // 16.本轮订阅结束。
         tracing::info!(session_id = %self.session_id, "会话本轮运行结束");
-        // 18.正常结束及错误出口清零；失败只记录，不覆盖原始错误事件。
-        if let Err(error) = self
-            .service
-            .session_repository
-            .update_unread_message_count(&self.session_id, 0)
-            .await
-        {
-            tracing::error!(session_id = %self.session_id, error = %error, "清除会话未读数失败");
+        // 18.正常、异常和客户端断连出口均启动独立任务清零，失败只记日志。
+        // Rust Drop 无法 await；新任务独立持有仓库，使用连接池获取自己的连接。
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(AgentService::safe_update_unread_count(
+                    self.service.session_repository.clone(),
+                    self.session_id.clone(),
+                ));
+            }
+            Err(error) => tracing::warn!(session_id = %self.session_id, error = %error,
+                "无法创建后台任务更新未读消息计数"),
         }
-        // 客户端断开时丢弃订阅即可；不取消 Task，也不延迟清零后台新产生的未读数。
+    }
+}
+
+impl Drop for ChatStream {
+    fn drop(&mut self) {
+        // 已开始订阅的 Stream 在等待中被丢弃时补上 finally；后台 Agent Task 继续运行。
+        if self.started {
+            self.finish();
+        }
     }
 }

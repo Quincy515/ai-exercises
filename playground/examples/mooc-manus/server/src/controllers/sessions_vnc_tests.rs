@@ -1,7 +1,6 @@
 //! 使用本机随机端口验证 VNC 双向转发；生产路由错误分支使用私有 PostgreSQL。
 
-#[path = "../../tests/support/file_database.rs"]
-mod file_database;
+use crate::test_database as file_database;
 
 use std::{future::Future, net::SocketAddr, time::Duration};
 
@@ -12,7 +11,7 @@ use loco_rs::{app::Hooks, config::Config, environment::Environment};
 use migration::{Migrator, MigratorTrait, SchemaManager};
 use serde_json::json;
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite},
     net::{TcpListener, TcpStream},
     task::JoinHandle,
     time::timeout,
@@ -31,6 +30,7 @@ use tokio_tungstenite::{
 use super::{close_vnc_with_error, forward_vnc, WebSocketUpgrade};
 use crate::{
     app::App,
+    application::shutdown::ShutdownSignal,
     domain::{models::Session, repositories::SessionRepository},
     infrastructure::repositories::SeaOrmSessionRepository,
 };
@@ -102,24 +102,29 @@ where
     }
 }
 
-async fn connected_proxy() -> Result<(RunningServer, Client, Upstream)> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let upstream_url = format!("ws://{}", listener.local_addr()?);
-    let router = Router::new()
+fn proxy_router(upstream_url: String, shutdown: ShutdownSignal) -> Router {
+    Router::new()
         .route(
             "/vnc",
             get(
-                |State(url): State<String>, ws: WebSocketUpgrade| async move {
+                |State((url, shutdown)): State<(String, ShutdownSignal)>,
+                 ws: WebSocketUpgrade| async move {
                     ws.on_upgrade(move |mut socket| async move {
-                        if let Err(error) = forward_vnc(&mut socket, &url).await {
+                        if let Err(error) = forward_vnc(&mut socket, &url, &shutdown).await {
                             close_vnc_with_error(&mut socket, error.to_string()).await;
                         }
                     })
                 },
             ),
         )
-        .with_state(upstream_url);
-    let server = RunningServer::start(router).await?;
+        .with_state((upstream_url, shutdown))
+}
+
+async fn connected_proxy() -> Result<(RunningServer, Client, Upstream, ShutdownSignal)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let upstream_url = format!("ws://{}", listener.local_addr()?);
+    let shutdown = ShutdownSignal::default();
+    let server = RunningServer::start(proxy_router(upstream_url, shutdown.clone())).await?;
     // 握手同时推进，两端均使用本测试创建的随机端口。
     let (client, upstream) = tokio::join!(
         bounded(connect_async(server.url("/vnc"))),
@@ -137,12 +142,12 @@ async fn connected_proxy() -> Result<(RunningServer, Client, Upstream)> {
                 .context("模拟沙箱握手失败")
         })
     );
-    Ok((server, client??.0, upstream??))
+    Ok((server, client??.0, upstream??, shutdown))
 }
 
 #[tokio::test]
 async fn forwards_binary_frames_both_ways_without_changing_bytes_or_boundaries() -> Result<()> {
-    let (_server, mut client, mut upstream) = connected_proxy().await?;
+    let (_server, mut client, mut upstream, _shutdown) = connected_proxy().await?;
     let requests = vec![vec![0, 255, 128, 1], Vec::new(), b"RFB request".to_vec()];
     let replies = vec![b"RFB 003.008\n".to_vec(), vec![254, 0, 129], Vec::new()];
 
@@ -175,7 +180,7 @@ async fn forwards_binary_frames_both_ways_without_changing_bytes_or_boundaries()
 
 #[tokio::test]
 async fn client_close_releases_the_upstream_connection() -> Result<()> {
-    let (_server, mut client, mut upstream) = connected_proxy().await?;
+    let (_server, mut client, mut upstream, _shutdown) = connected_proxy().await?;
     bounded(client.close(None)).await??;
     close_frame(&mut upstream).await?;
     close_frame(&mut client).await?;
@@ -184,7 +189,7 @@ async fn client_close_releases_the_upstream_connection() -> Result<()> {
 
 #[tokio::test]
 async fn upstream_close_releases_the_client_connection() -> Result<()> {
-    let (_server, mut client, mut upstream) = connected_proxy().await?;
+    let (_server, mut client, mut upstream, _shutdown) = connected_proxy().await?;
     bounded(upstream.close(None)).await??;
     close_frame(&mut client).await?;
     close_frame(&mut upstream).await?;
@@ -193,7 +198,7 @@ async fn upstream_close_releases_the_client_connection() -> Result<()> {
 
 #[tokio::test]
 async fn control_frames_stay_on_their_connection_and_text_ends_forwarding() -> Result<()> {
-    let (_server, mut client, mut upstream) = connected_proxy().await?;
+    let (_server, mut client, mut upstream, _shutdown) = connected_proxy().await?;
     bounded(client.send(Message::Ping(vec![1].into()))).await??;
     bounded(upstream.send(Message::Ping(vec![2].into()))).await??;
     // 分别确认各自的 Pong，避免将尚未消费的控制帧当成后续关闭帧。
@@ -214,10 +219,69 @@ async fn control_frames_stay_on_their_connection_and_text_ends_forwarding() -> R
     close_frame(&mut client).await?;
 
     // 同样覆盖沙箱返回文本的情况，避免将它误当作 RFB 字节。
-    let (_server, mut client, mut upstream) = connected_proxy().await?;
+    let (_server, mut client, mut upstream, _shutdown) = connected_proxy().await?;
     bounded(upstream.send(Message::Text("invalid RFB payload".into()))).await??;
     close_frame(&mut client).await?;
     close_frame(&mut upstream).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn application_shutdown_closes_both_connected_sockets() -> Result<()> {
+    let (_server, mut client, mut upstream, shutdown) = connected_proxy().await?;
+    bounded(client.send(Message::Binary(b"RFB request".to_vec().into()))).await??;
+    assert_eq!(binary_message(&mut upstream).await?, b"RFB request");
+
+    shutdown.notify();
+    let (client_close, upstream_close) =
+        tokio::join!(close_frame(&mut client), close_frame(&mut upstream));
+    assert_eq!(client_close?, None);
+    assert_eq!(upstream_close?, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn application_shutdown_interrupts_the_upstream_handshake() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let upstream_url = format!("ws://{}", listener.local_addr()?);
+    let shutdown = ShutdownSignal::default();
+    let server = RunningServer::start(proxy_router(upstream_url, shutdown.clone())).await?;
+    let (client, upstream) = tokio::join!(
+        bounded(connect_async(server.url("/vnc"))),
+        bounded(listener.accept())
+    );
+    let mut client = client??.0;
+    let mut upstream = upstream??.0;
+    // 沙箱已经收到握手请求，但故意保持 HTTP 响应未完成。
+    let mut request = [0; 1024];
+    assert!(bounded(upstream.read(&mut request)).await?? > 0);
+
+    shutdown.notify();
+    let mut remaining = Vec::new();
+    let (client_close, upstream_closed) = tokio::join!(
+        close_frame(&mut client),
+        bounded(upstream.read_to_end(&mut remaining))
+    );
+    assert_eq!(client_close?, None);
+    // EOF 证明连接 future 被取消时，尚未完成握手的 TCP 也得到释放。
+    upstream_closed??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn application_shutdown_before_forwarding_skips_the_upstream_connection() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let upstream_url = format!("ws://{}", listener.local_addr()?);
+    let shutdown = ShutdownSignal::default();
+    shutdown.notify();
+    let server = RunningServer::start(proxy_router(upstream_url, shutdown)).await?;
+    let mut client = bounded(connect_async(server.url("/vnc"))).await??.0;
+
+    assert_eq!(close_frame(&mut client).await?, None);
+    // 关闭状态会保留；晚到的转发直接结束，沙箱监听端不会收到 TCP 连接。
+    assert!(timeout(Duration::from_millis(100), listener.accept())
+        .await
+        .is_err());
     Ok(())
 }
 
@@ -234,7 +298,8 @@ async fn handshake_failure_closes_with_1011_and_a_valid_utf8_reason() -> Result<
             let reason = reason.clone();
             async move {
                 ws.on_upgrade(move |mut socket| async move {
-                    assert!(forward_vnc(&mut socket, &url).await.is_err());
+                    let shutdown = ShutdownSignal::default();
+                    assert!(forward_vnc(&mut socket, &url, &shutdown).await.is_err());
                     close_vnc_with_error(&mut socket, reason).await;
                 })
             }
