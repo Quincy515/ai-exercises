@@ -1,0 +1,23 @@
+# 本地依赖与生成文件在镜像中按锁文件重新构建。
+**/node_modules
+generated
+target
+**/dist
+**/.vite
+**/.tanstack
+**/out
+**/coverage
+crux
+
+# 构建镜像固定 Rust 版本，只安装 wasm32 target。
+rust-toolchain.toml
+.git
+.vscode
+.idea
+.codex
+.agents
+.omx
+**/.DS_Store
+**/*.log
+**/.env
+**/.env.*

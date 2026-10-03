@@ -43,7 +43,7 @@ pub async fn get_agent_service(ctx: &AppContext) -> Result<AgentService> {
     let file_storage = Arc::new(LocoFileStorage::new(
         Arc::clone(&ctx.storage),
         Arc::clone(&file_repository),
-        ctx.config.server.full_url(),
+        settings.file_base_url(&ctx.config),
     ));
 
     Ok(AgentService::new(
@@ -72,27 +72,29 @@ pub fn get_session_service(ctx: &AppContext) -> loco_rs::Result<SessionService> 
 }
 
 /// 获取文件存储桶，复用 Loco 的存储驱动和数据库连接池。
-pub fn get_file_storage(ctx: &AppContext) -> LocoFileStorage {
+pub fn get_file_storage(ctx: &AppContext) -> loco_rs::Result<LocoFileStorage> {
+    let settings = AppSettings::from_config(&ctx.config)?;
     let file_repository = Arc::new(get_db_file_repository(ctx));
-    LocoFileStorage::new(
+    Ok(LocoFileStorage::new(
         Arc::clone(&ctx.storage),
         file_repository,
-        ctx.config.server.full_url(),
-    )
+        settings.file_base_url(&ctx.config),
+    ))
 }
 
 /// 获取文件服务，复用 Loco 上下文的存储驱动和数据库连接池。
-pub fn get_file_service(ctx: &AppContext) -> FileService {
+pub fn get_file_service(ctx: &AppContext) -> loco_rs::Result<FileService> {
+    let settings = AppSettings::from_config(&ctx.config)?;
     // 1.初始化文件仓库和文件存储桶；两者共享同一个仓库实例。
     let file_repository: Arc<dyn FileRepository> = Arc::new(get_db_file_repository(ctx));
     let file_storage = Arc::new(LocoFileStorage::new(
         Arc::clone(&ctx.storage),
         Arc::clone(&file_repository),
-        ctx.config.server.full_url(),
+        settings.file_base_url(&ctx.config),
     ));
 
     // 2.构建服务并返回。
-    FileService::new(file_storage, file_repository)
+    Ok(FileService::new(file_storage, file_repository))
 }
 
 /// 获取应用配置服务。

@@ -1,0 +1,93 @@
+name: mooc-manus
+
+services:
+  # 沙箱镜像先单独构建。运行中的容器由 Agent 按会话创建、查询和销毁。
+  sandbox-image:
+    profiles: [build]
+    image: ${SANDBOX_IMAGE:-manus-sandbox:local}
+    build:
+      context: ../sandbox
+
+  db:
+    image: postgres:17.6
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: manus
+      POSTGRES_DB: manus
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 deploy/.env 中设置数据库密码}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U manus -d manus']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:8.2
+    restart: unless-stopped
+    command: [redis-server, --appendonly, 'yes']
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # 任务注册表属于当前进程，本阶段使用单个 API 实例。
+  api:
+    image: manus-api:local
+    build:
+      context: ../server
+    restart: unless-stopped
+    stop_grace_period: 40s
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://manus:${POSTGRES_PASSWORD:?请设置数据库密码}@db:5432/manus
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:?请在 deploy/.env 中设置 JWT_SECRET}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?请在 deploy/.env 中设置站点完整地址}
+      SERVER_PORT: '5150'
+      SANDBOX_ADDRESS: ''
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-manus-sandbox:local}
+      SANDBOX_NETWORK: ${SANDBOX_NETWORK:-manus-network}
+      SANDBOX_NAME_PREFIX: manus-sandbox
+    volumes:
+      - api-files:/app/storage
+      # Agent 通过宿主 Docker 管理沙箱；socket 的 :ro 挂载仍允许调用管理 API。
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, http://127.0.0.1:5150/api-docs/openapi.json]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  web:
+    image: manus-web:local
+    build:
+      context: ../apps
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+        # API 重建后重新解析其容器地址。
+        restart: true
+    # 默认只交给宿主机的 HTTPS 反向代理或 SSH 隧道访问。
+    ports:
+      - '${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8080}:80'
+
+# 使用明确的网络名，确保 Bollard 动态创建的沙箱加入同一个网络。
+networks:
+  default:
+    name: ${SANDBOX_NETWORK:-manus-network}
+
+volumes:
+  postgres-data:
+  redis-data:
+  api-files:

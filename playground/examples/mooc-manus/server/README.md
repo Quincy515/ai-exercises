@@ -244,6 +244,9 @@ cargo test --locked --lib --test agent_service --test chat_stream_api --test ses
 
 ## 17-13：在 Docker / Ubuntu 中运行 API
 
+云端 Web 的完整单机配置见 [deploy/README.md](../deploy/README.md)：Compose 固定依赖、
+数据卷和沙箱网络，nginx 托管 TanStack SPA 并转发 API/SSE/VNC。下方命令继续用于单独验证 API 容器。
+
 在 `server` 目录构建。镜像分为 Rust 编译阶段和 Ubuntu 运行阶段，最终携带
 `server-cli`、`config/docker.yaml`、`run.sh` 和 Node/npm。Node 供 `npx` 类型的 MCP
 工具使用；浏览器能力通过 Rust CDP 客户端连接沙箱。运行入口使用 `exec` 传递停止信号。
@@ -287,8 +290,9 @@ API 使用 Docker 网络里的 `manus-db-dev` / `manus-redis-dev`，动态沙箱
 
 `config/docker.yaml` 启用 `auto_migrate`，保留已有数据库数据。环境变量可覆盖
 `DATABASE_URL`、`REDIS_URL`、`SANDBOX_IMAGE`、`SANDBOX_NETWORK`、`SANDBOX_ADDRESS`。
-`SERVER_HOST` 和 `SERVER_PORT` 组成截图下载 URL，应填写客户端可访问的地址；
-更改端口时同步容器端口映射。开发配置中的 JWT 默认值可通过 `JWT_SECRET` 覆盖。
+反向代理部署时通过 `PUBLIC_BASE_URL` 设置完整站点地址，例如 `https://manus.example.com`，
+文件和截图 URL 使用该值，API 内部监听端口保持 5150。留空时沿用 `SERVER_HOST` + `SERVER_PORT`；
+直接更改监听端口时同步容器端口映射。开发配置中的 JWT 默认值可通过 `JWT_SECRET` 覆盖。
 `.dockerignore` 排除 `.env`、本地配置、存储与编译产物，镜像中只复制容器配置。
 
 沙箱查找每次重新 inspect，检查运行状态和 IP；获取失败会记录日志并返回 `None`，

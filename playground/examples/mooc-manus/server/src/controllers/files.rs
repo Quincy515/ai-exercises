@@ -83,7 +83,7 @@ pub async fn upload_file(
         .ok_or_else(|| AppError::bad_request("file.missing_file", "请通过 file 字段上传文件"))?;
 
     // 2.完整解析请求后再调用服务，避免表单后半段出错时已经写入文件。
-    let file_service = get_file_service(&ctx);
+    let file_service = get_file_service(&ctx)?;
     let fileinfo = file_service
         .upload_file(upload)
         .await
@@ -112,7 +112,7 @@ pub async fn get_file_info(
     Path(file_id): Path<String>,
 ) -> Result<Response> {
     validate_file_id(&file_id)?;
-    let fileinfo = get_file_service(&ctx)
+    let fileinfo = get_file_service(&ctx)?
         .get_file_info(&file_id)
         .await
         .map_err(|error| map_file_error(error, "file.get_info_failed"))?;
@@ -145,7 +145,7 @@ pub async fn download_file(
 ) -> Result<Response> {
     validate_file_id(&file_id)?;
     // 1.调用服务获取文件源数据。
-    let (mut file_data, fileinfo) = get_file_service(&ctx)
+    let (mut file_data, fileinfo) = get_file_service(&ctx)?
         .download_file(&file_id)
         .await
         .map_err(|error| map_file_error(error, "file.download_failed"))?;

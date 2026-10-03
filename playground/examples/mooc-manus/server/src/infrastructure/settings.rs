@@ -6,6 +6,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// Loco `settings` 下的应用自定义配置。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AppSettings {
+    /// 客户端可访问的站点地址；反向代理部署时与 API 内部监听端口分开。
+    #[serde(default, deserialize_with = "empty_string_as_none")]
+    pub public_base_url: Option<String>,
     #[serde(default)]
     pub storage: StorageSettings,
     #[serde(default)]
@@ -13,6 +16,14 @@ pub struct AppSettings {
 }
 
 impl AppSettings {
+    /// 文件和截图使用公开地址；本地开发未配置时沿用 Loco 的服务地址。
+    pub fn file_base_url(&self, config: &Config) -> String {
+        self.public_base_url
+            .as_deref()
+            .map(|url| url.trim().trim_end_matches('/').to_owned())
+            .unwrap_or_else(|| config.server.full_url())
+    }
+
     /// 从 Loco 的动态 `settings` 配置中读取强类型应用配置。
     pub fn from_config(config: &Config) -> Result<Self> {
         config
@@ -207,6 +218,31 @@ mod tests {
             settings.sandbox.network,
             optional_env("SANDBOX_NETWORK", "manus-network-dev")
         );
+    }
+
+    #[test]
+    fn separates_public_file_urls_from_the_api_listening_port() {
+        let config_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config");
+        let mut config =
+            Config::from_folder(&Environment::Any("docker".into()), &config_dir).unwrap();
+        config.server.host = "http://localhost".into();
+        config.server.port = 5150;
+
+        for public_url in ["https://manus.example.com/", "http://localhost:8080/"] {
+            let settings = AppSettings::from_json(&json!({
+                "public_base_url": public_url
+            }))
+            .unwrap();
+            assert_eq!(
+                settings.file_base_url(&config),
+                public_url.trim_end_matches('/')
+            );
+        }
+        // 未配置与空配置保留现有开发行为，HTTPS 域名则保留其公开端口。
+        for value in [json!({}), json!({"public_base_url": " "})] {
+            let settings = AppSettings::from_json(&value).unwrap();
+            assert_eq!(settings.file_base_url(&config), "http://localhost:5150");
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# 容器开发配置：数据库、Redis 和动态沙箱位于同一个 Docker 网络。
+# 容器配置：数据库、Redis 和动态沙箱位于同一个 Docker 网络。
 logger:
   enable: true
   pretty_backtrace: false
@@ -8,7 +8,7 @@ logger:
 server:
   binding: 0.0.0.0
   port: <%= get_env(name="SERVER_PORT", default="5150") %>
-  # 用于生成客户端可直接访问的截图下载 URL，按实际访问地址覆盖。
+  # 直接访问 API 时使用的地址；反向代理部署通过 PUBLIC_BASE_URL 指定公开地址。
   host: '<%= get_env(name="SERVER_HOST", default="http://localhost") %>'
   middlewares:
 
@@ -47,6 +47,8 @@ cache:
   max_size: 10
 
 settings:
+  # 完整站点地址，例如 https://manus.example.com；不包含 /api，不追加内部端口。
+  public_base_url: '<%= get_env(name="PUBLIC_BASE_URL", default="") %>'
   # 开发环境文件使用独立数据卷持久化，继续复用现有下载 API。
   storage:
     kind: local
