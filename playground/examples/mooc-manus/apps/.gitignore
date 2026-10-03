@@ -34,8 +34,10 @@ DerivedData/
 !.specify/templates/constitution-template.md
 !.specify/templates/agent-file-template.md
 .codex/
-.cursor/
-**/.cursor/
+!.cursor/
+.cursor/*
+**/.cursor/*
+!.cursor/rules/
 .kilocode/
 .windsurf/
 .zed/

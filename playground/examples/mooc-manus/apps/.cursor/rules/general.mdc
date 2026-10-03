@@ -1,0 +1,78 @@
+---
+description: mooc-manus apps 通用约定：Crux 架构分层、目录职责、代码规范、UI 设计稿、后端接口与验证流程
+alwaysApply: true
+---
+
+# 项目通用约定
+
+以下路径以 `apps/` 为起点，后端源码位于 `../server/`。以用户当前要求和已确认的课程范围为准。
+
+## 架构与目录职责
+
+- Crux 架构：客户端跨平台业务规则与状态写在 Rust 核心 `shared/`（Event → `update` → Command/Effect → `view`）；Agent 编排保留在 `../server/`。前端负责渲染和执行能力（Shell），不在 TS 里复制业务逻辑。
+- `packages/`（`@apps/frontend`）：两端共用的 UI 与 Crux Shell 源码。新增入口时同步更新 `packages/package.json` 的 `exports`。
+- `tanstack-app/`（Web SPA，Vite 8）和 `electron-app/`（Electron Forge，Vite 6）只放宿主代码：路由、入口、构建配置。
+- 不要手改的生成或外部代码：`generated/`（用 `just install` 重新生成）、`crux/`、`routeTree.gen.ts`。
+
+## Rust（`shared/`）
+
+- edition 2024。依赖版本统一放在根 `Cargo.toml` 的 `[workspace.dependencies]`，`boltffi` 保持 `=x.y.z` 精确版本。
+- 跨 FFI 的类型 derive `Facet, Serialize, Deserialize`；只在核心内部使用的 Event 变体加 `#[serde(skip)]` 和 `#[facet(skip)]`。
+- 外部输入（HTTP、KV、SSE）不得 `unwrap()` / `expect()`；错误写入 Model，再通过 ViewModel 暴露给 UI。
+- 新增能力要同时修改 `shared/src/capabilities` 和 `packages/src/lib/crux/` 中对应的 Shell 处理，并补测试（`crux_core::testing`、`insta`）。
+
+## TypeScript / React
+
+- 新增代码保持类型明确，禁止 `any`、`@ts-ignore`；纯类型导入用 `import type`。TanStack 已开启 `strict` 和 `verbatimModuleSyntax`，各子项目编译选项以自己的 `tsconfig.json` 为准。
+- 共享包内部用相对路径导入；宿主通过 `@apps/frontend/<入口>` 引用共享代码。
+- React 19 函数组件。与 Rust 核心交互统一走 `useCrux()`，组件卸载时释放自身持有的资源（请求、定时器、连接）。
+- WASM、noVNC、`window` 等浏览器 API 只在客户端挂载后使用；业务路由保持 `ssr: false`。
+- 样式用 Tailwind v4 + `cn()`；新 UI 组件优先在 `packages/` 下执行 `pnpm dlx shadcn@latest add <name>`。
+- 格式遵循所在子项目的 Prettier / `.editorconfig` 及相邻代码；`tanstack-app/prettier.config.js` 使用无分号、单引号、尾逗号，其他子项目保留各自风格。
+
+## UI 设计稿
+
+- `docs/design/*.jpg` 是课程视觉参考，文件名标明了场景（如 `MoocManus-首页(命令行预览).jpg`）。新增或修改页面前先打开对应设计稿，结合已确认的三栏布局和用户后续调整实现。
+- 整体风格：中性灰白、低饱和、扁平。颜色只用 `packages/src/index.css` 中的语义 token（`bg-chat-background`、`text-muted-foreground` 等），不写死色值；确实需要新颜色时先加到 `@theme`。彩色只用于表达状态（完成、删除、终端提示符）。
+- 布局：64px 一级栏 + 可拖动聊天列表 + 内容区（实现在 `packages/src/app/layout.tsx`）。对话和输入框水平居中，宽度上限 `max-w-[768px]`；标题栏和输入区吸顶/吸底。打开右侧预览面板（MoocManus 的电脑）时，内容区与面板左右分栏。
+- 消息：用户消息是右对齐的白色气泡；AI 消息左对齐、无气泡，顶部显示 Logo、名称和时间。时间等元数据用右对齐的灰色小字。
+- 组件形态：卡片、输入框、建议问题用白底 + 细边框 + 大圆角，阴影极轻；工具调用和命令用灰底胶囊、单行截断；文件卡片为类型图标 + 文件名（超长省略）+「类型 · 大小」。
+- 弹窗：遮罩 + 白底大圆角，标题在左上、关闭按钮在右上。设置页左侧导航的选中项用深色填充，底部按钮右对齐「取消 / 保存」，主按钮为深色。
+- 图标统一用 `lucide-react`；Logo 用 `packages/src/components/manus-icon.tsx`。先复用 `packages/src/components/` 下已有组件（`chat-message`、`tool-use`、`attachments-message`、`plan-panel` 等），不重复造轮子。
+- 交互：可点击元素都要有 hover（浅灰底）和 `focus-visible` 状态；动效保持轻量，并遵循 `prefers-reduced-motion`。
+
+## 后端接口
+
+- 契约以 `http://localhost:5150/api-docs/openapi.json`（OpenAPI 3.1）为准，对接或修改接口前先拉取核对字段，不凭猜测。
+- 地址：开发环境为 `http://localhost:5150`；生产环境由 `deploy/nginx.conf` 把同源 `/api/` 代理到后端。基础地址只在一处定义，不在各个请求里写死。
+- 请求统一在 Rust 核心通过 `crux_http` / SSE 能力发出，React 组件里不直接 `fetch` 后端。
+- 模块与路径前缀：
+  - 认证 `/api/auth/*`：`login`、`register`、`current` 等；目前只有 `GET /api/auth/current` 需要 `Authorization: Bearer <JWT>`。
+  - 会话 `/api/sessions`：列表、创建、详情，以及 `/{session_id}/` 下的 `chat`、`stop`、`delete`、`files`、`file`、`shell`、`clear-unread-message-count`。
+  - 文件 `/api/files`：`multipart/form-data` 上传（可能返回 413）、`/{file_id}` 查询信息、`/{file_id}/download` 二进制下载。
+  - 设置 `/api/app_configs/*`：`agent`、`llm`、`a2a-servers`、`mcp-servers`。
+  - 状态 `GET /api/status`：返回各服务健康状态的数组。
+- 动词以现有路由为准：普通列表和详情使用 GET；聊天、列表订阅、沙箱文件读取 `/{session_id}/file`、Shell 读取 `/{session_id}/shell` 使用 POST；删除和启停也使用 POST（如 `POST /{id}/delete`、`POST /{id}/enabled`）。保持已有接口契约，不改成 DELETE / PUT / PATCH。
+- 响应格式：会话普通 JSON 响应、文件上传和元信息接口包一层 `{ code, msg, data }`，无数据时 `data: null`；文件下载返回二进制流。设置、认证接口直接返回各自结构，部分操作成功返回 JSON `null`；状态接口返回数组。错误响应按 HTTP 状态码（400/401/404/413/422/500）和实际响应体处理。
+- 流式接口：`POST /api/sessions/{session_id}/chat` 和 `POST /api/sessions/stream` 返回 `text/event-stream`。聊天事件有 `message`、`title`、`step`、`plan`、`tool`、`wait`、`done`、`error`，时间字段 `created_at` 是 Unix 秒；列表流使用 `sessions` 事件，data 为 `{ sessions: [...] }`。现有 `SseRequest` 只支持 GET URL，接入这两个接口需要同时在 `shared/src/capabilities/sse.rs` 和 `packages/src/lib/crux/sse.ts` 中扩展 method、body 和 headers。
+- 状态枚举：会话为 `pending` / `running` / `waiting` / `completed`；计划和步骤的执行状态为 `pending` / `running` / `completed` / `failed`；工具调用为 `calling` / `called`。客户端读取 `../server/src/views/events.rs` 定义的响应，步骤的 `data.status` 使用执行状态。
+- LLM 密钥只写不读：配置回显的是 `api_key_configured` 布尔值，UI 用掩码展示，不回填明文。
+
+## 依赖与命令
+
+- 只用 pnpm，锁文件统一维护在本目录；任务入口集中在 `Justfile`（`just` 查看列表）。
+- 依赖变更要一并提交 `Cargo.lock` / `pnpm-lock.yaml`。
+- 修改 `shared/` 后：`cargo check -p shared && just test && just install && pnpm typecheck`。
+- 提交前验证：
+
+```sh
+just test && pnpm test:shared && pnpm test:crux && pnpm typecheck
+pnpm --filter tanstack-app lint
+ESLINT_USE_FLAT_CONFIG=false pnpm --filter electron-app lint
+```
+
+## 代码风格
+
+- 简洁优先：只做最小必要改动，不加没有用处的抽象，不留注释掉的代码或调试日志。
+- 尽量完整保留已有课程注释；新增注释说明实现思路和必要约束，随代码变化修正过时说明。
+- 面向用户的文案使用中文。
