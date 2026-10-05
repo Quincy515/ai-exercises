@@ -1,5 +1,8 @@
 # 前端工作区
 
+每次修改代码先阅读 [AGENTS.md](AGENTS.md) 和 [ARCHITECTURE.md](ARCHITECTURE.md)。
+后者是生产目标目录、职责边界、Core 生命周期和迁移顺序的统一依据；下文记录当前已实现功能与操作方式。
+
 `electron-app` 和 `tanstack-app` 通过 `workspace:*` 使用同一个
 `@apps/frontend` 源码包。新建会话首页在 `packages/src/new-session.tsx`，
 输入区和推荐问题分别在 `packages/src/components/chat-input.tsx`、
@@ -29,6 +32,78 @@ Web 使用 TanStack Start 官方 SPA 模式，构建时生成静态页面壳；
 首页和 `/sessions/$id` 复用聊天列表；收起只影响二级列表，一级导航始终保留。
 `/schedules` 与 `/library` 已接通两端路由，当前显示占位页；设置弹窗复用在一级栏底部，
 账号位置暂作展示。窄屏继续使用聊天列表抽屉，业务核心沿用现有 Crux 接入。
+
+## 首个真实 API：读取 Agent 配置
+
+在两端打开「设置 → 通用配置」，页面自动读取 `GET /api/app_configs/agent`，
+展示最大迭代次数、最大重试次数和最大搜索结果。当前只接入查询，字段只读，保存按钮禁用。
+刷新失败保留上次成功的数据，点击「重试」重新读取。
+
+```text
+CommonSetting → useAgentConfig → useCrux → Event::Configs
+  → model/configs.rs → api/configs.rs → Http Effect → http.ts → 后端
+  → ConfigsEvent::AgentConfigReceived → ConfigsModel 更新
+  → Render → view/configs.rs → ViewModel → React
+```
+
+- `shared/src/api/configs.rs` 保存设置接口 DTO 和 HTTP 请求构造，`api/mod.rs` 统一校验和拼接地址。
+- `shared/src/model/configs.rs` 管理设置事件、状态、加载、去重和重试，`view/configs.rs` 将其转换为展示数据。
+- `packages/src/lib/crux/use-agent-config.ts` 组合通用 Hook，封装首次读取和刷新；组件复用 Rust 状态。
+- 两端均通过 `AppLayout → NavigationRail → ManusSettings` 使用同一个 `CommonSetting`。
+- 每次挂载创建独立 Core；同一 Core 在途请求去重，卸载时取消请求。Rust `i64` 生成 `bigint`，展示时用 `.toString()`。
+
+服务根地址集中在 `packages/src/lib/crux/api-config.ts`。HTTP 页面默认请求页面同源 `/api`：
+开发环境由两端共用的 `vite.api.mts` 代理到 `http://localhost:5150`，生产 Web 由 nginx 代理。
+当前后端未配置 CORS，开发联调使用此同源代理。
+
+需要指定其他服务时，参照各宿主的 `.env.example`，在对应 `.env.local` 中设置
+`VITE_API_BASE_URL=https://manus.example.com`（服务根地址，省略 `/api`），重启开发服务或重新构建。
+显式跨域地址需要后端允许页面 Origin；`VITE_` 变量会公开写入客户端产物。
+打包 Electron 的 `file://` 页面默认直连本地后端，同样需要服务端 CORS 或桌面专用传输，发布前单独联调。
+
+在 `apps/` 下先执行 `just install`，然后在两个终端分别启动：
+
+```sh
+pnpm --filter tanstack-app dev
+pnpm --filter electron-app start
+```
+
+核对 `curl --fail http://localhost:5150/api/app_configs/agent` 与两端页面数据一致。
+新增接口继续按 OpenAPI → Rust DTO/状态/事件 → `just install` → 业务 Hook → 共享组件的顺序推进。
+现有 Core、HTTP Shell、地址选择和开发代理可继续复用。
+
+### 按 weather 的职责划分扩展业务
+
+本项目采用官方 `crux/examples/weather` 的职责划分，完整目标结构与强制边界见 [ARCHITECTURE.md](ARCHITECTURE.md)，Rust 细则见 [shared/AGENTS.md](shared/AGENTS.md)。下面是当前已完成的 Rust 设置模块切片。
+
+```text
+shared/src/
+├── app.rs             # Crux App 入口，委派 update/view
+├── effects.rs         # 统一能力协议
+├── api/
+│   ├── mod.rs         # 公共 URL 工具与模块声明
+│   └── configs.rs     # 设置接口 DTO、HTTP 请求构造
+├── model/
+│   ├── mod.rs         # 根 Event/Model、模块事件分发
+│   └── configs.rs     # 设置事件、状态与更新流程
+├── view/
+│   ├── mod.rs         # 根 ViewModel、视图汇总
+│   └── configs.rs     # 设置页面数据、From<&ConfigsModel>
+└── capabilities/      # 自定义能力实现，如 SSE
+```
+
+`AppCore` 通过 `model.update(event)` 更新业务，通过 `model.into()` 生成视图。
+根 `Event::Configs` 携带设置事件，设置模块返回的 Command 使用 `map_event(Event::Configs)` 接回根层。
+API 模块独立于业务 Model/Event；状态更新留在 `model/`，页面输出转换留在 `view/`。
+
+后续认证、会话、文件和健康检查按实际业务分别增加 `api/<模块>.rs`、`model/<模块>.rs`、
+`view/<模块>.rs`，并在根模块注册。例如会话对应 `api/sessions.rs`、`model/sessions.rs`、`view/sessions.rs`。
+一次业务流程可以组合多个接口；根层按业务模块和跨模块协调组织。
+单个模块明显变大后再拆子目录，例如 `model/configs/{mod,agent,llm}.rs`。
+
+现有计数器作为教学示例保留在模型层。跨 FFI 的 Event/ViewModel 需要 Facet 与 Serde；内部模型按实际需要派生类型。
+`packages/src/app/` 属于 React 页面和布局；`packages/src/lib/crux/` 提供通用 Shell 与 Hook。
+后续业务继续复用现有 HTTP Shell，并通过 `just install` 同步生成类型和 WASM。
 
 ## noVNC 入门查看页
 
@@ -81,7 +156,7 @@ cd apps
 just install
 ```
 
-执行顺序为 `wasm → typegen → pnpm install --frozen-lockfile`。`wasm` 会自动对齐
+执行顺序为 `wasm → typegen → pnpm install --frozen-lockfile → 清除两端 Vite 预构建缓存`。`wasm` 会自动对齐
 BoltFFI CLI 和编译所需的 runtime；安装后若发现本地 `shared` 的旧依赖缓存，
 会定向刷新该包。准备完成后，两个终端分别启动：
 
@@ -119,7 +194,7 @@ React Fast Refresh 会尽量保留可复用的组件状态；完整页面刷新�
 
 ### 3. 修改 shared 后的推荐流程
 
-在 `shared/src/app.rs` 修改业务规则、Event、Model、ViewModel；新增能力协议时修改
+在 `shared/src/model/` 修改业务规则、Event、Model，在 `shared/src/view/` 修改 ViewModel；新增能力协议时修改
 `shared/src/capabilities`，并补充 `packages/src/lib/crux` 中对应的 Shell 处理。
 生成代码由工具维护，日常编辑源代码。
 
@@ -132,24 +207,23 @@ just install
 pnpm typecheck
 ```
 
-`just install` 生成 `generated/pkg` 和 `generated/types/dist`，并刷新 `file:` 本地依赖。
+`just install` 生成 `generated/pkg` 和 `generated/types/dist`，刷新 `file:` 本地依赖，并清除两端旧 Vite 预构建缓存。
 新增 Event / Effect / ViewModel 字段后，类型检查会指出前端需要同步修改的位置。
 
 然后分别重启两端：
 
 ```sh
-# Web 终端：重新预构建本地 CommonJS 类型包
-pnpm --filter tanstack-app dev --force
+# Web 终端
+pnpm --filter tanstack-app dev
 ```
 
 ```sh
-# Electron 终端：清除当前 renderer 的 Vite 预构建缓存，再启动
-rm -rf electron-app/node_modules/.vite
+# Electron 终端
 pnpm --filter electron-app start
 ```
 
-这里清除的是可重新生成的 Vite 缓存。生成类型包经过依赖预构建，重启时刷新缓存可确保使用
-最新协议；重新加载页面后，新的 WASM 实例才会执行新的 Rust 逻辑。
+`just install` 清除的是可重新生成的 Vite 缓存。本地类型包版本保持不变时，旧缓存可能缺少新增事件或类型；
+生成任务自动清理后，重启两端即可使用最新协议。重新加载页面会创建新的 WASM 实例。
 仅执行 `cargo build` 会生成 Rust 编译产物；给两端更新 WASM/npm 包使用 `just install`。
 
 ### 4. Rust 频繁修改时的可选自动模式（macOS）
@@ -173,7 +247,7 @@ cargo watch -w shared -w Cargo.toml \
 
 ```sh
 cargo watch -w shared -w Cargo.toml \
-  -s 'just install && rm -rf electron-app/node_modules/.vite && pnpm --filter electron-app start'
+  -s 'just install && pnpm --filter electron-app start'
 ```
 
 监听器首次运行会构建并启动应用；保存 Rust 文件后，结束旧开发进程，再执行构建和启动。
@@ -264,8 +338,8 @@ BoltFFI 0.31.0 自动收集浏览器与 Node 入口、map 和 WASM 辅助模块�
   保留 Forge 对应的 Vite 6，Web 使用 Vite 8。
 - 依赖安装配置和锁文件统一维护在本目录。
 
-当前首页与会话详情属于课程基础 UI，后续业务通过 `useCrux` 接入同一套 Rust 逻辑。
-`shared/src/app.rs` 仍保留计数器业务示例，现有 WASM 和 Crux 测试继续验证桥接层。
+当前首页与会话详情属于课程基础 UI，通用配置已通过 `useAgentConfig` / `useCrux` 接入 Rust HTTP 流程。
+模型层保留计数器业务示例，现有 WASM 和 Crux 测试继续验证桥接层。
 
 ## 在组件中使用 Crux
 
@@ -286,7 +360,8 @@ function Counter() {
 
 `packages/src/lib/crux/core.ts` 统一处理 Bincode 与 effect 分发；
 `http.ts`、`sse.ts`、`key-value.ts`、`time.ts` 执行浏览器能力。
-Hook 每次挂载创建独立 Core，卸载时取消请求、清除定时器并释放 WASM handle。
+当前 Hook 每次挂载创建独立 Core，卸载时取消请求、清除定时器并释放 WASM handle。
+应用级共享 Provider、业务取消策略和全局错误隔离是已登记的生产迁移项，接入认证及多模块联动前按架构规范一起完成。
 `useCrux()` 从空展示状态开始，WASM 就绪后以 Rust 的 `view()` 为准。
 
 示例 API 使用 Rust 中配置的 `https://crux-counter.fly.dev`。
@@ -382,3 +457,13 @@ WASM，并验证事件、ViewModel 和 effect 响应的序列化往返。
 
 参考：[Crux React 文档](https://redbadger.github.io/crux/part-1/shell/web/react.html#compile-our-rust-shared-library)、
 [Crux lib.just](https://github.com/redbadger/crux/blob/master/lib.just)。
+
+## 可复用用户流程验证
+
+项目技能位于 [verify-mooc-manus](../.agents/skills/verify-mooc-manus/SKILL.md)，覆盖通用配置读取刷新、会话导航与计划、任务文件列表。先完成 `just install`，然后在 `mooc-manus` 根目录执行：
+
+```sh
+node .agents/skills/verify-mooc-manus/scripts/verify.mjs run --features settings,sessions,files --port 4317
+```
+
+脚本使用独立端口和浏览器上下文，自动 doctor、驱动并清理自己启动的前端进程，证据保留在 `output/playwright/verify-mooc-manus/`。配置查询需要已有 `localhost:5150` 后端；服务不可用时记录 blocked。会话和文件目前验证真实 UI 交互与内置演示数据，聊天发送和文件下载仍按后续业务接入。具体边界、入口与退出码见技能及 feature map。
