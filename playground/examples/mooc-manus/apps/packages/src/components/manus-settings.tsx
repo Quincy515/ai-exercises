@@ -41,22 +41,52 @@ import {
 import { Badge } from "./ui/badge";
 import { Switch } from "./ui/switch";
 import { Textarea } from "./ui/textarea";
+import { useAgentConfig } from "../lib/crux/use-agent-config";
 
-// 本课只展示配置 UI；表单阻止默认提交，业务保存后续接入。
+// 通用配置从 API 读取；其他配置表单与保存操作按后续课程接入。
 
 export function CommonSetting() {
+  const { data, loading, error, ready, refresh } = useAgentConfig();
+
   return (
-    <form className="w-full px-1" onSubmit={(event) => event.preventDefault()}>
+    <section className="w-full px-1" aria-busy={loading || (!ready && !error)}>
       <FieldGroup>
         <FieldSet>
           {/* 顶部表单标题 */}
-          <FieldLegend className="font-bold text-gray-700 data-[variant=legend]:text-lg">
+          <FieldLegend className="font-bold text-foreground data-[variant=legend]:text-lg">
             通用配置
           </FieldLegend>
           <FieldDescription className="text-sm">
-            配置MoocManus系统的通用配置信息
+            查看服务器当前的 Agent 配置。本页为只读展示。
           </FieldDescription>
-          {/* 中间表单内容 */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p role="status" className="text-sm text-muted-foreground">
+              {loading || (!ready && !error)
+                ? "正在加载配置…"
+                : error
+                  ? data
+                    ? "显示上次成功读取的配置"
+                    : "配置读取失败"
+                  : data
+                    ? "已读取服务器配置"
+                    : "等待加载配置"}
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={!ready || loading}
+              onClick={refresh}
+            >
+              {error ? "重试" : "刷新"}
+            </Button>
+          </div>
+          {error && (
+            <p role="alert" className="text-sm text-destructive">
+              {error}
+            </p>
+          )}
+          {/* 中间表单内容：i64 在生成类型中是 bigint，展示时转换为字符串。 */}
           <FieldGroup>
             <Field>
               <FieldLabel className="flex-wrap" htmlFor="max_iterations">
@@ -67,10 +97,9 @@ export function CommonSetting() {
                 id="max_iterations"
                 type="number"
                 placeholder="Agent最大迭代次数"
-                defaultValue={100}
-                min={0}
-                max={200}
-                required
+                value={data?.max_iterations.toString() ?? ""}
+                readOnly
+                disabled={!data}
               />
               <FieldDescription className="text-xs">
                 执行Agent最大能迭代循环调用工具的次数, 默认为100
@@ -85,10 +114,9 @@ export function CommonSetting() {
                 id="max_retries"
                 type="number"
                 placeholder="LLM/Tool最大重试次数"
-                defaultValue={3}
-                min={0}
-                max={10}
-                required
+                value={data?.max_retries.toString() ?? ""}
+                readOnly
+                disabled={!data}
               />
               <FieldDescription className="text-xs">
                 默认情况下，最大重试次数为3
@@ -103,10 +131,9 @@ export function CommonSetting() {
                 id="max_search_results"
                 type="number"
                 placeholder="搜索工具返回的最大结果数"
-                defaultValue={10}
-                min={0}
-                max={30}
-                required
+                value={data?.max_search_results.toString() ?? ""}
+                readOnly
+                disabled={!data}
               />
               <FieldDescription className="text-xs">
                 默认情况下, 每个搜索步骤包含10个结果
@@ -115,7 +142,7 @@ export function CommonSetting() {
           </FieldGroup>
         </FieldSet>
       </FieldGroup>
-    </form>
+    </section>
   );
 }
 
@@ -566,7 +593,11 @@ export function ManusSettings() {
           >
             取消
           </DialogClose>
-          <Button type="button" className="cursor-pointer">
+          <Button
+            type="button"
+            className="cursor-pointer"
+            disabled={activatedSetting === "common-setting"}
+          >
             保存
           </Button>
         </DialogFooter>

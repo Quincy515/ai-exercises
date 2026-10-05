@@ -3,3 +3,4 @@ export type { CruxViewModel } from "./core.js";
 export { useCrux, cruxEvents } from "./use-crux.js";
 export type { CruxEvents } from "./use-crux.js";
 export type { Event } from "shared_types/app.js";
+export { useAgentConfig } from "./use-agent-config.js";

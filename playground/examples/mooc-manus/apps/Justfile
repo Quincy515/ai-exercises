@@ -39,6 +39,8 @@ install: build-shared
     pnpm install --frozen-lockfile
     # pnpm may cache dependencies of file: packages after their manifest changes.
     @node -e 'const fs = require("node:fs"); const expected = JSON.parse(fs.readFileSync("generated/pkg/package.json", "utf8")).dependencies["@boltffi/runtime"]; const installed = JSON.parse(fs.readFileSync("node_modules/@boltffi/runtime/package.json", "utf8")).version; if (installed !== expected) process.exit(1);' 2>/dev/null || pnpm --filter @apps/frontend update shared
+    # 本地生成包版本不变时 Vite 会复用旧类型；更新 shared 后清除两端预构建缓存。
+    rm -rf ./tanstack-app/node_modules/.vite ./electron-app/node_modules/.vite
 
 # serve the web shell
 dev-web: install

@@ -6,6 +6,7 @@ import app from "shared_types/app.js";
 import bincode from "shared_types/bincode/index.js";
 
 const {
+  AgentConfigViewModel,
   Requests,
   ViewModel,
   eventIncrement,
@@ -80,14 +81,28 @@ test("generated WASM packages serialize events, decode effects, and resolve loca
   const core = CoreFfi.new({ processEffects: requests });
 
   try {
-    assert.deepEqual(view(core), new ViewModel("0 (pending)", false));
+    assert.deepEqual(
+      view(core),
+      new ViewModel(
+        "0 (pending)",
+        false,
+        new AgentConfigViewModel(null, false, null),
+      ),
+    );
 
     const reset = requests(core.update(serialize(eventReset())));
     assert.deepEqual(
       reset.map(({ effect }) => effect.kind),
       ["Render"],
     );
-    assert.deepEqual(view(core), new ViewModel("0 (pending)", false));
+    assert.deepEqual(
+      view(core),
+      new ViewModel(
+        "0 (pending)",
+        false,
+        new AgentConfigViewModel(null, false, null),
+      ),
+    );
 
     const increment = requests(core.update(serialize(eventIncrement())));
     assert.deepEqual(increment.map(({ effect }) => effect.kind).sort(), [
@@ -98,7 +113,14 @@ test("generated WASM packages serialize events, decode effects, and resolve loca
       .value;
     assert.equal(http.method, "POST");
     assert.equal(http.url, "https://crux-counter.fly.dev/inc");
-    assert.deepEqual(view(core), new ViewModel("1 (pending)", false));
+    assert.deepEqual(
+      view(core),
+      new ViewModel(
+        "1 (pending)",
+        false,
+        new AgentConfigViewModel(null, false, null),
+      ),
+    );
 
     const load = requests(core.update(serialize(eventLoadState())));
     assert.equal(load.length, 1);
@@ -117,7 +139,14 @@ test("generated WASM packages serialize events, decode effects, and resolve loca
       resolved.map(({ effect }) => effect.kind),
       ["Render"],
     );
-    assert.deepEqual(view(core), new ViewModel("1 (pending)", false));
+    assert.deepEqual(
+      view(core),
+      new ViewModel(
+        "1 (pending)",
+        false,
+        new AgentConfigViewModel(null, false, null),
+      ),
+    );
   } finally {
     core.dispose();
   }

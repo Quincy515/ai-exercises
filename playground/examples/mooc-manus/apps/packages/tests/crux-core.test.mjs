@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate as nextTurn } from "node:timers/promises";
+import { AgentConfigViewModel } from "shared_types/app.js";
 import { Core } from "../dist/crux-tests/core.js";
 import { cruxEvents as events } from "../dist/crux-tests/use-crux.js";
 
@@ -35,9 +36,17 @@ test(
       const init = core.initialize();
       assert.equal(core.initialize(), init);
       await init;
-      assert.deepEqual(core.view(), { text: "0 (pending)", confirmed: false });
+      assert.deepEqual(core.view(), {
+        text: "0 (pending)",
+        confirmed: false,
+        agent_config: new AgentConfigViewModel(null, false, null),
+      });
       core.update(events.Increment());
-      assert.deepEqual(core.view(), { text: "1 (pending)", confirmed: false });
+      assert.deepEqual(core.view(), {
+        text: "1 (pending)",
+        confirmed: false,
+        agent_config: new AgentConfigViewModel(null, false, null),
+      });
       assert.equal(request.method, "POST");
       assert.equal(request.url, "https://crux-counter.fly.dev/inc");
       respond(
@@ -49,7 +58,11 @@ test(
       assert.equal(core.view().text, "9 (2023-01-01 00:00:00 UTC)");
       assert.deepEqual(errors, []);
       core.update(events.Reset());
-      assert.deepEqual(core.view(), { text: "0 (pending)", confirmed: false });
+      assert.deepEqual(core.view(), {
+        text: "0 (pending)",
+        confirmed: false,
+        agent_config: new AgentConfigViewModel(null, false, null),
+      });
       assert.ok(views.length >= 4);
     } finally {
       core.dispose();

@@ -33,7 +33,7 @@ pub trait CruxShell: Send + Sync {
     fn process_effects(&self, bytes: Vec<u8>);
 }
 
-// Native effects use the same app::Effect wire schema as typegen and WASM.
+// Native effects use the same effects::Effect wire schema as typegen and WASM.
 // They are delivered through process_effects; update and resolve return no bytes.
 
 #[cfg(not(target_family = "wasm"))]
@@ -176,7 +176,7 @@ mod tests {
     use crux_time::{Instant, TimeRequest, TimeResponse};
 
     use super::{CoreFfi, CruxShell};
-    use crate::{Event, ViewModel, app::EffectFfi};
+    use crate::{ConfigsEvent, Event, ViewModel, effects::EffectFfi};
 
     struct RecordingShell(mpsc::Sender<Vec<u8>>);
 
@@ -236,5 +236,34 @@ mod tests {
         let view: ViewModel = BincodeFfiFormat::deserialize(&core.view()).unwrap();
         assert_eq!(view.text, "7 (2023-01-01 00:00:00 UTC)");
         assert!(view.confirmed);
+    }
+
+    #[test]
+    fn native_configs_event_resolves_through_the_nested_model() {
+        let (tx, rx) = mpsc::channel();
+        let core = CoreFfi::new(Arc::new(RecordingShell(tx)));
+        let event = Event::Configs(ConfigsEvent::GetAgentConfig {
+            base_url: "http://localhost:5150".to_string(),
+        });
+
+        assert!(core.update(&encode(&event)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let request = receive(&rx);
+        assert!(matches!(request.effect, EffectFfi::Http(_)));
+        let view: ViewModel = BincodeFfiFormat::deserialize(&core.view()).unwrap();
+        assert!(view.agent_config.loading);
+
+        let response = HttpResult::Ok(
+            HttpResponse::ok()
+                .body(r#"{"max_iterations":20,"max_retries":3,"max_search_results":10}"#)
+                .build(),
+        );
+        assert!(core.resolve(request.id.0, &encode(&response)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let view: ViewModel = BincodeFfiFormat::deserialize(&core.view()).unwrap();
+        assert!(!view.agent_config.loading);
+        assert_eq!(view.agent_config.error, None);
+        assert_eq!(view.agent_config.data.unwrap().max_iterations, 20);
+        assert_eq!(view.text, "0 (pending)");
     }
 }

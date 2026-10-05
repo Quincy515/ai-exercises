@@ -3,7 +3,7 @@ node_modules/
 .vscode
 .codex/
 *.pending-snap
-crux/
+/crux/
 generated/
 target/
 .settings

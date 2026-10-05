@@ -7,10 +7,14 @@ alwaysApply: true
 
 以下路径以 `apps/` 为起点，后端源码位于 `../server/`。以用户当前要求和已确认的课程范围为准。
 
+每次修改必须先阅读 `AGENTS.md` 与 `ARCHITECTURE.md`。目录、依赖方向、Core 生命周期和生产迁移要求统一以 `ARCHITECTURE.md` 为准；本文件补充课程 UI、接口与工具链约定。
+
 ## 架构与目录职责
 
 - Crux 架构：客户端跨平台业务规则与状态写在 Rust 核心 `shared/`（Event → `update` → Command/Effect → `view`）；Agent 编排保留在 `../server/`。前端负责渲染和执行能力（Shell），不在 TS 里复制业务逻辑。
+- Rust 业务统一采用官方 `crux/examples/weather` 的职责划分：`app.rs` 连接入口，`api/` 定义接口与请求，`model/` 管模块事件/状态/更新，`view/` 转换展示数据，`effects.rs` 定义能力协议。设置、认证、会话、文件等后续业务按同样方式扩展，完整目标与迁移记录见 `ARCHITECTURE.md`，Rust 细则见 `shared/AGENTS.md`。
 - `packages/`（`@apps/frontend`）：两端共用的 UI 与 Crux Shell 源码。新增入口时同步更新 `packages/package.json` 的 `exports`。
+- 业务 UI、Hook、生成事件包装放在 `packages/src/features/<业务>/`；通用桥接放 `packages/src/lib/crux/`。现有分散页面和设置 Hook 按架构文档逐步迁移，公开 exports 名称可保持稳定。
 - `tanstack-app/`（Web SPA，Vite 8）和 `electron-app/`（Electron Forge，Vite 6）只放宿主代码：路由、入口、构建配置。
 - 不要手改的生成或外部代码：`generated/`（用 `just install` 重新生成）、`crux/`、`routeTree.gen.ts`。
 
@@ -25,7 +29,7 @@ alwaysApply: true
 
 - 新增代码保持类型明确，禁止 `any`、`@ts-ignore`；纯类型导入用 `import type`。TanStack 已开启 `strict` 和 `verbatimModuleSyntax`，各子项目编译选项以自己的 `tsconfig.json` 为准。
 - 共享包内部用相对路径导入；宿主通过 `@apps/frontend/<入口>` 引用共享代码。
-- React 19 函数组件。与 Rust 核心交互统一走 `useCrux()`，组件卸载时释放自身持有的资源（请求、定时器、连接）。
+- React 19 函数组件。与 Rust 核心交互统一走 `useCrux()`；生产目标为每个应用根/窗口一个 Provider 管理 Core，业务 Hook 消费共享 Context。应用卸载释放 Core，业务组件卸载处理该业务资源；取消、过期响应与错误隔离和 Provider 一起迁移并测试。当前每个 Hook 单独创建 Core 的实现属于架构文档登记的迁移项。
 - WASM、noVNC、`window` 等浏览器 API 只在客户端挂载后使用；业务路由保持 `ssr: false`。
 - 样式用 Tailwind v4 + `cn()`；新 UI 组件优先在 `packages/` 下执行 `pnpm dlx shadcn@latest add <name>`。
 - 格式遵循所在子项目的 Prettier / `.editorconfig` 及相邻代码；`tanstack-app/prettier.config.js` 使用无分号、单引号、尾逗号，其他子项目保留各自风格。

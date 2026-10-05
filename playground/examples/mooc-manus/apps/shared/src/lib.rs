@@ -1,10 +1,18 @@
+pub mod api;
 pub mod app;
 mod capabilities;
+pub mod effects;
 #[cfg(feature = "ffi")]
 mod ffi;
+pub mod model;
+pub mod view;
 
-pub use app::*;
+pub use api::configs::AgentConfig;
+pub use app::AppCore;
 pub use capabilities::sse;
+pub use effects::Effect;
+pub use model::{ConfigsEvent, Count, Event, Model};
+pub use view::{AgentConfigViewModel, ViewModel};
 
 pub use crux_core::Core;
 pub use crux_http as http;

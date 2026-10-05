@@ -8,6 +8,9 @@ import {
   eventReset,
   eventLoadState,
   eventStartWatch,
+  eventConfigs,
+  configsEventGetAgentConfig,
+  AgentConfigViewModel,
 } from "shared_types/app.js";
 import { Core } from "./core.js";
 import type { CruxViewModel } from "./core.js";
@@ -20,6 +23,8 @@ export const cruxEvents = {
   Reset: eventReset,
   LoadState: eventLoadState,
   StartWatch: eventStartWatch,
+  GetAgentConfig: (baseUrl: string) =>
+    eventConfigs(configsEventGetAgentConfig(baseUrl)),
 } as const;
 
 export type CruxEvents = typeof cruxEvents;
@@ -32,6 +37,7 @@ export function useCrux() {
   const [view, setView] = useState<CruxViewModel>({
     text: "",
     confirmed: false,
+    agent_config: new AgentConfigViewModel(null, false, null),
   });
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<Error | null>(null);

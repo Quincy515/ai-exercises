@@ -11,6 +11,7 @@
     "sourceMap": true,
     "outDir": "dist",
     "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "types": [
       "node",

@@ -5,6 +5,7 @@ import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import { apiDevProxy } from "../vite.api.mts";
 
 const config = defineConfig({
 	// Crux typegen emits CommonJS into a linked workspace package.
@@ -14,7 +15,7 @@ const config = defineConfig({
 	},
 	resolve: { tsconfigPaths: true, dedupe: ["react", "react-dom"] },
 	// TanStack Devtools already pipes console output between browser and server.
-	server: { forwardConsole: false },
+	server: { forwardConsole: false, proxy: apiDevProxy },
 	plugins: [devtools(), tailwindcss(), tanstackStart({ spa: { enabled: true } }), viteReact()],
 });
 
