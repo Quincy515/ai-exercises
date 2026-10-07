@@ -178,7 +178,7 @@ mod tests {
     use super::{CoreFfi, CruxShell};
     use crate::{
         A2aConfigEvent, AgentConfigEvent, AgentConfigField, ConfigsEvent, Event, LlmConfigEvent,
-        LlmConfigField, ViewModel, effects::EffectFfi,
+        LlmConfigField, McpConfigEvent, ViewModel, effects::EffectFfi,
     };
 
     struct RecordingShell(mpsc::Sender<Vec<u8>>);
@@ -412,5 +412,65 @@ mod tests {
             view.a2a_config.notice.as_deref(),
             Some("已添加远程Agent配置。")
         );
+    }
+
+    #[test]
+    fn native_mcp_roundtrip_omits_json_secrets_from_view_bytes() {
+        let (tx, rx) = mpsc::channel();
+        let core = CoreFfi::new(Arc::new(RecordingShell(tx)));
+        let base_url = "http://localhost:5150".to_string();
+        let get = Event::Configs(ConfigsEvent::Mcp(McpConfigEvent::Get {
+            base_url: base_url.clone(),
+        }));
+        assert!(core.update(&encode(&get)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let request = receive(&rx);
+        let empty = HttpResult::Ok(HttpResponse::ok().body(r#"{"mcp_servers":[]}"#).build());
+        assert!(core.resolve(request.id.0, &encode(&empty)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let config = r#"{"mcpServers":{"demo":{"transport":"stdio","command":"node","env":{"TOKEN":"FFI_TEST_SECRET"}}}}"#;
+        let edit = Event::Configs(ConfigsEvent::Mcp(McpConfigEvent::EditJson {
+            value: config.to_string(),
+        }));
+        assert!(!format!("{edit:?}").contains("FFI_TEST_SECRET"));
+        assert!(core.update(&encode(&edit)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let secret = b"FFI_TEST_SECRET";
+        let bytes = core.view();
+        assert!(!bytes.windows(secret.len()).any(|part| part == secret));
+        let view: ViewModel = BincodeFfiFormat::deserialize(&bytes).unwrap();
+        assert!(view.mcp_config.draft_present);
+        let create = Event::Configs(ConfigsEvent::Mcp(McpConfigEvent::Create { base_url }));
+        assert!(core.update(&encode(&create)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let request = receive(&rx);
+        let EffectFfi::Http(http) = request.effect else {
+            panic!("expected MCP POST");
+        };
+        assert_eq!(http.method, "POST");
+        assert_eq!(
+            http.url,
+            "http://localhost:5150/api/app_configs/mcp-servers"
+        );
+        let body: serde_json::Value = serde_json::from_slice(&http.body).unwrap();
+        assert_eq!(
+            body["mcpServers"]["demo"]["env"]["TOKEN"],
+            "FFI_TEST_SECRET"
+        );
+        let ack = HttpResult::Ok(HttpResponse::ok().body(r#"{"mcpServers":{"demo":{"transport":"stdio","enabled":true,"env":{"TOKEN":"FFI_TEST_SECRET"}}}}"#).build());
+        assert!(core.resolve(request.id.0, &encode(&ack)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let refresh = receive(&rx);
+        assert!(matches!(refresh.effect, EffectFfi::Http(request) if request.method == "GET"));
+        let bytes = core.view();
+        assert!(!bytes.windows(secret.len()).any(|part| part == secret));
+        let view: ViewModel = BincodeFfiFormat::deserialize(&bytes).unwrap();
+        assert!(view.mcp_config.saving && view.mcp_config.created);
+        assert!(!view.mcp_config.draft_present);
+        assert_eq!(view.mcp_config.servers[0].server_name, "demo");
+        assert!(core.resolve(refresh.id.0, &encode(&empty)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let view: ViewModel = BincodeFfiFormat::deserialize(&core.view()).unwrap();
+        assert!(!view.mcp_config.saving && !view.mcp_config.loading);
     }
 }

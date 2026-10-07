@@ -6,7 +6,9 @@ use facet::Facet;
 use serde::{Deserialize, Serialize};
 
 use crate::model::Model;
-pub use configs::{A2aConfigViewModel, AgentConfigViewModel, LlmConfigViewModel};
+pub use configs::{
+    A2aConfigViewModel, AgentConfigViewModel, LlmConfigViewModel, McpConfigViewModel,
+};
 
 #[derive(Facet, Serialize, Deserialize, Debug, Clone)]
 pub struct ViewModel {
@@ -15,6 +17,7 @@ pub struct ViewModel {
     pub agent_config: AgentConfigViewModel,
     pub llm_config: LlmConfigViewModel,
     pub a2a_config: A2aConfigViewModel,
+    pub mcp_config: McpConfigViewModel,
 }
 
 impl From<&Model> for ViewModel {
@@ -30,6 +33,7 @@ impl From<&Model> for ViewModel {
             agent_config: (&model.configs.agent).into(),
             llm_config: (&model.configs.llm).into(),
             a2a_config: (&model.configs.a2a).into(),
+            mcp_config: (&model.configs.mcp).into(),
         }
     }
 }

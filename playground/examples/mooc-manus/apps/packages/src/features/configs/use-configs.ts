@@ -4,6 +4,7 @@ import type {
   AgentConfigField,
   LlmConfigField,
   A2aServer,
+  McpServer,
 } from "shared_types/app.js";
 import { resolveApiBaseUrl } from "../../lib/crux/api-config.js";
 import { useCrux } from "../../lib/crux/use-crux.js";
@@ -12,9 +13,11 @@ import {
   llmConfigEvents,
   llmConfigFields,
   a2aConfigEvents,
+  mcpConfigEvents,
 } from "./events.js";
 
 const emptyServers: A2aServer[] = [];
+const emptyMcpServers: McpServer[] = [];
 
 const emptyAgent = {
   max_iterations: "",
@@ -35,12 +38,15 @@ function baseUrl() {
   });
 }
 
-/** 一个设置弹窗持有一个 Core，Agent/LLM/A2A 的草稿与请求状态由各自 Rust 子模块管理。 */
+/** 一个设置弹窗持有一个 Core，Agent/LLM/A2A/MCP 的草稿与请求状态由各自 Rust 子模块管理。 */
 export function useConfigs(active: string) {
   const { view, dispatch, ready, error } = useCrux();
   const agent = view?.agent_config;
   const llm = view?.llm_config;
   const a2a = view?.a2a_config;
+  const mcp = view?.mcp_config;
+  // JSON 可包含密钥；这里只保留输入镜像，校验与可提交草稿归 Rust。
+  const [mcpJson, setMcpJson] = useState("");
   // 密码框仅保留用户正在输入的值，服务器密钥始终只读配置状态。
   const [apiKey, setApiKey] = useState("");
   const clientError = error ? "客户端加载失败，请关闭设置后重试。" : null;
@@ -51,13 +57,48 @@ export function useConfigs(active: string) {
       dispatch(configEvents.GetAgentConfig(baseUrl()));
     if (active === "llm-setting") dispatch(llmConfigEvents.Get(baseUrl()));
     if (active === "a2a-setting") dispatch(a2aConfigEvents.Get(baseUrl()));
+    if (active === "mcp-setting") dispatch(mcpConfigEvents.Get(baseUrl()));
+    else {
+      setMcpJson("");
+      dispatch(mcpConfigEvents.ResetDraft());
+    }
   }, [ready, active, dispatch]);
 
   useEffect(() => {
     if (!llm?.api_key_changed) setApiKey("");
   }, [llm?.api_key_changed]);
 
+  useEffect(() => {
+    if (!mcp?.draft_present) setMcpJson("");
+  }, [mcp?.draft_present]);
+
   return {
+    mcp: {
+      servers: mcp?.servers ?? emptyMcpServers,
+      draftJson: mcpJson,
+      loaded: mcp?.loaded ?? false,
+      loading: mcp?.loading ?? false,
+      saving: mcp?.saving ?? false,
+      created: mcp?.created ?? false,
+      writeUncertain: mcp?.write_uncertain ?? false,
+      error: mcp?.error ?? clientError,
+      notice: mcp?.notice ?? null,
+      ready,
+      refresh: () => dispatch(mcpConfigEvents.Get(baseUrl())),
+      editJson: (value: string) => {
+        setMcpJson(value);
+        dispatch(mcpConfigEvents.EditJson(value));
+      },
+      resetDraft: () => {
+        setMcpJson("");
+        dispatch(mcpConfigEvents.ResetDraft());
+      },
+      create: () => dispatch(mcpConfigEvents.Create(baseUrl())),
+      setEnabled: (serverName: string, enabled: boolean) =>
+        dispatch(mcpConfigEvents.SetEnabled(baseUrl(), serverName, enabled)),
+      remove: (serverName: string) =>
+        dispatch(mcpConfigEvents.Delete(baseUrl(), serverName)),
+    },
     a2a: {
       servers: a2a?.servers ?? emptyServers,
       draftUrl: a2a?.draft_url ?? "",
@@ -124,3 +165,5 @@ export type AgentConfigController = ReturnType<typeof useConfigs>["agent"];
 export type LlmConfigController = ReturnType<typeof useConfigs>["llm"];
 
 export type A2aConfigController = ReturnType<typeof useConfigs>["a2a"];
+
+export type McpConfigController = ReturnType<typeof useConfigs>["mcp"];

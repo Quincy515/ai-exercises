@@ -49,7 +49,7 @@ Rust 保存字符串草稿，点击保存时统一校验，清空、非整数或
 点击「取消」或关闭弹窗会丢弃未保存草稿，重新打开时读取服务器配置。
 保存期间禁用字段、切换面板和关闭，避免提交途中丢失状态；成功后以服务端返回值更新表单并显示「保存成功」。
 失败时保留草稿供用户手动重试。HTTP 默认 30 秒超时，保存超时或网络中断会提示结果尚未确认，可重新打开设置核对。
-MCP 面板沿用课程占位，保存按钮保持禁用。模型提供商和 A2A 配置见下节。
+模型提供商、A2A 与 MCP 配置见下节，四类设置共用同一个弹窗。
 
 ```text
 AgentConfigPanel → useConfigs().agent → useCrux
@@ -103,8 +103,8 @@ pnpm --filter electron-app start
 新的密钥在密码框、Rust 私有临时状态和提交链路中短暂保留，成功、撤销或关闭后清除；ViewModel 仅暴露 `api_key_changed` 状态，Debug 隐去输入和响应内容。
 保存失败保留当前草稿供重试，超时或断网提示结果待核实。配置接口成功表示服务端已保存参数，提供商连接与模型调用按后续业务验证。
 
-[use-configs.ts](packages/src/features/configs/use-configs.ts) 在一个设置弹窗内持有一个 Core，返回独立的 `agent`、`llm`、`a2a` 控制器。
-Agent/LLM 切换面板保留各自草稿，底部保存只提交当前表单。A2A 使用即时操作，底部显示「关闭」。任何配置正在保存时统一阻止切换与关闭。
+[use-configs.ts](packages/src/features/configs/use-configs.ts) 在一个设置弹窗内持有一个 Core，返回独立的 `agent`、`llm`、`a2a`、`mcp` 控制器。
+Agent/LLM 切换面板保留各自草稿，底部保存只提交当前表单。A2A/MCP 使用即时操作，底部显示「关闭」。任何配置正在保存时统一阻止切换与关闭。
 两端通过同一个 `ManusSettings` 复用表单与事件，[config-feedback.tsx](packages/src/features/configs/config-feedback.tsx) 复用读取、撤销及错误提示。普通 HTTP 失败经 `resolve` 回到所属 Rust 模型，全局错误仅报告初始化、FFI 等客户端故障。
 
 ### A2A Agent 配置：列表、新增、启停与删除
@@ -132,6 +132,43 @@ Agent/LLM 切换面板保留各自草稿，底部保存只提交当前表单。A
 
 后端列表会读取远程 Agent Card，只返回卡片获取成功的条目。已添加的服务暂未显示时，应检查地址与连接后刷新；空列表仅表示当前没有可展示卡片。远程 Card 获取和协议执行由后端负责，客户端继续遵守现有接口边界。
 
+### MCP 服务器：JSON 配置、新增更新、启停与删除
+
+「设置 → MCP 服务器」显示服务名、传输方式、启用状态和工具名。
+点击「添加配置」提交 `mcpServers` JSON，可以一次新增多项；同名项会**完整替换**旧配置，请提供该项需要保留的全部字段，其他名称的服务继续保留。
+
+| 操作 | 接口 | 请求体与响应 |
+| --- | --- | --- |
+| 列表 | `GET /api/app_configs/mcp-servers` | 返回安全列表 `{ mcp_servers: [...] }` |
+| 新增/同名更新 | `POST /api/app_configs/mcp-servers` | `{ mcpServers: { 名称: 配置 } }` → 完整 `mcpServers` |
+| 启停 | `POST /api/app_configs/mcp-servers/{server_name}/enabled` | `{ enabled }` → 完整 `mcpServers` |
+| 删除 | `POST /api/app_configs/mcp-servers/{server_name}/delete` | 空请求体 → 完整 `mcpServers` |
+
+```json
+{
+  "mcpServers": {
+    "example": {
+      "transport": "streamable_http",
+      "url": "https://example.com/mcp",
+      "enabled": true,
+      "headers": {}
+    }
+  }
+}
+```
+
+提交前将示例地址替换为实际 MCP endpoint。`streamable_http` 需要有效 HTTP(S) `url`；`stdio` 需要 `command`，可带 `args` 和 `env`，命令在后端所在机器执行。
+Rust 校验 JSON 结构、服务名、传输参数与环境变量/请求头格式。省略 `transport` 默认 `streamable_http`，省略 `enabled` 默认 `true`。
+
+[api/configs/mcp.rs](shared/src/api/configs/mcp.rs) 只从完整写响应解析名称、`transport`、`enabled`，Model 核对它们与本次操作一致后记录写确认，再 GET 刷新工具列表。
+[model/configs/mcp.rs](shared/src/model/configs/mcp.rs) 私有保存完整 JSON；[view/configs/mcp.rs](shared/src/view/configs/mcp.rs) 仅输出公开列表、`draft_present` 与操作状态。原始 `env`、`headers` 和命令参数保持在提交链路内，事件 Debug 只记录名称。
+
+[mcp-config-panel.tsx](packages/src/features/configs/mcp-config-panel.tsx) 通过 `useConfigs().mcp` 复用设置 Core，React 保存文本框镜像；保存成功、关闭输入弹窗或离开 MCP 页签时清除镜像与 Rust 草稿。
+写入即时生效，底部为「关闭」；写入期间阻止切换、关闭与重复操作。删除确认在列表外保持挂载，写后刷新结束再关闭并恢复键盘焦点。
+已确认写入后 GET 失败会保留结果提示，用户点击刷新只重读；写入结果未知时先 GET 核对，再决定后续操作。
+
+后端 GET 会连接已启用的 MCP 服务并发现工具；列表包含已配置服务，工具列表为空可能来自禁用或连接失败。配置与工具名展示可独立验收，实际工具调用按后续业务验证。
+
 ### 按 weather 的职责划分扩展业务
 
 本项目采用官方 `crux/examples/weather` 的职责划分，完整目标结构与强制边界见 [ARCHITECTURE.md](ARCHITECTURE.md)，Rust 细则见 [shared/AGENTS.md](shared/AGENTS.md)。下面是当前已完成的 Rust 设置模块切片。
@@ -146,33 +183,37 @@ shared/src/
 │       ├── mod.rs     # 设置接口模块声明
 │       ├── agent.rs   # Agent DTO、GET/POST
 │       ├── llm.rs     # LLM 安全响应、独立写请求
-│       └── a2a.rs     # A2A 列表、新增、启停与删除
+│       ├── a2a.rs     # A2A 列表、新增、启停与删除
+│       └── mcp.rs     # MCP 安全列表、写确认与配置请求
 ├── model/
 │   ├── mod.rs         # 根 Event/Model、模块事件分发
 │   └── configs/
-│       ├── mod.rs     # 聚合 Agent/Llm/A2a 子事件与状态
+│       ├── mod.rs     # 聚合各设置子事件与状态
 │       ├── agent.rs   # Agent 草稿、校验、读写
 │       ├── llm.rs     # LLM 草稿、校验、私有密钥与读写
-│       └── a2a.rs     # URL 草稿、串行操作、写确认与刷新
+│       ├── a2a.rs     # URL 草稿、串行操作、写确认与刷新
+│       ├── mcp.rs     # 私有 JSON 草稿、写确认与刷新
+│       └── mcp/validation.rs # JSON 与传输参数校验
 ├── view/
 │   ├── mod.rs         # 根 ViewModel、视图汇总
 │   └── configs/
 │       ├── mod.rs     # 导出各设置 ViewModel
 │       ├── agent.rs
 │       ├── llm.rs     # 仅输出可安全展示的数据
-│       └── a2a.rs     # 列表、加载/操作状态与结果提示
+│       ├── a2a.rs     # 列表、加载/操作状态与结果提示
+│       └── mcp.rs     # 公开列表、draft_present 与状态
 └── capabilities/      # 自定义能力实现，如 SSE
 ```
 
 `AppCore` 通过 `model.update(event)` 更新业务，通过 `model.into()` 生成视图。
-根 `Event::Configs` 携带设置事件；`ConfigsEvent::Agent` / `Llm` / `A2a` 委派到各自子模型，Command 经两层 `map_event` 接回根层。
-根 ViewModel 分别提供 `agent_config`、`llm_config`、`a2a_config`，各配置状态互相独立。
+根 `Event::Configs` 携带设置事件；`ConfigsEvent::Agent` / `Llm` / `A2a` / `Mcp` 委派到各自子模型，Command 经两层 `map_event` 接回根层。
+根 ViewModel 分别提供 `agent_config`、`llm_config`、`a2a_config`、`mcp_config`，各配置状态互相独立。
 API 模块独立于业务 Model/Event；状态更新留在 `model/`，页面输出转换留在 `view/`。
 
 后续认证、会话、文件和健康检查按实际业务分别增加 `api/<模块>.rs`、`model/<模块>.rs`、
 `view/<模块>.rs`，并在根模块注册。例如会话对应 `api/sessions.rs`、`model/sessions.rs`、`view/sessions.rs`。
 一次业务流程可以组合多个接口；根层按业务模块和跨模块协调组织。
-设置模块已拆成 `configs/{mod,agent,llm,a2a}.rs`；新增设置资源在同层扩展，其他业务按实际复杂度拆子目录。
+设置模块已拆成 `configs/{mod,agent,llm,a2a,mcp}.rs`；新增设置资源在同层扩展，其他业务按实际复杂度拆子目录。
 
 现有计数器作为教学示例保留在模型层。跨 FFI 的 Event/ViewModel 需要 Facet 与 Serde；内部模型按实际需要派生类型。
 `packages/src/app/` 负责共享布局；`packages/src/features/configs/` 负责设置业务 UI、Hook 与事件包装；`packages/src/lib/crux/` 提供通用 Shell 与 Hook。
@@ -411,7 +452,7 @@ BoltFFI 0.31.0 自动收集浏览器与 Node 入口、map 和 WASM 辅助模块�
   保留 Forge 对应的 Vite 6，Web 使用 Vite 8。
 - 依赖安装配置和锁文件统一维护在本目录。
 
-当前首页与会话详情属于课程基础 UI，Agent、模型提供商与 A2A 配置通过 `useConfigs` / `useCrux` 接入 Rust HTTP 流程。
+当前首页与会话详情属于课程基础 UI，Agent、模型提供商、A2A 与 MCP 配置通过 `useConfigs` / `useCrux` 接入 Rust HTTP 流程。
 模型层保留计数器业务示例，现有 WASM 和 Crux 测试继续验证桥接层。
 
 ## 在组件中使用 Crux
@@ -557,3 +598,12 @@ node .agents/skills/verify-mooc-manus/scripts/verify.mjs run --features llm-save
 ```
 
 A2A 联调使用本机临时 Agent Card 服务，通过真实后端完成新增、禁用、启用、删除和重新读取。每次只操作本轮创建的测试 ID，保留已有配置；清理时确认测试项移除、临时服务退出、证据仍可读取。此流程验证配置与 Card 展示，远程 Agent 任务调用按后续业务单独验证。写入结果不确定时先刷新核对，避免重复创建测试配置。
+
+MCP 使用独立流程验证读取与写入：
+
+```sh
+node .agents/skills/verify-mooc-manus/scripts/verify.mjs run --features mcp --port 4317
+node .agents/skills/verify-mooc-manus/scripts/verify.mjs run --features mcp-write --allow-config-write true --port 4317
+```
+
+写流程使用带随机测试名称的本机 Streamable HTTP 夹具，覆盖新增、同名整体更新、禁用、启用、删除与清理。夹具仅提供初始化和 `tools/list`，拒绝 `tools/call`；流程只提交本轮测试服务的 HTTP 配置。读取证据使用安全字段白名单，避免保存完整 POST 响应、JSON 输入、环境变量或认证请求头。Web、Electron 与真实工具调用分别记录验收范围。

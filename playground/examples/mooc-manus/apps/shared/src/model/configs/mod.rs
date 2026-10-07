@@ -3,6 +3,7 @@
 pub mod a2a;
 pub mod agent;
 pub mod llm;
+pub mod mcp;
 
 use crux_core::Command;
 use crux_http::{HttpError, Response};
@@ -13,6 +14,7 @@ use crate::effects::Effect;
 use a2a::{A2aConfigEvent, A2aConfigModel};
 use agent::{AgentConfigEvent, AgentConfigModel};
 use llm::{LlmConfigEvent, LlmConfigModel};
+use mcp::{McpConfigEvent, McpConfigModel};
 
 #[derive(Facet, Serialize, Deserialize, Debug, PartialEq)]
 #[repr(C)]
@@ -20,6 +22,7 @@ pub enum ConfigsEvent {
     Agent(AgentConfigEvent),
     Llm(LlmConfigEvent),
     A2a(A2aConfigEvent),
+    Mcp(McpConfigEvent),
 }
 
 #[derive(Default)]
@@ -27,6 +30,7 @@ pub struct ConfigsModel {
     pub(crate) agent: AgentConfigModel,
     pub(crate) llm: LlmConfigModel,
     pub(crate) a2a: A2aConfigModel,
+    pub(crate) mcp: McpConfigModel,
 }
 
 impl ConfigsModel {
@@ -35,6 +39,7 @@ impl ConfigsModel {
             ConfigsEvent::Agent(event) => self.agent.update(event).map_event(ConfigsEvent::Agent),
             ConfigsEvent::Llm(event) => self.llm.update(event).map_event(ConfigsEvent::Llm),
             ConfigsEvent::A2a(event) => self.a2a.update(event).map_event(ConfigsEvent::A2a),
+            ConfigsEvent::Mcp(event) => self.mcp.update(event).map_event(ConfigsEvent::Mcp),
         }
     }
 }

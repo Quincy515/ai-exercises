@@ -3,6 +3,13 @@ import {
   configsEventAgent,
   configsEventLlm,
   configsEventA2a,
+  configsEventMcp,
+  mcpConfigEventGet,
+  mcpConfigEventEditJson,
+  mcpConfigEventResetDraft,
+  mcpConfigEventCreate,
+  mcpConfigEventSetEnabled,
+  mcpConfigEventDelete,
   a2aConfigEventGet,
   a2aConfigEventEditUrl,
   a2aConfigEventResetDraft,
@@ -78,4 +85,20 @@ export const a2aConfigEvents = {
     ),
   Delete: (baseUrl: string, id: string) =>
     eventConfigs(configsEventA2a(a2aConfigEventDelete(baseUrl, id))),
+} as const;
+
+export const mcpConfigEvents = {
+  Get: (baseUrl: string) =>
+    eventConfigs(configsEventMcp(mcpConfigEventGet(baseUrl))),
+  EditJson: (value: string) =>
+    eventConfigs(configsEventMcp(mcpConfigEventEditJson(value))),
+  ResetDraft: () => eventConfigs(configsEventMcp(mcpConfigEventResetDraft())),
+  Create: (baseUrl: string) =>
+    eventConfigs(configsEventMcp(mcpConfigEventCreate(baseUrl))),
+  SetEnabled: (baseUrl: string, serverName: string, enabled: boolean) =>
+    eventConfigs(
+      configsEventMcp(mcpConfigEventSetEnabled(baseUrl, serverName, enabled)),
+    ),
+  Delete: (baseUrl: string, serverName: string) =>
+    eventConfigs(configsEventMcp(mcpConfigEventDelete(baseUrl, serverName))),
 } as const;

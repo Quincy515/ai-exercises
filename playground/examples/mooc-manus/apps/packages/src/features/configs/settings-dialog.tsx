@@ -13,7 +13,7 @@ import {
 } from "../../components/ui/dialog";
 import { Separator } from "../../components/ui/separator";
 import { AGENT_CONFIG_FORM_ID, AgentConfigPanel } from "./agent-config-panel";
-import { MCPSetting } from "./other-settings-panels";
+import { McpConfigPanel } from "./mcp-config-panel";
 import { useConfigs } from "./use-configs";
 import { A2aConfigPanel } from "./a2a-config-panel";
 import { LLM_CONFIG_FORM_ID, LlmConfigPanel } from "./llm-config-panel";
@@ -38,7 +38,10 @@ function SettingsContent({
   const configs = useConfigs(active);
   const config = active === "llm-setting" ? configs.llm : configs.agent;
   const saving =
-    configs.agent.saving || configs.llm.saving || configs.a2a.saving;
+    configs.agent.saving ||
+    configs.llm.saving ||
+    configs.a2a.saving ||
+    configs.mcp.saving;
   useLayoutEffect(() => {
     onSavingChange(saving);
     return () => onSavingChange(false);
@@ -77,7 +80,7 @@ function SettingsContent({
           )}
           {active === "llm-setting" && <LlmConfigPanel config={configs.llm} />}
           {active === "a2a-setting" && <A2aConfigPanel config={configs.a2a} />}
-          {active === "mcp-setting" && <MCPSetting />}
+          {active === "mcp-setting" && <McpConfigPanel config={configs.mcp} />}
         </div>
       </div>
       <DialogFooter className="mx-0 mb-0 bg-transparent p-0 pt-4">
@@ -85,9 +88,11 @@ function SettingsContent({
           disabled={saving}
           render={<Button variant="outline" className="cursor-pointer" />}
         >
-          {active === "a2a-setting" ? "关闭" : "取消"}
+          {active === "a2a-setting" || active === "mcp-setting"
+            ? "关闭"
+            : "取消"}
         </DialogClose>
-        {active !== "a2a-setting" && (
+        {(active === "common-setting" || active === "llm-setting") && (
           <Button
             type="submit"
             form={
