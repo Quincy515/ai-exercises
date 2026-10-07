@@ -176,7 +176,7 @@ mod tests {
     use crux_time::{Instant, TimeRequest, TimeResponse};
 
     use super::{CoreFfi, CruxShell};
-    use crate::{ConfigsEvent, Event, ViewModel, effects::EffectFfi};
+    use crate::{AgentConfigField, ConfigsEvent, Event, ViewModel, effects::EffectFfi};
 
     struct RecordingShell(mpsc::Sender<Vec<u8>>);
 
@@ -265,5 +265,40 @@ mod tests {
         assert_eq!(view.agent_config.error, None);
         assert_eq!(view.agent_config.data.unwrap().max_iterations, 20);
         assert_eq!(view.text, "0 (pending)");
+
+        let edit = Event::Configs(ConfigsEvent::EditAgentConfig {
+            field: AgentConfigField::MaxIterations,
+            value: "30".to_string(),
+        });
+        assert!(core.update(&encode(&edit)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let view: ViewModel = BincodeFfiFormat::deserialize(&core.view()).unwrap();
+        assert_eq!(view.agent_config.draft.max_iterations, "30");
+        assert!(view.agent_config.dirty && view.agent_config.can_save);
+
+        let save = Event::Configs(ConfigsEvent::SaveAgentConfig {
+            base_url: "http://localhost:5150".to_string(),
+        });
+        assert!(core.update(&encode(&save)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let request = receive(&rx);
+        let EffectFfi::Http(ref http) = request.effect else {
+            panic!("expected a save HTTP request");
+        };
+        assert_eq!(http.method, "POST");
+        assert_eq!(http.url, "http://localhost:5150/api/app_configs/agent");
+        let body: serde_json::Value = serde_json::from_slice(&http.body).unwrap();
+        assert_eq!(body["max_iterations"], 30);
+        let response = HttpResult::Ok(
+            HttpResponse::ok()
+                .body(r#"{"max_iterations":30,"max_retries":3,"max_search_results":10}"#)
+                .build(),
+        );
+        assert!(core.resolve(request.id.0, &encode(&response)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let view: ViewModel = BincodeFfiFormat::deserialize(&core.view()).unwrap();
+        assert!(view.agent_config.saved);
+        assert!(!view.agent_config.saving && !view.agent_config.dirty);
+        assert_eq!(view.agent_config.data.unwrap().max_iterations, 30);
     }
 }

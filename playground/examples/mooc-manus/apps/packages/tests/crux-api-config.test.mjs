@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { resolveApiBaseUrl } from "../dist/crux-tests/api-config.js";
+import { resolveApiBaseUrl } from "../dist/crux-tests/lib/crux/api-config.js";
 
 test("API origin supports dev hosts, production Web, packaged Electron and overrides", () => {
   const location = { origin: "https://manus.example.com", protocol: "https:" };

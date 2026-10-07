@@ -11,13 +11,23 @@ import {
 
 export async function request(
   { url, method, headers, body }: HttpRequest,
-  { signal }: { signal?: AbortSignal } = {},
+  {
+    signal,
+    timeoutMs = 30_000,
+  }: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<HttpResult> {
   try {
     new URL(url);
   } catch (error) {
     return httpResultErr(httpErrorUrl(String(error)));
   }
+
+  // 普通 HTTP 请求有截止时间，包含响应体读取；SSE 使用独立的流式适配器。
+  const controller = new AbortController();
+  const abort = () => controller.abort(signal?.reason);
+  if (signal?.aborted) abort();
+  else signal?.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(
@@ -30,7 +40,7 @@ export async function request(
         body: ["GET", "HEAD"].includes(method.toUpperCase())
           ? undefined
           : new Uint8Array(body),
-        signal,
+        signal: controller.signal,
       }),
     );
 
@@ -49,7 +59,7 @@ export async function request(
     );
   } catch (error) {
     if (
-      signal?.aborted ||
+      controller.signal.aborted ||
       (error instanceof Error &&
         ["AbortError", "TimeoutError"].includes(error.name))
     ) {
@@ -58,5 +68,8 @@ export async function request(
     return httpResultErr(
       httpErrorIo(error instanceof Error ? error.message : String(error)),
     );
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
   }
 }

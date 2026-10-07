@@ -7,6 +7,7 @@ import bincode from "shared_types/bincode/index.js";
 
 const {
   AgentConfigViewModel,
+  AgentConfigDraft,
   Requests,
   ViewModel,
   eventIncrement,
@@ -86,7 +87,16 @@ test("generated WASM packages serialize events, decode effects, and resolve loca
       new ViewModel(
         "0 (pending)",
         false,
-        new AgentConfigViewModel(null, false, null),
+        new AgentConfigViewModel(
+          null,
+          new AgentConfigDraft("", "", ""),
+          false,
+          false,
+          null,
+          false,
+          false,
+          false,
+        ),
       ),
     );
 
@@ -100,7 +110,16 @@ test("generated WASM packages serialize events, decode effects, and resolve loca
       new ViewModel(
         "0 (pending)",
         false,
-        new AgentConfigViewModel(null, false, null),
+        new AgentConfigViewModel(
+          null,
+          new AgentConfigDraft("", "", ""),
+          false,
+          false,
+          null,
+          false,
+          false,
+          false,
+        ),
       ),
     );
 
@@ -118,7 +137,16 @@ test("generated WASM packages serialize events, decode effects, and resolve loca
       new ViewModel(
         "1 (pending)",
         false,
-        new AgentConfigViewModel(null, false, null),
+        new AgentConfigViewModel(
+          null,
+          new AgentConfigDraft("", "", ""),
+          false,
+          false,
+          null,
+          false,
+          false,
+          false,
+        ),
       ),
     );
 
@@ -144,7 +172,16 @@ test("generated WASM packages serialize events, decode effects, and resolve loca
       new ViewModel(
         "1 (pending)",
         false,
-        new AgentConfigViewModel(null, false, null),
+        new AgentConfigViewModel(
+          null,
+          new AgentConfigDraft("", "", ""),
+          false,
+          false,
+          null,
+          false,
+          false,
+          false,
+        ),
       ),
     );
   } finally {

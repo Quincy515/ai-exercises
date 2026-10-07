@@ -1,7 +1,7 @@
 import { LibraryBig, UserRound } from "lucide-react";
 import { motion, MotionConfig } from "motion/react";
 import { cn } from "cn";
-import { ManusSettings } from "./manus-settings";
+import { ManusSettings } from "../features/configs/settings-dialog";
 import { Avatar, AvatarFallback } from "./ui/avatar";
 import { Button } from "./ui/button";
 import { ClockIcon } from "./ui/clock";

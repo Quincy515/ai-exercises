@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import app from "shared_types/app.js";
-import { request } from "../dist/crux-tests/key-value.js";
-import { Time } from "../dist/crux-tests/time.js";
+import { request } from "../dist/crux-tests/lib/crux/key-value.js";
+import { Time } from "../dist/crux-tests/lib/crux/time.js";
 
 const { Duration, Instant, TimerId } = app;
 const namespace = "mooc-manus:crux:";

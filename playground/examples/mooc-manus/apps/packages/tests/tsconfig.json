@@ -3,11 +3,11 @@
   "compilerOptions": {
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "rootDir": "../src/lib/crux",
+    "rootDir": "../src",
     "outDir": "../dist/crux-tests",
     "types": ["node"],
     "sourceMap": false,
     "noEmitOnError": true
   },
-  "include": ["../src/lib/crux/**/*.ts"]
+  "include": ["../src/lib/crux/**/*.ts", "../src/features/configs/events.ts"]
 }

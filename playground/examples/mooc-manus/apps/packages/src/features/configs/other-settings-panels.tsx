@@ -1,26 +1,16 @@
-import {
-  Gift,
-  Languages,
-  LayoutGrid,
-  LayoutList,
-  Settings,
-  Trash,
-  Wrench,
-} from "lucide-react";
-import { useState } from "react";
-import { Button } from "./ui/button";
+// 其他配置面板保留课程展示，API 按后续业务接入。
+import { LayoutList, Trash, Wrench } from "lucide-react";
+import { Button } from "../../components/ui/button";
 import {
   Dialog,
-  DialogClose,
+  DialogTrigger,
   DialogContent,
-  DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
-} from "./ui/dialog";
-import { Separator } from "./ui/separator";
-
+  DialogDescription,
+  DialogFooter,
+  DialogClose,
+} from "../../components/ui/dialog";
 import {
   Field,
   FieldDescription,
@@ -28,123 +18,19 @@ import {
   FieldLabel,
   FieldLegend,
   FieldSet,
-} from "./ui/field";
-import { Kbd } from "./ui/kbd";
-import { Input } from "./ui/input";
+} from "../../components/ui/field";
+import { Kbd } from "../../components/ui/kbd";
+import { Input } from "../../components/ui/input";
 import {
   Item,
   ItemContent,
   ItemDescription,
   ItemGroup,
   ItemTitle,
-} from "./ui/item";
-import { Badge } from "./ui/badge";
-import { Switch } from "./ui/switch";
-import { Textarea } from "./ui/textarea";
-import { useAgentConfig } from "../lib/crux/use-agent-config";
-
-// 通用配置从 API 读取；其他配置表单与保存操作按后续课程接入。
-
-export function CommonSetting() {
-  const { data, loading, error, ready, refresh } = useAgentConfig();
-
-  return (
-    <section className="w-full px-1" aria-busy={loading || (!ready && !error)}>
-      <FieldGroup>
-        <FieldSet>
-          {/* 顶部表单标题 */}
-          <FieldLegend className="font-bold text-foreground data-[variant=legend]:text-lg">
-            通用配置
-          </FieldLegend>
-          <FieldDescription className="text-sm">
-            查看服务器当前的 Agent 配置。本页为只读展示。
-          </FieldDescription>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <p role="status" className="text-sm text-muted-foreground">
-              {loading || (!ready && !error)
-                ? "正在加载配置…"
-                : error
-                  ? data
-                    ? "显示上次成功读取的配置"
-                    : "配置读取失败"
-                  : data
-                    ? "已读取服务器配置"
-                    : "等待加载配置"}
-            </p>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={!ready || loading}
-              onClick={refresh}
-            >
-              {error ? "重试" : "刷新"}
-            </Button>
-          </div>
-          {error && (
-            <p role="alert" className="text-sm text-destructive">
-              {error}
-            </p>
-          )}
-          {/* 中间表单内容：i64 在生成类型中是 bigint，展示时转换为字符串。 */}
-          <FieldGroup>
-            <Field>
-              <FieldLabel className="flex-wrap" htmlFor="max_iterations">
-                最大迭代次数
-                <Kbd>max_iterations</Kbd>
-              </FieldLabel>
-              <Input
-                id="max_iterations"
-                type="number"
-                placeholder="Agent最大迭代次数"
-                value={data?.max_iterations.toString() ?? ""}
-                readOnly
-                disabled={!data}
-              />
-              <FieldDescription className="text-xs">
-                执行Agent最大能迭代循环调用工具的次数, 默认为100
-              </FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel className="flex-wrap" htmlFor="max_retries">
-                最大重试次数
-                <Kbd>max_retries</Kbd>
-              </FieldLabel>
-              <Input
-                id="max_retries"
-                type="number"
-                placeholder="LLM/Tool最大重试次数"
-                value={data?.max_retries.toString() ?? ""}
-                readOnly
-                disabled={!data}
-              />
-              <FieldDescription className="text-xs">
-                默认情况下，最大重试次数为3
-              </FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel className="flex-wrap" htmlFor="max_search_results">
-                最大搜索结果
-                <Kbd>max_search_results</Kbd>
-              </FieldLabel>
-              <Input
-                id="max_search_results"
-                type="number"
-                placeholder="搜索工具返回的最大结果数"
-                value={data?.max_search_results.toString() ?? ""}
-                readOnly
-                disabled={!data}
-              />
-              <FieldDescription className="text-xs">
-                默认情况下, 每个搜索步骤包含10个结果
-              </FieldDescription>
-            </Field>
-          </FieldGroup>
-        </FieldSet>
-      </FieldGroup>
-    </section>
-  );
-}
+} from "../../components/ui/item";
+import { Badge } from "../../components/ui/badge";
+import { Switch } from "../../components/ui/switch";
+import { Textarea } from "../../components/ui/textarea";
 
 export function LLMSetting() {
   return (
@@ -502,106 +388,5 @@ export function MCPSetting() {
         </FieldSet>
       </FieldGroup>
     </div>
-  );
-}
-
-export function ManusSettings() {
-  const [activatedSetting, setActivatedSetting] = useState("common-setting");
-  const settingMenus = [
-    {
-      key: "common-setting",
-      icon: Settings,
-      title: "通用配置",
-      childComponent: CommonSetting,
-    },
-    {
-      key: "llm-setting",
-      icon: Languages,
-      title: "模型提供商",
-      childComponent: LLMSetting,
-    },
-    {
-      key: "a2a-setting",
-      icon: LayoutGrid,
-      title: "A2A Agent配置",
-      childComponent: A2ASetting,
-    },
-    {
-      key: "mcp-setting",
-      icon: Gift,
-      title: "MCP 服务器",
-      childComponent: MCPSetting,
-    },
-  ];
-  const ActiveSetting = settingMenus.find(
-    (setting) => setting.key === activatedSetting,
-  )?.childComponent;
-
-  return (
-    <Dialog>
-      {/* 模态窗触发器 */}
-      <DialogTrigger
-        render={
-          <Button variant="ghost" size="icon-lg" className="cursor-pointer" />
-        }
-        aria-label="打开设置"
-        title="设置"
-      >
-        <Settings />
-      </DialogTrigger>
-      {/* 模态窗本身 */}
-      <DialogContent className="max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] !max-w-[850px] grid-rows-[auto_minmax(0,1fr)_auto]">
-        {/* 模态窗header */}
-        <DialogHeader className="border-b pb-4">
-          <DialogTitle className="text-gray-700">MoocManus 设置</DialogTitle>
-          <DialogDescription className="text-gray-500">
-            在此管理您的 MoocManus 设置。
-          </DialogDescription>
-        </DialogHeader>
-        {/* 模态窗中间内容 */}
-        <div className="flex min-h-0 min-w-0 flex-col gap-4 sm:flex-row">
-          {/* 左侧快捷菜单 */}
-          <div className="scrollbar-hide shrink-0 overflow-x-auto sm:max-w-[180px] sm:overflow-y-auto">
-            <div className="flex gap-0 sm:flex-col">
-              {settingMenus.map((setting) => (
-                <Button
-                  variant={
-                    activatedSetting === setting.key ? "default" : "ghost"
-                  }
-                  key={setting.key}
-                  className="cursor-pointer justify-start"
-                  aria-pressed={activatedSetting === setting.key}
-                  onClick={() => setActivatedSetting(setting.key)}
-                >
-                  <setting.icon data-icon="inline-start" />
-                  {setting.title}
-                </Button>
-              ))}
-            </div>
-          </div>
-          {/* 分隔符 */}
-          <Separator orientation="vertical" className="hidden sm:block" />
-          {/* 右侧表单内容 */}
-          <div className="scrollbar-hide h-[500px] max-h-full min-h-0 min-w-0 flex-1 overflow-y-auto wrap-break-word">
-            {ActiveSetting && <ActiveSetting />}
-          </div>
-        </div>
-        {/* 模态窗footer */}
-        <DialogFooter className="mx-0 mb-0 bg-transparent p-0 pt-4">
-          <DialogClose
-            render={<Button variant="outline" className="cursor-pointer" />}
-          >
-            取消
-          </DialogClose>
-          <Button
-            type="button"
-            className="cursor-pointer"
-            disabled={activatedSetting === "common-setting"}
-          >
-            保存
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }

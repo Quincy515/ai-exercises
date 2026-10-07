@@ -2,7 +2,7 @@
 
 本文件是 `apps/` 的统一架构依据，适用于设置、认证、会话、文件、健康状态及后续业务。每次修改代码都必须遵守职责、依赖方向、生命周期与验证要求。根级 `AGENTS.md` 负责执行入口，子目录规则补充具体约束。
 
-本规范于 2026-10-03 对照本地 Crux 官方 `weather` 示例（提交 `30337489`）及当前源码确定。目录树描述生产目标；当前已完成的是 Agent 配置查询及其 Rust 三层拆分。其余业务按实际需求实现，迁移进度见第 6 节。
+本规范于 2026-10-03 对照本地 Crux 官方 `weather` 示例（提交 `30337489`）确定，2026-10-07 同步 Agent 配置编辑与保存。目录树描述生产目标；Agent 配置已完成 Rust 三层拆分与前端 `features/configs/` 归组。其余业务按实际需求实现，迁移进度见第 6 节。
 
 ## 1. 官方示例与项目选择
 
@@ -15,11 +15,11 @@
 | [weather React Provider](crux/examples/weather/web-nextjs/src/lib/core/provider.tsx) | 在应用根管理 Core，子组件消费共享视图与事件分发 |
 | [weather 请求版本](crux/examples/weather/shared/src/model/active/favorites/add.rs) | 并发请求需要关联身份，过期响应由模型判断并丢弃 |
 
-项目保留已有 `effects.rs` 和 `capabilities/`，HTTP 客户端集中到 `api/`。API 层独立于业务 Model/Event 是本项目的额外约束。`weather` 的 `Outcome`、生命周期枚举、深层目录和演示密钥存储按业务需要评估；当前简单查询沿用直接返回 `Command` 的更新函数。
+项目保留已有 `effects.rs` 和 `capabilities/`，HTTP 客户端集中到 `api/`。API 层独立于业务 Model/Event 是本项目的额外约束。`weather` 的 `Outcome`、生命周期枚举、深层目录和演示密钥存储按业务需要评估；当前配置读写沿用直接返回 `Command` 的更新函数。
 
 ## 2. 最终目标目录
 
-下列为目标落位。`configs` 三层已有实现；`provider.tsx`、`features/` 和其他业务属于后续迁移或接入项。业务文件在有真实代码时创建，职责相同的文件在同层按模块归组。
+下列为目标落位。`configs` 的 Rust 三层和前端 `features/configs/` 已有实现；`provider.tsx` 与其他业务属于后续迁移或接入项。业务文件在有真实代码时创建，职责相同的文件在同层按模块归组。
 
 ```text
 apps/
@@ -76,7 +76,9 @@ apps/
 │   │   │   │   ├── settings-dialog.tsx
 │   │   │   │   ├── agent-config-panel.tsx
 │   │   │   │   ├── use-agent-config.ts
-│   │   │   │   └── events.ts         # 生成事件的设置模块包装
+│   │   │   │   ├── events.ts         # 生成事件的设置模块包装
+│   │   │   │   ├── other-settings-panels.tsx # LLM/A2A/MCP 课程占位
+│   │   │   │   └── index.ts          # @apps/frontend/configs 公开入口
 │   │   │   ├── sessions/
 │   │   │   │   ├── chat.tsx / new-session.tsx / novnc.tsx
 │   │   │   │   ├── use-sessions.ts / events.ts
@@ -146,7 +148,7 @@ Effect → Shell 执行能力 → resolve → 模块内部事件 → model
 | `effects.rs` / `capabilities/` | 平台操作协议和能力构造/解码 | 服务于多个模块，独立于具体页面 |
 | `ffi.rs` | 字节序列化、Core 桥接 | 保持业务无关，原生与 WASM 协议一致 |
 | `lib/crux/` | 通用运行时、Provider、能力执行 | 业务 Hook/命令包装放 `features/` |
-| `features/<业务>/` | 页面、业务 UI Hook、生成事件包装 | Rust 是业务状态来源；React 管展开、焦点、输入草稿等 UI 状态 |
+| `features/<业务>/` | 页面、业务 UI Hook、生成事件包装 | Rust 管业务状态及可提交的表单草稿；React 管展开、焦点等局部 UI 状态 |
 | 宿主 | 路由、根 Provider、公开配置、平台适配 | 宿主通过 `@apps/frontend/*` 入口消费共享代码 |
 
 跨业务操作由根 Model 或明确的父流程协调。业务模块之间通过事件/转换结果交接，避免直接修改兄弟模型。API 与 View 都可复用安全 DTO，避免为目录整齐复制同形结构。
@@ -161,10 +163,10 @@ Effect → Shell 执行能力 → resolve → 模块内部事件 → model
 2. **应用资源与业务资源分别管理。** 应用卸载 `dispose` 取消全部请求、流和定时器；业务页面关闭只处理该业务需要结束的任务。关闭设置弹窗后的读取结果是否保留，由模块策略决定。需要取消时同时明确 Shell 终止 I/O、Model 忽略过期结果的责任。
 3. **业务错误归对应模块。** HTTP 失败经 `resolve` 回到 Rust 并写入该业务状态；全局错误用于初始化、FFI、协议等客户端故障。Provider 迁移时同时调整错误上报，避免一个模块请求失败污染其他模块提示。
 4. **并发结果有明确身份。** 单配置读取可以用 loading 去重；搜索、会话切换、注销和并发重试使用请求 ID、版本或认证代际识别结果。迟到响应不能恢复已退出的身份或覆盖新会话状态。
-5. **请求有终止条件。** Shell 执行超时与取消，模型决定重试策略；读取和有副作用的操作分别评估重试条件。错误与取消路径也要使 loading/任务状态结束。
+5. **请求有终止条件。** 普通 HTTP Shell 默认 30 秒超时，覆盖请求及响应体读取，并与 Core 卸载取消联动；SSE 使用独立生命周期。模型决定重试策略，错误与取消路径也要结束 loading/saving。保存超时或网络中断时结果尚未确认，保留草稿并提示核对；写操作由用户手动重试。
 6. **共享业务数据由 Rust 维护。** TanStack Router 负责路由；同一份业务数据保持单一状态来源。已有 TanStack Query 演示代码列入发布整理项。
 
-Provider 的引入必须与取消策略、错误隔离和生命周期测试一起完成；当前每个 `useCrux()` 单独持有 Core 的实现是第 6 节登记的迁移项。
+Provider 的引入必须与取消策略、错误隔离和生命周期测试一起完成；当前每个 `useCrux()` 单独持有 Core 的实现是第 6 节登记的迁移项。当前设置弹窗仅在内容组件调用一次 `useAgentConfig()`，表单与底部保存按钮共享这份状态。普通关闭会卸载内容、丢弃未保存草稿，重开后重新 GET；保存期间统一阻止编辑、切换面板和关闭，待成功、失败或超时后恢复操作。
 
 ## 5. 配置、持久化、认证和平台边界
 
@@ -178,23 +180,28 @@ Provider 的引入必须与取消策略、错误隔离和生命周期测试一�
 
 ## 6. 当前状态与必须完成的迁移
 
-以下是本次源码审查结果。目录目标确定后，新业务按目标落位；既有偏差按表分批消除，不能继续扩大。
+已完成的设置切片：
+
+- [api/configs.rs](shared/src/api/configs.rs) 构造 GET/POST 请求；[model/configs.rs](shared/src/model/configs.rs) 管理字符串草稿、整数范围校验、读写去重、保存与失败恢复；[view/configs.rs](shared/src/view/configs.rs) 输出 data/draft/loading/saving/error/saved/dirty/can_save。`app.rs` 继续保持委派入口。
+- [features/configs](packages/src/features/configs/index.ts) 集中设置弹窗、Agent 表单、业务 Hook 与事件包装，通过 `@apps/frontend/configs` 导出。通用 `lib/crux` 保留桥接与平台 I/O；旧设置组件和业务 Hook 已迁出。
+- [http.ts](packages/src/lib/crux/http.ts) 已加入普通 HTTP 默认 30 秒截止时间与实例取消清理。设置保存根据服务端返回值确认结果，失败保留已确认数据和草稿，超时/网络异常显示结果待核实提示。
+
+以下为剩余迁移项。新业务按目标落位；既有偏差按表分批消除。
 
 | 当前证据 | 调整内容 | 完成时机 |
 | --- | --- | --- |
 | [model/mod.rs](shared/src/model/mod.rs) 与 [view/mod.rs](shared/src/view/mod.rs) 仍含计数器、外部演示 API、KV/时间/展示细节 | 教学业务迁出根层；保留教学阶段所需兼容，迁移相关测试后从生产 Event/ViewModel 移除。课程参考保留在 `crux/examples` | 生产发布前完成；后续产品逻辑直接进入自己的模块 |
 | [use-crux.ts](packages/src/lib/crux/use-crux.ts) 每次挂载 new Core | 引入应用根 Provider，useCrux 消费共享 Context | 认证、会话等多个业务联动前完成 |
 | [core.ts](packages/src/lib/crux/core.ts) 只有实例级取消，每个 HTTP Err 同时报告全局错误 | Provider 同批完成请求归属、业务取消/失效响应及全局错误隔离；补真实 Provider 挂载测试 | 与共享 Core 一起验收 |
-| [use-agent-config.ts](packages/src/lib/crux/use-agent-config.ts) 与设置事件包装位于通用桥接层；[manus-settings.tsx](packages/src/components/manus-settings.tsx) 聚合多种设置 UI | 迁到 `features/configs/`，拆现有面板；会话页面与业务组件逐步迁到 `features/sessions/` | 扩展相应模块时迁移，新增业务直接按目标落位 |
-| AgentConfig 单份 data/loading/error；事件逐次传 base URL | 多种设置各自管理状态；启动配置统一注入；根据实际展示需要聚合 ConfigsViewModel | 新增 LLM/MCP/A2A 或认证时完成 |
-| [http.ts](packages/src/lib/crux/http.ts) 未主动设置请求截止时间 | 明确各请求超时、取消与可重试条件，补一直不返回等失败测试 | 生产请求可靠性验收前完成 |
+| 会话页面与业务组件仍分散在 `packages/src/` 与 `components/` | 逐步迁到 `features/sessions/`，保留已有公开入口 | 扩展会话模块时迁移，新增业务直接按目标落位 |
+| 当前 ConfigsModel 只管理 Agent 配置读写，事件逐次传 base URL | 多种设置各自管理状态；启动配置统一注入；根据实际展示需要聚合 ConfigsViewModel | 新增 LLM/MCP/A2A 或认证时完成 |
 | [capabilities/sse.rs](shared/src/capabilities/sse.rs) / [Shell SSE](packages/src/lib/crux/sse.ts) 当前为 URL + GET，解码错误不可观察 | 支持后端 POST SSE 契约、事件名、可观察错误、取消/结束 | 会话实时业务接入前完成 |
 | Electron 使用 file 页面，当前 [main.ts](electron-app/src/main.ts) 无条件打开 DevTools | 明确生产地址与受限传输路径，DevTools 限开发；验收安装包请求与导航 | 桌面发布前完成 |
-| 首页/会话仍含演示数据，部分配置表单/保存是占位 | 各模块逐项完成真实数据、交互与失败恢复，演示路由/数据退出生产入口 | 对应业务上线前完成 |
+| 首页/会话仍含演示数据，LLM/MCP/A2A 配置保存仍是占位 | 各模块逐项完成真实数据、交互与失败恢复，演示路由/数据退出生产入口 | 对应业务上线前完成 |
 
-`@apps/frontend/chat`、`/new-session`、`/novnc`、`/layout` 等公开入口可保留名称，通过 `package.json` 的 `exports` 指向迁移后的文件；共享包内部仍使用相对导入。移动 Hook 后同步测试编译范围，避免测试继续覆盖旧文件。
+`@apps/frontend/configs` 公开导出 `ManusSettings` 与 `useAgentConfig`。`@apps/frontend/chat`、`/new-session`、`/novnc`、`/layout` 等公开入口可保留名称，通过 `package.json` 的 `exports` 指向迁移后的文件；共享包内部仍使用相对导入。移动 Hook 后同步测试编译范围，避免测试继续覆盖旧文件。
 
-上一轮 Agent 配置实现已完成 17 项 Rust、3 项 WASM、29 项 Shell 测试及双端开发联调。该结果证明当前切片，以上生产迁移项仍需各自完成和验收。本轮只进行源码审查、规范与文档检查，业务源码保持原样。
+验证证据按当前 checkout 的实际执行结果记录。配置写流程使用 `settings-save --allow-config-write true`，记录原值，保存后重新 GET 核对，再恢复原值；未确认的写请求必须记为失败且结果待核实。剩余生产迁移项各自完成验证后更新本表。
 
 ## 7. 每次修改的执行要求
 

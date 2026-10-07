@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { request as http } from "../dist/crux-tests/http.js";
-import { request as sse } from "../dist/crux-tests/sse.js";
+import { request as http } from "../dist/crux-tests/lib/crux/http.js";
+import { request as sse } from "../dist/crux-tests/lib/crux/sse.js";
 
 const httpRequest = (overrides = {}) => ({
   method: "GET",
@@ -121,6 +121,27 @@ test("HTTP converts abort and timeout failures to Timeout", async (t) => {
     await http(httpRequest(), { signal: controller.signal }),
     expected,
   );
+});
+
+test("HTTP deadline aborts hanging requests and response bodies", async (t) => {
+  const waitForAbort = (signal) =>
+    new Promise((_, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), {
+        once: true,
+      });
+    });
+  const fetch = t.mock.method(globalThis, "fetch", (request) =>
+    waitForAbort(request.signal),
+  );
+  const expected = { kind: "Err", value: { kind: "Timeout" } };
+  assert.deepEqual(await http(httpRequest(), { timeoutMs: 5 }), expected);
+
+  fetch.mock.mockImplementation(async (request) => ({
+    status: 200,
+    headers: new Headers(),
+    arrayBuffer: () => waitForAbort(request.signal),
+  }));
+  assert.deepEqual(await http(httpRequest(), { timeoutMs: 5 }), expected);
 });
 
 test("SSE forwards raw network chunks and emits Done at EOF", async (t) => {

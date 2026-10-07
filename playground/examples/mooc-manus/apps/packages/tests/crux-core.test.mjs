@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate as nextTurn } from "node:timers/promises";
-import { AgentConfigViewModel } from "shared_types/app.js";
-import { Core } from "../dist/crux-tests/core.js";
-import { cruxEvents as events } from "../dist/crux-tests/use-crux.js";
+import { AgentConfigDraft, AgentConfigViewModel } from "shared_types/app.js";
+import { Core } from "../dist/crux-tests/lib/crux/core.js";
+import { cruxEvents as events } from "../dist/crux-tests/lib/crux/use-crux.js";
 
 const body = (value) => JSON.stringify({ value, updated_at: 1672531200000 });
 
@@ -39,13 +39,31 @@ test(
       assert.deepEqual(core.view(), {
         text: "0 (pending)",
         confirmed: false,
-        agent_config: new AgentConfigViewModel(null, false, null),
+        agent_config: new AgentConfigViewModel(
+          null,
+          new AgentConfigDraft("", "", ""),
+          false,
+          false,
+          null,
+          false,
+          false,
+          false,
+        ),
       });
       core.update(events.Increment());
       assert.deepEqual(core.view(), {
         text: "1 (pending)",
         confirmed: false,
-        agent_config: new AgentConfigViewModel(null, false, null),
+        agent_config: new AgentConfigViewModel(
+          null,
+          new AgentConfigDraft("", "", ""),
+          false,
+          false,
+          null,
+          false,
+          false,
+          false,
+        ),
       });
       assert.equal(request.method, "POST");
       assert.equal(request.url, "https://crux-counter.fly.dev/inc");
@@ -61,7 +79,16 @@ test(
       assert.deepEqual(core.view(), {
         text: "0 (pending)",
         confirmed: false,
-        agent_config: new AgentConfigViewModel(null, false, null),
+        agent_config: new AgentConfigViewModel(
+          null,
+          new AgentConfigDraft("", "", ""),
+          false,
+          false,
+          null,
+          false,
+          false,
+          false,
+        ),
       });
       assert.ok(views.length >= 4);
     } finally {

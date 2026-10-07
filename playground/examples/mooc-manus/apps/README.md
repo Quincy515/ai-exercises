@@ -33,24 +33,36 @@ Web 使用 TanStack Start 官方 SPA 模式，构建时生成静态页面壳；
 `/schedules` 与 `/library` 已接通两端路由，当前显示占位页；设置弹窗复用在一级栏底部，
 账号位置暂作展示。窄屏继续使用聊天列表抽屉，业务核心沿用现有 Crux 接入。
 
-## 首个真实 API：读取 Agent 配置
+## 首个真实 API：读取与保存 Agent 配置
 
-在两端打开「设置 → 通用配置」，页面自动读取 `GET /api/app_configs/agent`，
-展示最大迭代次数、最大重试次数和最大搜索结果。当前只接入查询，字段只读，保存按钮禁用。
-刷新失败保留上次成功的数据，点击「重试」重新读取。
+在两端打开「设置 → 通用配置」，页面自动读取 `GET /api/app_configs/agent`。
+三个字段支持编辑，点击「保存」发送 `POST /api/app_configs/agent`，请求和响应均为这三个字段的 JSON 对象。
+
+| 字段 | 整数范围 |
+| --- | --- |
+| `max_iterations` 最大迭代次数 | 1–999 |
+| `max_retries` 最大重试次数 | 2–9 |
+| `max_search_results` 最大搜索结果 | 2–29 |
+
+Rust 保存字符串草稿，点击保存时统一校验，清空、非整数或越界输入显示中文提示。
+未修改时保存按钮禁用；有草稿时禁用刷新，点击「撤销修改」恢复最近一次服务端确认值。
+点击「取消」或关闭弹窗会丢弃未保存草稿，重新打开时读取服务器配置。
+保存期间禁用字段、切换面板和关闭，避免提交途中丢失状态；成功后以服务端返回值更新表单并显示「保存成功」。
+失败时保留草稿供用户手动重试。HTTP 默认 30 秒超时，保存超时或网络中断会提示结果尚未确认，可重新打开设置核对。
+LLM、A2A、MCP 面板沿用课程占位，保存按钮保持禁用。
 
 ```text
-CommonSetting → useAgentConfig → useCrux → Event::Configs
-  → model/configs.rs → api/configs.rs → Http Effect → http.ts → 后端
-  → ConfigsEvent::AgentConfigReceived → ConfigsModel 更新
-  → Render → view/configs.rs → ViewModel → React
+AgentConfigPanel → useAgentConfig → useCrux → Event::Configs
+  → model/configs.rs（草稿、校验与状态）→ api/configs.rs（GET/POST）
+  → Http Effect → http.ts → 后端 → AgentConfigReceived / AgentConfigSaved
+  → ConfigsModel → Render → view/configs.rs → ViewModel → React
 ```
 
-- `shared/src/api/configs.rs` 保存设置接口 DTO 和 HTTP 请求构造，`api/mod.rs` 统一校验和拼接地址。
-- `shared/src/model/configs.rs` 管理设置事件、状态、加载、去重和重试，`view/configs.rs` 将其转换为展示数据。
-- `packages/src/lib/crux/use-agent-config.ts` 组合通用 Hook，封装首次读取和刷新；组件复用 Rust 状态。
-- 两端均通过 `AppLayout → NavigationRail → ManusSettings` 使用同一个 `CommonSetting`。
-- 每次挂载创建独立 Core；同一 Core 在途请求去重，卸载时取消请求。Rust `i64` 生成 `bigint`，展示时用 `.toString()`。
+- [api/configs.rs](shared/src/api/configs.rs) 保存 DTO 和 HTTP 请求构造，`api/mod.rs` 统一校验和拼接地址。
+- [model/configs.rs](shared/src/model/configs.rs) 管理读取、编辑、撤销、保存、去重与错误；[view/configs.rs](shared/src/view/configs.rs) 提供页面数据。
+- [features/configs](packages/src/features/configs/index.ts) 集中弹窗、表单、业务 Hook 和事件包装，通过 `@apps/frontend/configs` 导出 `ManusSettings` 与 `useAgentConfig`。
+- 两端均通过 `AppLayout → NavigationRail → ManusSettings → AgentConfigPanel` 使用相同实现。
+- 弹窗内容挂载时创建一个 Core，表单与底部按钮共享状态；卸载取消请求并释放 Core。应用级 Provider 仍按架构文档迁移。
 
 服务根地址集中在 `packages/src/lib/crux/api-config.ts`。HTTP 页面默认请求页面同源 `/api`：
 开发环境由两端共用的 `vite.api.mts` 代理到 `http://localhost:5150`，生产 Web 由 nginx 代理。
@@ -102,7 +114,7 @@ API 模块独立于业务 Model/Event；状态更新留在 `model/`，页面输�
 单个模块明显变大后再拆子目录，例如 `model/configs/{mod,agent,llm}.rs`。
 
 现有计数器作为教学示例保留在模型层。跨 FFI 的 Event/ViewModel 需要 Facet 与 Serde；内部模型按实际需要派生类型。
-`packages/src/app/` 属于 React 页面和布局；`packages/src/lib/crux/` 提供通用 Shell 与 Hook。
+`packages/src/app/` 负责共享布局；`packages/src/features/configs/` 负责设置业务 UI、Hook 与事件包装；`packages/src/lib/crux/` 提供通用 Shell 与 Hook。
 后续业务继续复用现有 HTTP Shell，并通过 `just install` 同步生成类型和 WASM。
 
 ## noVNC 入门查看页
@@ -350,7 +362,7 @@ function Counter() {
   const { view, events, dispatch, ready, error } = useCrux()
   return (
     <>
-      <p>{ready ? view.text : '正在加载…'}</p>
+      <p>{view?.text ?? '正在加载…'}</p>
       <button disabled={!ready} onClick={() => dispatch(events.Increment())}>加一</button>
       {error && <p role="alert">{error.message}</p>}
     </>
@@ -362,7 +374,7 @@ function Counter() {
 `http.ts`、`sse.ts`、`key-value.ts`、`time.ts` 执行浏览器能力。
 当前 Hook 每次挂载创建独立 Core，卸载时取消请求、清除定时器并释放 WASM handle。
 应用级共享 Provider、业务取消策略和全局错误隔离是已登记的生产迁移项，接入认证及多模块联动前按架构规范一起完成。
-`useCrux()` 从空展示状态开始，WASM 就绪后以 Rust 的 `view()` 为准。
+`useCrux()` 的 `view` 初始为 `null`，WASM 就绪后以 Rust 的 `view()` 为准，组件使用可选链处理初始化阶段。
 
 示例 API 使用 Rust 中配置的 `https://crux-counter.fly.dev`。
 HTTP/SSE 验证使用模拟响应；上方示例展示组件如何发送 Rust 事件。
@@ -460,10 +472,18 @@ WASM，并验证事件、ViewModel 和 effect 响应的序列化往返。
 
 ## 可复用用户流程验证
 
-项目技能位于 [verify-mooc-manus](../.agents/skills/verify-mooc-manus/SKILL.md)，覆盖通用配置读取刷新、会话导航与计划、任务文件列表。先完成 `just install`，然后在 `mooc-manus` 根目录执行：
+项目技能位于 [verify-mooc-manus](../.agents/skills/verify-mooc-manus/SKILL.md)，默认覆盖通用配置读取刷新、会话导航与计划、任务文件列表。先完成 `just install`，然后在 `mooc-manus` 根目录执行：
 
 ```sh
 node .agents/skills/verify-mooc-manus/scripts/verify.mjs run --features settings,sessions,files --port 4317
 ```
 
 脚本使用独立端口和浏览器上下文，自动 doctor、驱动并清理自己启动的前端进程，证据保留在 `output/playwright/verify-mooc-manus/`。配置查询需要已有 `localhost:5150` 后端；服务不可用时记录 blocked。会话和文件目前验证真实 UI 交互与内置演示数据，聊天发送和文件下载仍按后续业务接入。具体边界、入口与退出码见技能及 feature map。
+
+验证 Agent 配置编辑保存时，显式启用写流程：
+
+```sh
+node .agents/skills/verify-mooc-manus/scripts/verify.mjs run --features settings-save --allow-config-write true --port 4317
+```
+
+在独占开发后端执行，期间暂停其他配置编辑。脚本记录原值，检查非法输入、真实保存、关闭重开后的 GET，再通过 UI 恢复原值；证据包含 `original-config.json`、`api-responses.json` 与 `config-cleanup.json`。遇到其他客户端的新值会停止覆盖；写请求结果无法确认时记录失败和待核实状态。结束后同时核对配置恢复结果与进程清理结果。此脚本覆盖 Web 首页保存路径，其他入口与 Electron 按目标平台单独验证。

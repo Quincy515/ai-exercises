@@ -11,6 +11,7 @@ pub use api::configs::AgentConfig;
 pub use app::AppCore;
 pub use capabilities::sse;
 pub use effects::Effect;
+pub use model::configs::{AgentConfigDraft, AgentConfigField};
 pub use model::{ConfigsEvent, Count, Event, Model};
 pub use view::{AgentConfigViewModel, ViewModel};
 

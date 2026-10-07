@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     "./crux": "./src/lib/crux/index.ts",
+    "./configs": "./src/features/configs/index.ts",
     "./chat": "./src/chat.tsx",
     "./new-session": "./src/new-session.tsx",
     "./novnc": "./src/novnc.tsx",

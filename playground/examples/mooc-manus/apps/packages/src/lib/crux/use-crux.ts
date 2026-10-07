@@ -8,9 +8,6 @@ import {
   eventReset,
   eventLoadState,
   eventStartWatch,
-  eventConfigs,
-  configsEventGetAgentConfig,
-  AgentConfigViewModel,
 } from "shared_types/app.js";
 import { Core } from "./core.js";
 import type { CruxViewModel } from "./core.js";
@@ -23,8 +20,6 @@ export const cruxEvents = {
   Reset: eventReset,
   LoadState: eventLoadState,
   StartWatch: eventStartWatch,
-  GetAgentConfig: (baseUrl: string) =>
-    eventConfigs(configsEventGetAgentConfig(baseUrl)),
 } as const;
 
 export type CruxEvents = typeof cruxEvents;
@@ -34,11 +29,7 @@ export type CruxEvents = typeof cruxEvents;
  * 组件通过 dispatch(events.Increment()) 发送事件，并用 ready 控制交互。
  */
 export function useCrux() {
-  const [view, setView] = useState<CruxViewModel>({
-    text: "",
-    confirmed: false,
-    agent_config: new AgentConfigViewModel(null, false, null),
-  });
+  const [view, setView] = useState<CruxViewModel | null>(null);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const core = useRef<Core | null>(null);
@@ -54,6 +45,7 @@ export function useCrux() {
       },
     );
     core.current = instance;
+    setView(null);
     setReady(false);
     setError(null);
     void instance
