@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { createRequire } from 'node:module';
+import { allowedConfigWrite, ConfigWriteJournal, forwardAuthorizedConfigWrite, requireConfigWriteAuthorization } from './config-write.mjs';
+import { driveSettingsSave } from './settings-save.mjs';
 
 export function driverInfo(repo, { modulePath, channel = 'chrome' } = {}) {
   const require = createRequire(path.join(repo, 'apps/package.json'));
@@ -25,12 +27,14 @@ export function driverInfo(repo, { modulePath, channel = 'chrome' } = {}) {
 const keys = ['max_iterations', 'max_retries', 'max_search_results'];
 const files = ['go+java.pdf', '全家福.png', '2025年年中汇报.docx', '数据分析可视化看板.xsx', '数据看板动态演示.gif', 'ReActAgent.py'];
 
-export async function driveFlows({ state, health, features, modulePath, channel }) {
+export async function driveFlows({ state, health, features, modulePath, channel, allowConfigWrite = false }) {
+  requireConfigWriteAuthorization(features, allowConfigWrite);
   const driver = driverInfo(state.repo, { modulePath, channel });
   const report = { startedAt: new Date().toISOString(), head: state.source.head,
     workingTreeDigest: state.source.digest, surface: 'Web', url: state.url,
     driver: { entry: driver.entry, version: driver.version, channel: driver.channel },
-    mocks: false, apiWriteGuard: true, features: [] };
+    mocks: false, apiWriteGuard: true, configWriteOptIn: allowConfigWrite,
+    configWriteTransport: 'real backend via Playwright route.fetch; redirects and retries disabled', features: [] };
   let browser;
   let currentFeature;
   try {
@@ -43,9 +47,12 @@ export async function driveFlows({ state, health, features, modulePath, channel 
       await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
       const page = await context.newPage();
       page.setDefaultTimeout(15000);
-      const errors = [], network = [], blockedWrites = [];
+      const errors = [], network = [], blockedWrites = [], authorizedWrites = [];
+      const writeGuard = { expected: null, attempts: 0, requests: new Map() };
+      writeGuard.journal = new ConfigWriteJournal(entries => fs.writeFileSync(
+        path.join(directory, 'post-outcomes.json'), JSON.stringify(entries, null, 2) + '\n'));
       let sequence = 0;
-      const result = { id: feature, status: 'passed', boundary: feature === 'settings' ? 'live API + Rust/WASM + UI' : 'built-in demo data + real UI interactions',
+      const result = { id: feature, status: 'passed', boundary: ['settings', 'settings-save'].includes(feature) ? 'live API + Rust/WASM + UI' : 'built-in demo data + real UI interactions',
         entrypointsCovered: [], checks: [] };
       const record = item => fs.appendFileSync(path.join(directory, 'actions.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...item }) + '\n');
       const step = async (action, fn) => {
@@ -80,11 +87,34 @@ export async function driveFlows({ state, health, features, modulePath, channel 
         assert.equal(await button(name).getAttribute('aria-current'), 'page');
       };
       page.on('pageerror', error => errors.push(error.message));
+      page.on('requestfinished', request => {
+        const entry = writeGuard.requests.get(request);
+        if (entry) writeGuard.journal.complete(entry);
+      });
+      page.on('requestfailed', request => {
+        const entry = writeGuard.requests.get(request);
+        if (entry) writeGuard.journal.unknown(entry, request.failure()?.errorText ?? 'POST transport failed');
+      });
       page.on('response', response => {
+        const entry = writeGuard.requests.get(response.request());
+        if (entry) writeGuard.journal.headers(entry, response.status());
         if (new URL(response.url()).pathname.startsWith('/api/')) network.push({ url: response.url(), status: response.status(), method: response.request().method() });
       });
       await page.route('**/api/**', async route => {
         if (!['GET', 'HEAD'].includes(route.request().method())) {
+          writeGuard.attempts++;
+          let payload;
+          try { payload = route.request().postDataJSON(); } catch { /* Non-JSON writes fail closed. */ }
+          if (allowedConfigWrite({ feature, allowConfigWrite, baseUrl: state.url,
+            url: route.request().url(), method: route.request().method(), payload, expected: writeGuard.expected })) {
+            writeGuard.expected = null; // A UI save authorizes exactly one request.
+            const entry = writeGuard.journal.begin({ url: route.request().url(), payload });
+            writeGuard.requests.set(route.request(), entry);
+            authorizedWrites.push(entry);
+            record({ action: '允许本次配置写入', method: 'POST', values: payload });
+            await forwardAuthorizedConfigWrite(route, writeGuard.journal, entry);
+            return;
+          }
           blockedWrites.push({ method: route.request().method(), url: route.request().url() });
           await route.abort('blockedbyclient');
         } else await route.continue();
@@ -120,11 +150,11 @@ export async function driveFlows({ state, health, features, modulePath, channel 
               responses.push({ route, status: response.status(), values: Object.fromEntries(keys.map(k => [k, actual[k]])) });
               for (const key of keys) {
                 assert.equal(await dialog.locator('#' + key).inputValue(), String(actual[key]));
-                assert.equal(await dialog.locator('#' + key).getAttribute('readonly'), '');
+                assert.equal(await dialog.locator('#' + key).isEditable(), true);
               }
               assert.equal(await dialog.getByRole('button', { name: '保存', exact: true }).isDisabled(), true);
             };
-            await step('三个只读字段与真实 API 一致', () => check(firstResponse));
+            await step('三个可编辑字段与真实 API 一致，未改动时保存禁用', () => check(firstResponse));
             await capture('settings-loaded');
             const responsePromise = watchConfig();
             await step('点击刷新并收到真实响应', async () => {
@@ -137,6 +167,9 @@ export async function driveFlows({ state, health, features, modulePath, channel 
             result.entrypointsCovered.push(route + ' → 打开设置');
           }
           fs.writeFileSync(path.join(directory, 'api-responses.json'), JSON.stringify(responses, null, 2));
+        }
+        if (feature === 'settings-save') {
+          await driveSettingsSave({ page, state, health, result, step, capture, record, directory, writeGuard, allowConfigWrite });
         }
         if (feature === 'sessions') {
           await step('侧栏进入会话 1', () => openSession(1));
@@ -201,7 +234,9 @@ export async function driveFlows({ state, health, features, modulePath, channel 
         record({ phase: 'failed', error: error.message });
         try { await capture('failure'); } catch { /* Keep the other proof artifacts. */ }
       } finally {
-        result.network = network; result.pageErrors = errors; result.blockedWrites = blockedWrites;
+        writeGuard.journal.finalize();
+        result.postOutcomes = writeGuard.journal.entries;
+        result.network = network; result.authorizedWrites = authorizedWrites; result.pageErrors = errors; result.blockedWrites = blockedWrites;
         try { await context.tracing.stop({ path: path.join(directory, 'trace.zip') }); }
         catch (error) { result.status = 'failed'; result.traceError = error.message; }
         try { await context.close(); }

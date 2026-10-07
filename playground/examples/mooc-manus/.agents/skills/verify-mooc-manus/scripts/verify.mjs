@@ -5,7 +5,9 @@ import net from 'node:net';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { driveFlows, driverInfo } from './flows.mjs';
+import { requireConfigWriteAuthorization } from './config-write.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
 const evidenceRoot = path.join(repo, 'output/playwright/verify-mooc-manus');
@@ -126,8 +128,24 @@ async function doctor(state) {
     eligible: { settings: Boolean(ok && api.available && api.contract), sessions: ok, files: ok } };
 }
 
+export function viteLaunchCommand(root = repo, port = 4317) {
+  const cwd = path.join(root, 'apps/tanstack-app');
+  const manifestPath = path.join(cwd, 'package.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  const devScript = manifest.scripts?.dev;
+  const supported = typeof devScript === 'string' && devScript.trim().split(/\s+/).join(' ') === 'vite dev --port 3000';
+  if (!supported) throw new Error('Unsupported tanstack-app scripts.dev; expected "vite dev --port 3000". Update the verification launcher before driving this checkout.');
+  const require = createRequire(manifestPath);
+  let cli;
+  try { cli = path.join(path.dirname(require.resolve('vite/package.json')), 'bin/vite.js'); }
+  catch { throw new Error('Local Vite package unavailable; run just install in apps first'); }
+  if (!fs.existsSync(cli)) throw new Error('Local Vite JavaScript CLI unavailable; run just install in apps first');
+  return { bin: process.execPath, args: [cli, 'dev', '--host', '127.0.0.1', '--port', String(port), '--strictPort'], cwd, devScript };
+}
+
 async function launch(run, port, options) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Invalid port');
+  const launchCommand = viteLaunchCommand(repo, port);
   if (listeners(port).length) throw new Error(`Port ${port} is already owned by another instance`);
   if (fs.existsSync(evidenceRoot)) {
     for (const directory of fs.readdirSync(evidenceRoot)) {
@@ -144,16 +162,16 @@ async function launch(run, port, options) {
     probe.once('error', reject);
     probe.listen(port, '127.0.0.1', () => probe.close(resolve));
   });
-  for (const file of ['apps/generated/pkg/package.json', 'apps/generated/types/dist/app.js', 'apps/node_modules/.bin/vite']) {
+  for (const file of ['apps/generated/pkg/package.json', 'apps/generated/types/dist/app.js']) {
     if (!fs.existsSync(path.join(repo, file))) throw new Error(`Missing ${file}; run just install in apps first`);
   }
   if (fs.existsSync(run)) throw new Error('Choose a fresh evidence directory; existing evidence is retained');
   fs.mkdirSync(run, { recursive: true });
   const source = snapshot();
   json(path.join(run, 'working-tree.json'), source);
-  const args = ['--filter', 'tanstack-app', 'dev', '--host', '127.0.0.1', '--port', String(port), '--strictPort'];
   const log = fs.openSync(path.join(run, 'server.log'), 'a');
-  const child = spawn('pnpm', args, { cwd: path.join(repo, 'apps'), detached: true,
+  // Node owns the process group directly; pnpm 12 may detach its script shells.
+  const child = spawn(launchCommand.bin, launchCommand.args, { cwd: launchCommand.cwd, detached: true,
     env: { ...process.env, VITE_API_BASE_URL: '' }, stdio: ['ignore', log, log] });
   await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
   fs.closeSync(log);
@@ -161,7 +179,7 @@ async function launch(run, port, options) {
   const state = { schema: 'verify-mooc-manus/v1', repo, run, port, url: `http://127.0.0.1:${port}`,
     pid: child.pid, processIdentity: processIdentity(child.pid), source,
     driverOptions: { modulePath: options['playwright-module'], channel: options.channel },
-    command: ['pnpm', ...args], overrides: { VITE_API_BASE_URL: '' }, startedAt: new Date().toISOString() };
+    command: [launchCommand.bin, ...launchCommand.args], cwd: launchCommand.cwd, packageDevScript: launchCommand.devScript, overrides: { VITE_API_BASE_URL: '' }, startedAt: new Date().toISOString() };
   try {
     state.members = groupMembers(state.pid);
     json(path.join(run, 'instance.json'), state);
@@ -246,7 +264,7 @@ async function drive(state, features, options) {
   let result;
   try {
     result = await driveFlows({ state, health, features, modulePath: options['playwright-module'] ?? state.driverOptions.modulePath,
-      channel: options.channel ?? state.driverOptions.channel });
+      channel: options.channel ?? state.driverOptions.channel, allowConfigWrite: options['allow-config-write'] === 'true' });
   } finally {
     result = recordBuildConsistency(state.run, state.source.digest, snapshot(), result);
   }
@@ -263,13 +281,14 @@ async function main() {
     options[key.slice(2)] = args.shift();
   }
   if (!['run', 'launch', 'doctor', 'drive', 'cleanup'].includes(verb)) {
-    console.log('Usage: verify.mjs run|launch|doctor|drive|cleanup [--run output/playwright/verify-mooc-manus/ID] [--port 4317] [--features settings,sessions,files] [--playwright-module /path/to/playwright] [--channel chrome]');
+    console.log('Usage: verify.mjs run|launch|doctor|drive|cleanup [--run output/playwright/verify-mooc-manus/ID] [--port 4317] [--features settings,sessions,files|settings-save] [--allow-config-write true] [--playwright-module /path/to/playwright] [--channel chrome]');
     process.exit(verb === '--help' || !verb ? 0 : 1);
   }
   let state;
   try {
     const features = (options.features ?? 'settings,sessions,files').split(',');
-    if (!features.length || features.some(f => !['settings', 'sessions', 'files'].includes(f))) throw new Error('Unknown feature');
+    if (!features.length || features.some(f => !['settings', 'sessions', 'files', 'settings-save'].includes(f))) throw new Error('Unknown feature');
+    if (['launch', 'run', 'drive'].includes(verb)) requireConfigWriteAuthorization(features, options['allow-config-write'] === 'true');
     const run = resolveRunDirectory(options.run ?? path.join(evidenceRoot, new Date().toISOString().replace(/[:.]/g, '-') + '-' + randomUUID().slice(0, 8)));
     if (['doctor', 'drive', 'cleanup'].includes(verb) && !options.run) throw new Error('--run is required');
     if (verb === 'launch' || verb === 'run') state = await launch(run, Number(options.port ?? 4317), options);
