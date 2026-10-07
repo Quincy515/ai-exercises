@@ -22,6 +22,8 @@ export function applyFinalSafetyGate(result) {
     if (result.configCleanup) {
       result.configCleanup.decision = 'outcome-unknown';
       delete result.configCleanup.restored;
+      delete result.configCleanup.visibleListRestored;
+      if (Object.hasOwn(result.configCleanup, 'manualCleanupRequired')) result.configCleanup.manualCleanupRequired = true;
       result.cleanupError ??= 'POST outcome unknown after route handlers settled';
     }
   }

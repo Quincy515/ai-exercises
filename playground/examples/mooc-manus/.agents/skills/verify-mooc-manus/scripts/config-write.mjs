@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { allowedLlmWrite } from './llm-policy.mjs';
+import { allowedA2aWrite } from './a2a-policy.mjs';
 
 export const configKeys = ['max_iterations', 'max_retries', 'max_search_results'];
 export const configPath = '/api/app_configs/agent';
 
 export function requireConfigWriteAuthorization(features, permission) {
-  const writeFeature = features.find(feature => ['settings-save', 'llm-save'].includes(feature));
+  const writeFeature = features.find(feature => ['settings-save', 'llm-save', 'a2a-write'].includes(feature));
   if (writeFeature && permission !== true) {
     throw new Error(`${writeFeature} requires explicit --allow-config-write true for this launch/run/drive`);
   }
@@ -26,7 +27,8 @@ export function sameConfig(left, right) {
 }
 
 // The browser guard and exceptional cleanup share the exact endpoint/payload policy.
-export function allowedConfigWrite({ feature, allowConfigWrite, baseUrl, url, method, payload, expected }) {
+export function allowedConfigWrite({ feature, allowConfigWrite, baseUrl, url, method, payload, body, expected }) {
+  if (feature === 'a2a-write') return allowedA2aWrite({ feature, allowConfigWrite, baseUrl, url, method, payload, body, expected });
   if (feature === 'llm-save') return allowedLlmWrite({ feature, allowConfigWrite, baseUrl, url, method, payload, expected });
   return feature === 'settings-save' && allowConfigWrite === true && method === 'POST'
     && url === new URL(configPath, baseUrl).href && sameConfig(payload, expected);

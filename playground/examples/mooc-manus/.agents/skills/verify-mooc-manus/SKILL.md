@@ -1,6 +1,6 @@
 ---
 name: verify-mooc-manus
-description: 验证 MoocManus 的 Web 用户流程：Agent 与模型提供商配置读取刷新及显式授权的编辑保存、会话导航与计划展开、任务文件列表。需要复现界面行为、检查 Crux 接入或保存真实操作证据时使用；明确区分真实 API、演示 UI 和未实现功能。
+description: 验证 MoocManus 的 Web 用户流程：Agent 与模型提供商配置读取刷新及显式授权的编辑保存、A2A远程Agent增删启停、会话导航与计划展开、任务文件列表。需要复现界面行为、检查 Crux 接入或保存真实操作证据时使用；明确区分真实 API、演示 UI 和未实现功能。
 ---
 
 # Verify MoocManus
@@ -47,6 +47,15 @@ node .agents/skills/verify-mooc-manus/scripts/verify.mjs run --features llm-save
 
 LLM 写验证只发送四个普通字段并省略 `api_key`，临时改变 `max_tokens` 后恢复（包含 null）；每条选择 `llm-save` 的 launch/run/drive 都要求本次显式写授权。该流程仅访问本地配置 API，跨源请求被阻止。超出 JS 安全整数的 `max_tokens` 提前 blocked。
 
+A2A 验证独立选择：
+
+```sh
+node .agents/skills/verify-mooc-manus/scripts/verify.mjs run --features a2a --port 4317
+node .agents/skills/verify-mooc-manus/scripts/verify.mjs run --features a2a-write --allow-config-write true --port 4317
+```
+
+A2A 写流程先验证现有5150监听属于本机、本checkout的 `server-cli`；容器或归属未知时 blocked。它启动唯一 nonce 的 loopback Agent Card 夹具，只新增、启停和删除本次记录；原有项保持原样。创建仅一次，响应结果未知或卡片不可见时保存可恢复夹具证据，异常写清理由主代理接管。详见 [A2A 地图](features/a2a-settings.md)。
+
 需要分步操作时：
 
 ```sh
@@ -74,10 +83,11 @@ Electron 的现有启动命令为 `pnpm --filter electron-app start`（在 `apps
 
 - [Agent 配置](features/agent-settings.md)：四个共享布局入口的真实 GET、刷新、可编辑字段和未修改时禁用保存；显式 `settings-save` 另验首页真实保存与恢复。
 - [模型提供商](features/llm-settings.md)：`llm` 四入口安全读取刷新；`llm-save` 首页修改普通字段并恢复，始终保留原密钥。
+- [A2A 远程Agent](features/a2a-settings.md)：`a2a` 四入口读取；`a2a-write` 首页新增本次本地Card、停用、启用、删除与可见列表核对。
 - [会话与计划](features/session-plan.md)：侧栏、深链接刷新、计划展开收起与返回首页。
 - [任务文件](features/task-files.md)：Header 文件按钮、六项列表与关闭恢复。
 
-每个流程使用新 browser context，1280×900，临时浏览器资料由 Playwright 管理。仅使用页面导航、ARIA 控件、用户点击与 DOM 读取；不调用 Core 内部方法或设置组件状态。默认流程中的 `/api/` 写请求会被阻止并判失败，GET 请求真实发送。显式 `settings-save` 仅允许同源精确 `POST /api/app_configs/agent`，请求体须为符合范围且等于本次预期值的三个整数；一次点击授权一次写入。获准 POST 由浏览器 route 层调用真实后端，`route.fetch({ maxRedirects: 0, maxRetries: 0, timeout: 10000 })` 获取真实响应；3xx 记录 outcome-unknown 并中止，其他响应通过 `route.fulfill({ response })` 保留原始状态、响应头与内容。该传输路径使用真实后端，结果仍为 `mocks: false`，报告另注明 `configWriteTransport`。默认 Agent GET 流程继续直接发送；异常补偿也使用相同权限与禁止跳转策略。LLM 流程的全部 GET/HEAD（包含页面和静态资产）也通过 `route.fetch` 获取真实响应，关闭跳转和重试，3xx 拒绝后记录脱敏 blocked 信息；传输失败仅记录固定安全原因。各 LLM 结果的 `readTransport` 明确这一验证传输方式。仅在 LLM 验证环境中，同源 `GET /__tsd/console-pipe/sse` 被精确中止并记录到 `ignoredDevRequests`（`devtools stream excluded`）；这个开发工具辅助流保持零上游请求，其他路径和业务请求继续严格检查。
+每个流程使用新 browser context，1280×900，临时浏览器资料由 Playwright 管理。仅使用页面导航、ARIA 控件、用户点击与 DOM 读取；不调用 Core 内部方法或设置组件状态。默认流程中的 `/api/` 写请求会被阻止并判失败，GET 请求真实发送。显式 `settings-save` 仅允许同源精确 `POST /api/app_configs/agent`，请求体须为符合范围且等于本次预期值的三个整数；一次点击授权一次写入。获准 POST 由浏览器 route 层调用真实后端，`route.fetch({ maxRedirects: 0, maxRetries: 0, timeout: 10000 })` 获取真实响应；3xx 记录 outcome-unknown 并中止，其他响应通过 `route.fulfill({ response })` 保留原始状态、响应头与内容。该传输路径使用真实后端，结果仍为 `mocks: false`，报告另注明 `configWriteTransport`。默认 Agent GET 流程继续直接发送；异常补偿也使用相同权限与禁止跳转策略。LLM/A2A 流程的全部 GET/HEAD（包含页面和静态资产）也通过 `route.fetch` 获取真实响应，关闭跳转和重试，3xx 拒绝后记录脱敏 blocked 信息；传输失败仅记录固定安全原因。各 LLM/A2A 结果的 `readTransport` 明确这一验证传输方式。仅在 LLM/A2A 验证环境中，同源 `GET /__tsd/console-pipe/sse` 被精确中止并记录到 `ignoredDevRequests`（`devtools stream excluded`）；这个开发工具辅助流保持零上游请求，其他路径和业务请求继续严格检查。
 
 Playwright 优先使用 `MOOC_PLAYWRIGHT_MODULE`、项目已有安装或当前用户的 gstack 安装。当前主机可用 `~/.agents/skills/gstack/node_modules/playwright`；默认 Chrome channel。也可显式指定：
 
@@ -98,11 +108,12 @@ node .agents/skills/verify-mooc-manus/scripts/verify.mjs run --features sessions
 - `settings-save/original-config.json`、`api-responses.json`、`config-cleanup.json`：写入前原值/目标、真实读写响应与配置恢复结果。
 - `settings-save/post-outcomes.json`：每个获准 POST 的请求体、时间、HTTP 状态和完整响应终态；超时/断网保留 `outcome-unknown`，迟到响应另外记录。
 - LLM 流程保存 `llm/` 或 `llm-save/` 下的白名单响应、四字段 UI JSON 与遮罩截图；关闭原始网络 trace 和完整 ARIA。LLM 原值、POST 终态及恢复结果使用相同文件名，`api_key` 永远省略。
+- `a2a-write/fixture.json`、`fixture-lifecycle.jsonl`、`fixture-requests.jsonl`、`baseline-visible-list.json`、`owned-record.json`：本次可重启Card、夹具归属、唯一owned ID和公开列表；异常时参照结果中的 `recoveryCommand`，保持Create仅一次。
 - `cleanup.json`：进程已停、端口释放、证据文件仍存在；配置恢复单独检查 `config-cleanup.json`。
 
 证明必须同时包含操作与结果。截图将有限过渡动画推进到结束状态，保留清晰、稳定的页面证据。配置值与本次浏览器 GET 响应比对；只读流程报告观测到的请求及写请求 guard，不声称检查了数据库全量状态。会话和文件是内置演示数据，点击路由/计划/Dialog 的通过仅证明真实 UI 交互。写流程保存后关闭重开设置，用新的 GET 核对持久化，再经 UI 恢复原值。`settings-save` 的通过限于首页保存路径，其他三个保存入口和 Electron 单独列为未验证。
 
-Mock 只在明确的外部系统边界且单独标记的故障测试中使用；当前默认流程 `mocks: false`。后端不可用的 blocked、未接通的聊天/下载、未测的 Electron 或移动视口，都不能由其他成功入口代替。
+Mock 只在明确的外部系统边界且单独标记的故障测试中使用；当前默认流程 `mocks: false`。选择 `a2a-write` 时报告 `mocks: true` 和 `mockScope`，只表示外部 Agent Card 为本地受控夹具；真实业务HTTP仍发送至现有5150后端，原有流程保持 `mocks: false`。后端不可用的 blocked、未接通的聊天/下载、未测的 Electron 或移动视口，都不能由其他成功入口代替。
 
 ## Cleanup
 
@@ -122,6 +133,10 @@ Mock 只在明确的外部系统边界且单独标记的故障测试中使用；
 - `scripts/settings-save.mjs`：受控真实保存、关闭重开验证、通过 UI 恢复及异常补偿；通过上述 `run/drive --features settings-save --allow-config-write true` 调用。
 - `scripts/verify.test.mjs`：验证配置指纹、证据一致失效、run 路径限制，以及本地 Vite 启动命令契约、缺授权拒绝、写请求护栏、第三方值保护、迟到提交及网络结果未知时的恢复边界、LLM 密钥字段拒绝、响应白名单、安全整数与 null 恢复；使用临时目录，无需应用或后端。执行 `node --test .agents/skills/verify-mooc-manus/scripts/verify.test.mjs`。
 
+- `scripts/a2a-policy.mjs`：A2A 公共列表、唯一所有权与受限写入策略。
+- `scripts/a2a-flows.mjs`：A2A 读取/新增/启停/删除；通过上文 a2a/a2a-write 命令调用。
+- `scripts/a2a-card-fixture.mjs`：本机后端检查和只读Agent Card；恢复命令为 `node .agents/skills/verify-mooc-manus/scripts/a2a-card-fixture.mjs serve --fixture /absolute/run/a2a-write/fixture.json`。
+- `scripts/a2a.test.mjs`：A2A 纯策略/授权/未知恢复与临时本地Card测试；执行 `node --test .agents/skills/verify-mooc-manus/scripts/a2a.test.mjs`，保持真实5150后端原样。
 - `scripts/llm-policy.mjs`：LLM 响应白名单、四字段无密钥写护栏、安全整数检查、温度 f32 数值比较和恢复比较。
 - `scripts/route-lifecycle.mjs`：跟踪 route Promise、等待清理期间回调结束并最终判定结果，由总流程调用。
 - `scripts/llm-transport.mjs`：LLM GET/HEAD 的真实响应转发、禁止重定向、精确排除本地开发 SSE 和固定安全错误记录，由 llm/llm-save 流程调用。

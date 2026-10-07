@@ -2,7 +2,7 @@
 
 // LLM reads include module/static asset requests. A browser redirect on any of
 // them could escape the same-origin guard, so forward real responses explicitly.
-export async function forwardLlmRead(route, blocked) {
+export async function forwardLlmRead(route, blocked, scope = 'LLM') {
   const request = route.request();
   const requested = new URL(request.url());
   const safe = { method: request.method(), url: requested.origin + requested.pathname };
@@ -11,18 +11,18 @@ export async function forwardLlmRead(route, blocked) {
     try { await route.abort('blockedbyclient'); } catch { /* The request may already have closed. */ }
   };
   if (!['GET', 'HEAD'].includes(request.method())) {
-    await reject('LLM read transport accepts only GET/HEAD');
+    await reject(`${scope} read transport accepts only GET/HEAD`);
     return;
   }
   try {
     const response = await route.fetch({ maxRedirects: 0, maxRetries: 0, timeout: 10000 });
     if (response.status() >= 300 && response.status() < 400) {
-      await reject('LLM read redirect blocked', response.status());
+      await reject(`${scope} read redirect blocked`, response.status());
       return;
     }
     await route.fulfill({ response });
   } catch {
-    await reject('LLM read transport failed');
+    await reject(`${scope} read transport failed`);
   }
 }
 

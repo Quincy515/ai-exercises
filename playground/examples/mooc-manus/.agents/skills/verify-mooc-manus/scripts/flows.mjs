@@ -7,6 +7,8 @@ import { createRequire } from 'node:module';
 import { allowedConfigWrite, ConfigWriteJournal, forwardAuthorizedConfigWrite, requireConfigWriteAuthorization } from './config-write.mjs';
 import { driveSettingsSave } from './settings-save.mjs';
 import { driveLlm } from './llm-flows.mjs';
+import { driveA2a } from './a2a-flows.mjs';
+import { a2aPath } from './a2a-policy.mjs';
 import { llmFields } from './llm-policy.mjs';
 import { excludeLlmDevStream, forwardLlmRead } from './llm-transport.mjs';
 import { applyFinalSafetyGate, settleRouteHandlers, trackRouteHandler } from './route-lifecycle.mjs';
@@ -37,7 +39,8 @@ export async function driveFlows({ state, health, features, modulePath, channel,
   const report = { startedAt: new Date().toISOString(), head: state.source.head,
     workingTreeDigest: state.source.digest, surface: 'Web', url: state.url,
     driver: { entry: driver.entry, version: driver.version, channel: driver.channel },
-    mocks: false, apiWriteGuard: true, configWriteOptIn: allowConfigWrite,
+    mocks: features.includes('a2a-write'),
+    ...(features.includes('a2a-write') ? { mockScope: 'Local controlled Agent Card only; business backend HTTP and UI remain real' } : {}), apiWriteGuard: true, configWriteOptIn: allowConfigWrite,
     configWriteTransport: 'real backend via Playwright route.fetch; redirects and retries disabled', features: [] };
   let browser;
   let currentFeature;
@@ -46,6 +49,8 @@ export async function driveFlows({ state, health, features, modulePath, channel,
     for (const feature of features) {
       currentFeature = feature;
       const isLlm = ['llm', 'llm-save'].includes(feature);
+      const isA2a = ['a2a', 'a2a-write'].includes(feature);
+      const guardedConfig = isLlm || isA2a;
       const directory = path.join(state.run, feature);
       fs.mkdirSync(directory);
       const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, serviceWorkers: 'block' });
@@ -57,10 +62,10 @@ export async function driveFlows({ state, health, features, modulePath, channel,
       const writeGuard = { expected: null, attempts: 0, requests: new Map() };
       writeGuard.journal = new ConfigWriteJournal(entries => fs.writeFileSync(
         path.join(directory, 'post-outcomes.json'), JSON.stringify(entries, null, 2) + '\n'),
-      isLlm ? reason => String(reason).split('\n')[0] : undefined);
+      guardedConfig ? reason => String(reason).split('\n')[0] : undefined);
       let sequence = 0;
-      const result = { id: feature, status: 'passed', boundary: ['settings', 'settings-save', 'llm', 'llm-save'].includes(feature) ? 'live API + Rust/WASM + UI' : 'built-in demo data + real UI interactions',
-        entrypointsCovered: [], checks: [], ...(isLlm ? { readTransport: 'real backend via Playwright route.fetch for all GET/HEAD; redirects and retries disabled', tracePolicy: 'disabled: raw LLM network bodies excluded; whitelist JSON and masked screenshots retained' } : {}) };
+      const result = { id: feature, status: 'passed', boundary: ['settings', 'settings-save', 'llm', 'llm-save', 'a2a', 'a2a-write'].includes(feature) ? 'live API + Rust/WASM + UI' : 'built-in demo data + real UI interactions',
+        entrypointsCovered: [], checks: [], ...(guardedConfig ? { readTransport: 'real backend via Playwright route.fetch for all GET/HEAD; redirects and retries disabled' } : {}), ...(isLlm ? { tracePolicy: 'disabled: raw LLM network bodies excluded; whitelist JSON and masked screenshots retained' } : {}) };
       const record = item => fs.appendFileSync(path.join(directory, 'actions.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...item }) + '\n');
       const step = async (action, fn) => {
         record({ action, phase: 'begin' });
@@ -98,7 +103,7 @@ export async function driveFlows({ state, health, features, modulePath, channel,
         await page.getByRole('region', { name: '会话任务详情' }).waitFor();
         assert.equal(await button(name).getAttribute('aria-current'), 'page');
       };
-      page.on('pageerror', error => errors.push(isLlm ? 'LLM page script error; raw detail excluded from evidence' : error.message));
+      page.on('pageerror', error => errors.push(guardedConfig ? 'Configuration page script error; raw detail excluded from evidence' : error.message));
       page.on('requestfinished', request => {
         const entry = writeGuard.requests.get(request);
         if (entry) writeGuard.journal.complete(entry);
@@ -110,22 +115,24 @@ export async function driveFlows({ state, health, features, modulePath, channel,
       page.on('response', response => {
         const entry = writeGuard.requests.get(response.request());
         if (entry) writeGuard.journal.headers(entry, response.status());
-        if (new URL(response.url()).pathname.startsWith('/api/')) network.push({ url: isLlm ? new URL(response.url()).origin + new URL(response.url()).pathname : response.url(), status: response.status(), method: response.request().method() });
+        if (new URL(response.url()).pathname.startsWith('/api/')) network.push({ url: guardedConfig ? new URL(response.url()).origin + new URL(response.url()).pathname : response.url(), status: response.status(), method: response.request().method() });
       });
-      await page.route(isLlm ? '**/*' : '**/api/**', route => trackRouteHandler(pendingRoutes, async () => {
+      await page.route(guardedConfig ? '**/*' : '**/api/**', route => trackRouteHandler(pendingRoutes, async () => {
         const requested = new URL(route.request().url());
-        if (isLlm && (requested.origin !== new URL(state.url).origin
-          || (requested.pathname.startsWith('/api/') && !['/api/app_configs/agent', '/api/app_configs/llm'].includes(requested.pathname)))) {
-          blockedWrites.push({ method: route.request().method(), url: requested.origin + requested.pathname, reason: 'LLM verification permits only local configuration APIs' });
+        const allowedApi = ['/api/app_configs/agent', ...(isLlm ? ['/api/app_configs/llm'] : []), ...(isA2a ? [a2aPath] : [])].includes(requested.pathname)
+          || (isA2a && new RegExp(`^${a2aPath}/[0-9a-f-]+/(enabled|delete)$`, 'i').test(requested.pathname));
+        if (guardedConfig && (requested.origin !== new URL(state.url).origin
+          || (requested.pathname.startsWith('/api/') && !allowedApi))) {
+          blockedWrites.push({ method: route.request().method(), url: requested.origin + requested.pathname, reason: 'Configuration verification permits only local configuration APIs' });
           await route.abort('blockedbyclient'); return;
         }
-        if (isLlm && await excludeLlmDevStream(route, state.url, ignoredDevRequests)) return;
+        if (guardedConfig && await excludeLlmDevStream(route, state.url, ignoredDevRequests)) return;
         if (!['GET', 'HEAD'].includes(route.request().method())) {
           writeGuard.attempts++;
           let payload;
           try { payload = route.request().postDataJSON(); } catch { /* Non-JSON writes fail closed. */ }
           if (allowedConfigWrite({ feature, allowConfigWrite, baseUrl: state.url,
-            url: route.request().url(), method: route.request().method(), payload, expected: writeGuard.expected })) {
+            url: route.request().url(), method: route.request().method(), payload, body: route.request().postData(), expected: writeGuard.expected })) {
             writeGuard.expected = null; // A UI save authorizes exactly one request.
             const entry = writeGuard.journal.begin({ url: route.request().url(), payload });
             writeGuard.requests.set(route.request(), entry);
@@ -134,11 +141,11 @@ export async function driveFlows({ state, health, features, modulePath, channel,
             await forwardAuthorizedConfigWrite(route, writeGuard.journal, entry);
             return;
           }
-          blockedWrites.push({ method: route.request().method(), url: isLlm ? requested.origin + requested.pathname : route.request().url() });
+          blockedWrites.push({ method: route.request().method(), url: guardedConfig ? requested.origin + requested.pathname : route.request().url() });
           await route.abort('blockedbyclient');
-        } else if (isLlm) await forwardLlmRead(route, blockedWrites);
+        } else if (guardedConfig) await forwardLlmRead(route, blockedWrites, isA2a ? 'A2A' : 'LLM');
         else await route.continue();
-      }, error => errors.push(isLlm ? 'LLM route handler failed; raw detail excluded from evidence' : error.message)));
+      }, error => errors.push(guardedConfig ? 'Configuration route handler failed; raw detail excluded from evidence' : error.message)));
       try {
         await step('打开首页', () => goto('/'));
         await capture('before');
@@ -193,6 +200,9 @@ export async function driveFlows({ state, health, features, modulePath, channel,
         }
         if (isLlm) {
           await driveLlm({ feature, page, state, health, result, step, capture, record, directory, writeGuard, allowConfigWrite, goto });
+        }
+        if (isA2a) {
+          await driveA2a({ feature, page, state, health, result, step, capture, record, directory, writeGuard, allowConfigWrite, goto });
         }
         if (feature === 'sessions') {
           await step('侧栏进入会话 1', () => openSession(1));
@@ -253,8 +263,8 @@ export async function driveFlows({ state, health, features, modulePath, channel,
         assert.deepEqual(blockedWrites, [], 'Unexpected blocked request; feature map may be outdated');
         assert.deepEqual(errors, [], 'Unexpected page script errors');
       } catch (error) {
-        result.status = 'failed'; result.reason = isLlm ? error.message.split('\n')[0] : error.stack;
-        record({ phase: 'failed', error: isLlm ? error.message.split('\n')[0] : error.message });
+        result.status = 'failed'; result.reason = guardedConfig ? error.message.split('\n')[0] : error.stack;
+        record({ phase: 'failed', error: guardedConfig ? error.message.split('\n')[0] : error.message });
         try { await capture('failure'); } catch { /* Keep the other proof artifacts. */ }
       } finally {
         try { if (!isLlm) await context.tracing.stop({ path: path.join(directory, 'trace.zip') }); }
