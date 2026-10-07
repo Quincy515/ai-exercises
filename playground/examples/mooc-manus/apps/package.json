@@ -1,7 +1,7 @@
 {
   "name": "apps",
   "private": true,
-  "packageManager": "pnpm@12.4.2",
+  "packageManager": "pnpm@12.9.1",
   "scripts": {
     "build:shared": "just build-shared",
     "prepare:shared": "just install",
