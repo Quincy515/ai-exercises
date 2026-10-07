@@ -36,7 +36,7 @@ pub struct Count {
     pub(crate) updated_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Facet, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Facet, Serialize, Deserialize, Debug, PartialEq)]
 #[repr(C)]
 pub enum Event {
     None,

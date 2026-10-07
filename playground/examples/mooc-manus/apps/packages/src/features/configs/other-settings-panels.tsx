@@ -1,6 +1,7 @@
-// 其他配置面板保留课程展示，API 按后续业务接入。
+// A2A/MCP 面板保留课程展示，API 按后续业务接入。
 import { LayoutList, Trash, Wrench } from "lucide-react";
 import { Button } from "../../components/ui/button";
+import { Input } from "../../components/ui/input";
 import {
   Dialog,
   DialogTrigger,
@@ -15,12 +16,9 @@ import {
   Field,
   FieldDescription,
   FieldGroup,
-  FieldLabel,
   FieldLegend,
   FieldSet,
 } from "../../components/ui/field";
-import { Kbd } from "../../components/ui/kbd";
-import { Input } from "../../components/ui/input";
 import {
   Item,
   ItemContent,
@@ -31,107 +29,6 @@ import {
 import { Badge } from "../../components/ui/badge";
 import { Switch } from "../../components/ui/switch";
 import { Textarea } from "../../components/ui/textarea";
-
-export function LLMSetting() {
-  return (
-    <form className="w-full px-1" onSubmit={(event) => event.preventDefault()}>
-      <FieldGroup>
-        <FieldSet>
-          {/* 顶部表单标题 */}
-          <FieldLegend className="font-bold text-gray-700 data-[variant=legend]:text-lg">
-            模型提供商
-          </FieldLegend>
-          <FieldDescription className="text-sm">
-            配置Agent使用的基础LLM模型(兼容OpenAI格式)
-          </FieldDescription>
-          {/* 中间表单内容 */}
-          <FieldGroup>
-            <Field>
-              <FieldLabel className="flex-wrap" htmlFor="base_url">
-                提供商基础地址
-                <Kbd>base_url</Kbd>
-              </FieldLabel>
-              <Input
-                id="base_url"
-                type="url"
-                placeholder="请填写LLM基础URL地址, 不带/"
-                defaultValue="https://api.deepseek.com"
-                required
-              />
-              <FieldDescription className="text-xs">
-                请填写模型提供商的基础 url 地址, 需兼容 OpenAI 格式
-              </FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel className="flex-wrap" htmlFor="api_key">
-                提供商秘钥
-                <Kbd>api_key</Kbd>
-              </FieldLabel>
-              <Input
-                id="api_key"
-                type="text"
-                placeholder="请填写提供商API秘钥"
-                required
-              />
-              <FieldDescription className="text-xs">
-                请填写模型提供商秘钥信息
-              </FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel className="flex-wrap" htmlFor="model_name">
-                模型名
-                <Kbd>model_name</Kbd>
-              </FieldLabel>
-              <Input
-                id="model_name"
-                type="text"
-                placeholder="请填写需要使用的模型名字"
-                required
-              />
-              <FieldDescription className="text-xs">
-                请填写 MoocManus 调用的模型名字,
-                模型必须支持工具调用、图像识别等功能。
-              </FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel className="flex-wrap" htmlFor="temperature">
-                温度
-                <Kbd>temperature</Kbd>
-              </FieldLabel>
-              <Input
-                id="temperature"
-                type="number"
-                placeholder="请填写模型温度信息"
-                defaultValue={0.7}
-                required
-              />
-              <FieldDescription className="text-xs">
-                温度越低, 模型输出内容越确定, 创意性越差, 默认配置0.7
-              </FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel className="flex-wrap" htmlFor="max_tokens">
-                最大输出token数
-                <Kbd>max_tokens</Kbd>
-              </FieldLabel>
-              <Input
-                id="max_tokens"
-                type="number"
-                placeholder="请填写模型最大输出token数"
-                defaultValue={8192}
-                min={0}
-                required
-              />
-              <FieldDescription className="text-xs">
-                设置模型的最大输出token数
-              </FieldDescription>
-            </Field>
-          </FieldGroup>
-        </FieldSet>
-      </FieldGroup>
-    </form>
-  );
-}
 
 export function A2ASetting() {
   return (

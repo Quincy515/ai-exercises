@@ -115,15 +115,7 @@ export class Core {
         const result = await http(effect.value, {
           signal: this.controller.signal,
         });
-        if (result.kind === "Err") {
-          this.report(
-            new Error(
-              result.value.kind === "Timeout"
-                ? "HTTP request cancelled or timed out"
-                : result.value.value,
-            ),
-          );
-        }
+        // 传输失败同样回到请求所属模块，避免污染共享 Core 的其他业务状态。
         this.respond(id, result, serializeHttpResult);
         return;
       }

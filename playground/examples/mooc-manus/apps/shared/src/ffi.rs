@@ -176,7 +176,10 @@ mod tests {
     use crux_time::{Instant, TimeRequest, TimeResponse};
 
     use super::{CoreFfi, CruxShell};
-    use crate::{AgentConfigField, ConfigsEvent, Event, ViewModel, effects::EffectFfi};
+    use crate::{
+        AgentConfigEvent, AgentConfigField, ConfigsEvent, Event, LlmConfigEvent, LlmConfigField,
+        ViewModel, effects::EffectFfi,
+    };
 
     struct RecordingShell(mpsc::Sender<Vec<u8>>);
 
@@ -242,9 +245,9 @@ mod tests {
     fn native_configs_event_resolves_through_the_nested_model() {
         let (tx, rx) = mpsc::channel();
         let core = CoreFfi::new(Arc::new(RecordingShell(tx)));
-        let event = Event::Configs(ConfigsEvent::GetAgentConfig {
+        let event = Event::Configs(ConfigsEvent::Agent(AgentConfigEvent::Get {
             base_url: "http://localhost:5150".to_string(),
-        });
+        }));
 
         assert!(core.update(&encode(&event)).is_empty());
         assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
@@ -266,19 +269,19 @@ mod tests {
         assert_eq!(view.agent_config.data.unwrap().max_iterations, 20);
         assert_eq!(view.text, "0 (pending)");
 
-        let edit = Event::Configs(ConfigsEvent::EditAgentConfig {
+        let edit = Event::Configs(ConfigsEvent::Agent(AgentConfigEvent::Edit {
             field: AgentConfigField::MaxIterations,
             value: "30".to_string(),
-        });
+        }));
         assert!(core.update(&encode(&edit)).is_empty());
         assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
         let view: ViewModel = BincodeFfiFormat::deserialize(&core.view()).unwrap();
         assert_eq!(view.agent_config.draft.max_iterations, "30");
         assert!(view.agent_config.dirty && view.agent_config.can_save);
 
-        let save = Event::Configs(ConfigsEvent::SaveAgentConfig {
+        let save = Event::Configs(ConfigsEvent::Agent(AgentConfigEvent::Save {
             base_url: "http://localhost:5150".to_string(),
-        });
+        }));
         assert!(core.update(&encode(&save)).is_empty());
         assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
         let request = receive(&rx);
@@ -300,5 +303,66 @@ mod tests {
         assert!(view.agent_config.saved);
         assert!(!view.agent_config.saving && !view.agent_config.dirty);
         assert_eq!(view.agent_config.data.unwrap().max_iterations, 30);
+    }
+
+    #[test]
+    fn native_llm_roundtrip_keeps_the_key_out_of_view_bytes() {
+        let (tx, rx) = mpsc::channel();
+        let core = CoreFfi::new(Arc::new(RecordingShell(tx)));
+        let event = Event::Configs(ConfigsEvent::Llm(LlmConfigEvent::Get {
+            base_url: "http://localhost:5150".to_string(),
+        }));
+        assert!(core.update(&encode(&event)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let request = receive(&rx);
+        let response = HttpResult::Ok(
+            HttpResponse::ok()
+                .body(r#"{"base_url":null,"model_name":null,"temperature":null,"max_tokens":null,"api_key_configured":false}"#)
+                .build(),
+        );
+        assert!(core.resolve(request.id.0, &encode(&response)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let secret = "ffi-test-only-key";
+        let edit = Event::Configs(ConfigsEvent::Llm(LlmConfigEvent::Edit {
+            field: LlmConfigField::ApiKey,
+            value: secret.to_string(),
+        }));
+        assert!(core.update(&encode(&edit)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let bytes = core.view();
+        assert!(
+            !bytes
+                .windows(secret.len())
+                .any(|part| part == secret.as_bytes())
+        );
+        let view: ViewModel = BincodeFfiFormat::deserialize(&bytes).unwrap();
+        assert!(view.llm_config.api_key_changed && view.llm_config.can_save);
+        assert_eq!(view.llm_config.draft, crate::LlmConfigDraft::default());
+
+        let save = Event::Configs(ConfigsEvent::Llm(LlmConfigEvent::Save {
+            base_url: "http://localhost:5150".to_string(),
+        }));
+        assert!(core.update(&encode(&save)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let request = receive(&rx);
+        let EffectFfi::Http(http) = request.effect else {
+            panic!("expected an LLM save HTTP request");
+        };
+        assert_eq!(http.method, "POST");
+        let body: serde_json::Value = serde_json::from_slice(&http.body).unwrap();
+        assert_eq!(body["api_key"], secret);
+        let response = HttpResult::Ok(
+            HttpResponse::ok()
+                .body(r#"{"api_key_configured":true,"max_tokens":9223372036854775807}"#)
+                .build(),
+        );
+        assert!(core.resolve(request.id.0, &encode(&response)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let view: ViewModel = BincodeFfiFormat::deserialize(&core.view()).unwrap();
+        assert!(view.llm_config.saved && !view.llm_config.api_key_changed);
+        assert_eq!(
+            view.llm_config.data.unwrap().max_tokens,
+            Some(i64::MAX as u64)
+        );
     }
 }

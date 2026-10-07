@@ -1,14 +1,25 @@
 import {
   eventConfigs,
-  configsEventGetAgentConfig,
-  configsEventEditAgentConfig,
-  configsEventResetAgentConfig,
-  configsEventSaveAgentConfig,
+  configsEventAgent,
+  configsEventLlm,
+  agentConfigEventGet,
+  agentConfigEventEdit,
+  agentConfigEventReset,
+  agentConfigEventSave,
   agentConfigFieldMaxIterations,
   agentConfigFieldMaxRetries,
   agentConfigFieldMaxSearchResults,
+  llmConfigEventGet,
+  llmConfigEventEdit,
+  llmConfigEventReset,
+  llmConfigEventSave,
+  llmConfigFieldBaseUrl,
+  llmConfigFieldApiKey,
+  llmConfigFieldModelName,
+  llmConfigFieldTemperature,
+  llmConfigFieldMaxTokens,
 } from "shared_types/app.js";
-import type { AgentConfigField } from "shared_types/app.js";
+import type { AgentConfigField, LlmConfigField } from "shared_types/app.js";
 
 export const agentConfigFields = {
   max_iterations: agentConfigFieldMaxIterations(),
@@ -16,13 +27,32 @@ export const agentConfigFields = {
   max_search_results: agentConfigFieldMaxSearchResults(),
 } as const;
 
-// 模块事件包装只负责连接生成类型，业务校验与状态更新留在 Rust。
+export const llmConfigFields = {
+  base_url: llmConfigFieldBaseUrl(),
+  api_key: llmConfigFieldApiKey(),
+  model_name: llmConfigFieldModelName(),
+  temperature: llmConfigFieldTemperature(),
+  max_tokens: llmConfigFieldMaxTokens(),
+} as const;
+
+// 事件包装只连接生成类型；请求、校验与状态更新留在 Rust 子模块。
 export const configEvents = {
   GetAgentConfig: (baseUrl: string) =>
-    eventConfigs(configsEventGetAgentConfig(baseUrl)),
+    eventConfigs(configsEventAgent(agentConfigEventGet(baseUrl))),
   EditAgentConfig: (field: AgentConfigField, value: string) =>
-    eventConfigs(configsEventEditAgentConfig(field, value)),
-  ResetAgentConfig: () => eventConfigs(configsEventResetAgentConfig()),
+    eventConfigs(configsEventAgent(agentConfigEventEdit(field, value))),
+  ResetAgentConfig: () =>
+    eventConfigs(configsEventAgent(agentConfigEventReset())),
   SaveAgentConfig: (baseUrl: string) =>
-    eventConfigs(configsEventSaveAgentConfig(baseUrl)),
+    eventConfigs(configsEventAgent(agentConfigEventSave(baseUrl))),
+} as const;
+
+export const llmConfigEvents = {
+  Get: (baseUrl: string) =>
+    eventConfigs(configsEventLlm(llmConfigEventGet(baseUrl))),
+  Edit: (field: LlmConfigField, value: string) =>
+    eventConfigs(configsEventLlm(llmConfigEventEdit(field, value))),
+  Reset: () => eventConfigs(configsEventLlm(llmConfigEventReset())),
+  Save: (baseUrl: string) =>
+    eventConfigs(configsEventLlm(llmConfigEventSave(baseUrl))),
 } as const;

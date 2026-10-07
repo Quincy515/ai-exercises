@@ -13,8 +13,9 @@ import {
 } from "../../components/ui/dialog";
 import { Separator } from "../../components/ui/separator";
 import { AGENT_CONFIG_FORM_ID, AgentConfigPanel } from "./agent-config-panel";
-import { A2ASetting, LLMSetting, MCPSetting } from "./other-settings-panels";
-import { useAgentConfig } from "./use-agent-config";
+import { A2ASetting, MCPSetting } from "./other-settings-panels";
+import { useConfigs } from "./use-configs";
+import { LLM_CONFIG_FORM_ID, LlmConfigPanel } from "./llm-config-panel";
 
 const menus = [
   { key: "common-setting", icon: Settings, title: "通用配置" },
@@ -33,11 +34,13 @@ function SettingsContent({
   onSelect: (key: SettingKey) => void;
   onSavingChange: (saving: boolean) => void;
 }) {
-  const config = useAgentConfig(active === "common-setting");
+  const configs = useConfigs(active);
+  const config = active === "llm-setting" ? configs.llm : configs.agent;
+  const saving = configs.agent.saving || configs.llm.saving;
   useLayoutEffect(() => {
-    onSavingChange(config.saving);
+    onSavingChange(saving);
     return () => onSavingChange(false);
-  }, [config.saving, onSavingChange]);
+  }, [saving, onSavingChange]);
 
   return (
     <>
@@ -56,7 +59,7 @@ function SettingsContent({
                 variant={active === menu.key ? "default" : "ghost"}
                 className="cursor-pointer justify-start"
                 aria-pressed={active === menu.key}
-                disabled={config.saving}
+                disabled={saving}
                 onClick={() => onSelect(menu.key)}
               >
                 <menu.icon data-icon="inline-start" />
@@ -67,28 +70,34 @@ function SettingsContent({
         </div>
         <Separator orientation="vertical" className="hidden sm:block" />
         <div className="scrollbar-hide h-[500px] max-h-full min-h-0 min-w-0 flex-1 overflow-y-auto wrap-break-word">
-          {active === "common-setting" && <AgentConfigPanel config={config} />}
-          {active === "llm-setting" && <LLMSetting />}
+          {active === "common-setting" && (
+            <AgentConfigPanel config={configs.agent} />
+          )}
+          {active === "llm-setting" && <LlmConfigPanel config={configs.llm} />}
           {active === "a2a-setting" && <A2ASetting />}
           {active === "mcp-setting" && <MCPSetting />}
         </div>
       </div>
       <DialogFooter className="mx-0 mb-0 bg-transparent p-0 pt-4">
         <DialogClose
-          disabled={config.saving}
+          disabled={saving}
           render={<Button variant="outline" className="cursor-pointer" />}
         >
           取消
         </DialogClose>
         <Button
           type="submit"
-          form={AGENT_CONFIG_FORM_ID}
+          form={
+            active === "llm-setting" ? LLM_CONFIG_FORM_ID : AGENT_CONFIG_FORM_ID
+          }
           className="cursor-pointer"
           disabled={
-            active !== "common-setting" || !config.ready || !config.canSave
+            (active !== "common-setting" && active !== "llm-setting") ||
+            !config.ready ||
+            !config.canSave
           }
         >
-          {config.saving ? "保存中…" : "保存"}
+          {saving ? "保存中…" : "保存"}
         </Button>
       </DialogFooter>
     </>

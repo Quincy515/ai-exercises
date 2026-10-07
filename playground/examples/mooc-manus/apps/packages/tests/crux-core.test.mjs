@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate as nextTurn } from "node:timers/promises";
-import { AgentConfigDraft, AgentConfigViewModel } from "shared_types/app.js";
+import {
+  AgentConfigDraft,
+  AgentConfigViewModel,
+  LlmConfigDraft,
+  LlmConfigViewModel,
+} from "shared_types/app.js";
 import { Core } from "../dist/crux-tests/lib/crux/core.js";
 import { cruxEvents as events } from "../dist/crux-tests/lib/crux/use-crux.js";
 
@@ -49,6 +54,17 @@ test(
           false,
           false,
         ),
+        llm_config: new LlmConfigViewModel(
+          null,
+          new LlmConfigDraft("", "", "", ""),
+          false,
+          false,
+          null,
+          false,
+          false,
+          false,
+          false,
+        ),
       });
       core.update(events.Increment());
       assert.deepEqual(core.view(), {
@@ -60,6 +76,17 @@ test(
           false,
           false,
           null,
+          false,
+          false,
+          false,
+        ),
+        llm_config: new LlmConfigViewModel(
+          null,
+          new LlmConfigDraft("", "", "", ""),
+          false,
+          false,
+          null,
+          false,
           false,
           false,
           false,
@@ -89,6 +116,17 @@ test(
           false,
           false,
         ),
+        llm_config: new LlmConfigViewModel(
+          null,
+          new LlmConfigDraft("", "", "", ""),
+          false,
+          false,
+          null,
+          false,
+          false,
+          false,
+          false,
+        ),
       });
       assert.ok(views.length >= 4);
     } finally {
@@ -97,7 +135,7 @@ test(
   },
 );
 
-test("HTTP failure is reported and the Rust core remains usable", async (t) => {
+test("HTTP failure returns to Rust without a global error and the core remains usable", async (t) => {
   t.mock.method(globalThis, "fetch", async () => {
     throw new Error("offline");
   });
@@ -110,8 +148,7 @@ test("HTTP failure is reported and the Rust core remains usable", async (t) => {
     await core.initialize();
     core.update(events.Get());
     await nextTurn();
-    assert.equal(errors.length, 1);
-    assert.match(errors[0].message, /offline/);
+    assert.deepEqual(errors, []);
     core.update(events.Reset());
     assert.equal(core.view().text, "0 (pending)");
   } finally {

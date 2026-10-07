@@ -8,7 +8,7 @@ use crux_http::{
 use facet::Facet;
 use serde::{Deserialize, Serialize};
 
-use super::endpoint;
+use crate::api::endpoint;
 
 const PATH: &str = "/api/app_configs/agent";
 

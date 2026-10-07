@@ -49,18 +49,19 @@ Rust 保存字符串草稿，点击保存时统一校验，清空、非整数或
 点击「取消」或关闭弹窗会丢弃未保存草稿，重新打开时读取服务器配置。
 保存期间禁用字段、切换面板和关闭，避免提交途中丢失状态；成功后以服务端返回值更新表单并显示「保存成功」。
 失败时保留草稿供用户手动重试。HTTP 默认 30 秒超时，保存超时或网络中断会提示结果尚未确认，可重新打开设置核对。
-LLM、A2A、MCP 面板沿用课程占位，保存按钮保持禁用。
+A2A、MCP 面板沿用课程占位，保存按钮保持禁用。模型提供商读写见下节。
 
 ```text
-AgentConfigPanel → useAgentConfig → useCrux → Event::Configs
-  → model/configs.rs（草稿、校验与状态）→ api/configs.rs（GET/POST）
-  → Http Effect → http.ts → 后端 → AgentConfigReceived / AgentConfigSaved
-  → ConfigsModel → Render → view/configs.rs → ViewModel → React
+AgentConfigPanel → useConfigs().agent → useCrux
+  → Event::Configs → ConfigsEvent::Agent → AgentConfigEvent
+  → model/configs/agent.rs → api/configs/agent.rs → Http Effect → http.ts → 后端
+  → AgentConfigEvent::Received / Saved → AgentConfigModel
+  → Render → view/configs/agent.rs → ViewModel.agent_config → React
 ```
 
-- [api/configs.rs](shared/src/api/configs.rs) 保存 DTO 和 HTTP 请求构造，`api/mod.rs` 统一校验和拼接地址。
-- [model/configs.rs](shared/src/model/configs.rs) 管理读取、编辑、撤销、保存、去重与错误；[view/configs.rs](shared/src/view/configs.rs) 提供页面数据。
-- [features/configs](packages/src/features/configs/index.ts) 集中弹窗、表单、业务 Hook 和事件包装，通过 `@apps/frontend/configs` 导出 `ManusSettings` 与 `useAgentConfig`。
+- [api/configs/agent.rs](shared/src/api/configs/agent.rs) 保存 DTO 和 HTTP 请求构造，`api/mod.rs` 统一校验和拼接地址。
+- [model/configs/agent.rs](shared/src/model/configs/agent.rs) 管理读取、编辑、撤销、保存、去重与错误；[view/configs/agent.rs](shared/src/view/configs/agent.rs) 提供页面数据。
+- [features/configs](packages/src/features/configs/index.ts) 集中弹窗、表单、业务 Hook 和事件包装，通过 `@apps/frontend/configs` 导出 `ManusSettings` 与 `useConfigs`。
 - 两端均通过 `AppLayout → NavigationRail → ManusSettings → AgentConfigPanel` 使用相同实现。
 - 弹窗内容挂载时创建一个 Core，表单与底部按钮共享状态；卸载取消请求并释放 Core。应用级 Provider 仍按架构文档迁移。
 
@@ -84,6 +85,28 @@ pnpm --filter electron-app start
 新增接口继续按 OpenAPI → Rust DTO/状态/事件 → `just install` → 业务 Hook → 共享组件的顺序推进。
 现有 Core、HTTP Shell、地址选择和开发代理可继续复用。
 
+### 模型提供商配置：独立状态、共用设置入口
+
+「设置 → 模型提供商」使用 `GET /api/app_configs/llm` 读取、`POST /api/app_configs/llm` 保存。
+读取响应只回显密钥配置状态 `api_key_configured`，密码框始终等待用户输入新密钥。
+
+| 字段 | 输入规则 | 留空语义 |
+| --- | --- | --- |
+| `base_url` | HTTP(S) 地址，包含主机且无用户名/密码 | 提交 `null`，使用服务端默认值 |
+| `model_name` | 模型名称 | 提交 `null`，使用服务端默认值 |
+| `temperature` | −2 到 2 的有限数值 | 提交 `null`，使用服务端默认值 |
+| `max_tokens` | 0–9223372036854775807 的整数 | 提交 `null`，使用服务端默认值 |
+| `api_key` | 填写新密钥后替换 | 省略该字段，保留已有密钥 |
+
+[api/configs/llm.rs](shared/src/api/configs/llm.rs) 分开定义安全响应 `LlmConfig` 和写入请求 `LlmConfigRequest`；
+[model/configs/llm.rs](shared/src/model/configs/llm.rs) 统一校验字符串草稿并管理保存状态。
+新的密钥在密码框、Rust 私有临时状态和提交链路中短暂保留，成功、撤销或关闭后清除；ViewModel 仅暴露 `api_key_changed` 状态，Debug 隐去输入和响应内容。
+保存失败保留当前草稿供重试，超时或断网提示结果待核实。配置接口成功表示服务端已保存参数，提供商连接与模型调用按后续业务验证。
+
+[use-configs.ts](packages/src/features/configs/use-configs.ts) 在一个设置弹窗内持有一个 Core，返回独立的 `agent`、`llm` 控制器。
+切换面板保留各自草稿；底部保存只提交当前面板。任何配置正在保存时统一阻止切换与关闭。
+两端通过同一个 `ManusSettings` 复用表单与事件，[config-feedback.tsx](packages/src/features/configs/config-feedback.tsx) 复用读取、撤销及错误提示。普通 HTTP 失败经 `resolve` 回到所属 Rust 模型，全局错误仅报告初始化、FFI 等客户端故障。
+
 ### 按 weather 的职责划分扩展业务
 
 本项目采用官方 `crux/examples/weather` 的职责划分，完整目标结构与强制边界见 [ARCHITECTURE.md](ARCHITECTURE.md)，Rust 细则见 [shared/AGENTS.md](shared/AGENTS.md)。下面是当前已完成的 Rust 设置模块切片。
@@ -94,24 +117,34 @@ shared/src/
 ├── effects.rs         # 统一能力协议
 ├── api/
 │   ├── mod.rs         # 公共 URL 工具与模块声明
-│   └── configs.rs     # 设置接口 DTO、HTTP 请求构造
+│   └── configs/
+│       ├── mod.rs     # 设置接口模块声明
+│       ├── agent.rs   # Agent DTO、GET/POST
+│       └── llm.rs     # LLM 安全响应、独立写请求
 ├── model/
 │   ├── mod.rs         # 根 Event/Model、模块事件分发
-│   └── configs.rs     # 设置事件、状态与更新流程
+│   └── configs/
+│       ├── mod.rs     # 聚合 Agent/Llm 子事件与状态
+│       ├── agent.rs   # Agent 草稿、校验、读写
+│       └── llm.rs     # LLM 草稿、校验、私有密钥与读写
 ├── view/
 │   ├── mod.rs         # 根 ViewModel、视图汇总
-│   └── configs.rs     # 设置页面数据、From<&ConfigsModel>
+│   └── configs/
+│       ├── mod.rs     # 导出两个设置 ViewModel
+│       ├── agent.rs
+│       └── llm.rs     # 仅输出可安全展示的数据
 └── capabilities/      # 自定义能力实现，如 SSE
 ```
 
 `AppCore` 通过 `model.update(event)` 更新业务，通过 `model.into()` 生成视图。
-根 `Event::Configs` 携带设置事件，设置模块返回的 Command 使用 `map_event(Event::Configs)` 接回根层。
+根 `Event::Configs` 携带设置事件；`ConfigsEvent::Agent` / `Llm` 委派到各自子模型，Command 经两层 `map_event` 接回根层。
+根 ViewModel 保留 `agent_config` 并增加 `llm_config`，两个配置互相独立。
 API 模块独立于业务 Model/Event；状态更新留在 `model/`，页面输出转换留在 `view/`。
 
 后续认证、会话、文件和健康检查按实际业务分别增加 `api/<模块>.rs`、`model/<模块>.rs`、
 `view/<模块>.rs`，并在根模块注册。例如会话对应 `api/sessions.rs`、`model/sessions.rs`、`view/sessions.rs`。
 一次业务流程可以组合多个接口；根层按业务模块和跨模块协调组织。
-单个模块明显变大后再拆子目录，例如 `model/configs/{mod,agent,llm}.rs`。
+设置模块已拆成 `configs/{mod,agent,llm}.rs`；新增设置资源在同层扩展，其他业务按实际复杂度拆子目录。
 
 现有计数器作为教学示例保留在模型层。跨 FFI 的 Event/ViewModel 需要 Facet 与 Serde；内部模型按实际需要派生类型。
 `packages/src/app/` 负责共享布局；`packages/src/features/configs/` 负责设置业务 UI、Hook 与事件包装；`packages/src/lib/crux/` 提供通用 Shell 与 Hook。
@@ -350,7 +383,7 @@ BoltFFI 0.31.0 自动收集浏览器与 Node 入口、map 和 WASM 辅助模块�
   保留 Forge 对应的 Vite 6，Web 使用 Vite 8。
 - 依赖安装配置和锁文件统一维护在本目录。
 
-当前首页与会话详情属于课程基础 UI，通用配置已通过 `useAgentConfig` / `useCrux` 接入 Rust HTTP 流程。
+当前首页与会话详情属于课程基础 UI，Agent 与模型提供商配置通过 `useConfigs` / `useCrux` 接入 Rust HTTP 流程。
 模型层保留计数器业务示例，现有 WASM 和 Crux 测试继续验证桥接层。
 
 ## 在组件中使用 Crux
@@ -373,7 +406,7 @@ function Counter() {
 `packages/src/lib/crux/core.ts` 统一处理 Bincode 与 effect 分发；
 `http.ts`、`sse.ts`、`key-value.ts`、`time.ts` 执行浏览器能力。
 当前 Hook 每次挂载创建独立 Core，卸载时取消请求、清除定时器并释放 WASM handle。
-应用级共享 Provider、业务取消策略和全局错误隔离是已登记的生产迁移项，接入认证及多模块联动前按架构规范一起完成。
+普通 HTTP 错误已交给所属 Rust 模块处理；应用级共享 Provider、业务取消策略和跨模块生命周期测试按架构规范继续迁移。
 `useCrux()` 的 `view` 初始为 `null`，WASM 就绪后以 Rust 的 `view()` 为准，组件使用可选链处理初始化阶段。
 
 示例 API 使用 Rust 中配置的 `https://crux-counter.fly.dev`。
@@ -487,3 +520,5 @@ node .agents/skills/verify-mooc-manus/scripts/verify.mjs run --features settings
 ```
 
 在独占开发后端执行，期间暂停其他配置编辑。脚本记录原值，检查非法输入、真实保存、关闭重开后的 GET，再通过 UI 恢复原值；证据包含 `original-config.json`、`api-responses.json` 与 `config-cleanup.json`。遇到其他客户端的新值会停止覆盖；写请求结果无法确认时记录失败和待核实状态。结束后同时核对配置恢复结果与进程清理结果。此脚本覆盖 Web 首页保存路径，其他入口与 Electron 按目标平台单独验证。
+
+模型提供商验证需覆盖 GET 回显、空密钥保留、输入校验、保存失败重试及 Agent/LLM 状态隔离。实际写入前记录四个非密钥字段，保持密钥留空，完成后恢复原值并重新 GET 核对。密钥替换使用传输边界模拟测试，证据仅保留脱敏字段与布尔状态。上述 `settings-save` 命令仍用于 Agent 配置，LLM 的页面与目标平台验证单独记录。

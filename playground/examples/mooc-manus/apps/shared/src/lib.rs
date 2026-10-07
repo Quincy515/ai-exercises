@@ -7,13 +7,16 @@ mod ffi;
 pub mod model;
 pub mod view;
 
-pub use api::configs::AgentConfig;
+pub use api::configs::{agent::AgentConfig, llm::LlmConfig};
 pub use app::AppCore;
 pub use capabilities::sse;
 pub use effects::Effect;
-pub use model::configs::{AgentConfigDraft, AgentConfigField};
+pub use model::configs::{
+    agent::{AgentConfigDraft, AgentConfigEvent, AgentConfigField},
+    llm::{LlmConfigDraft, LlmConfigEvent, LlmConfigField},
+};
 pub use model::{ConfigsEvent, Count, Event, Model};
-pub use view::{AgentConfigViewModel, ViewModel};
+pub use view::{AgentConfigViewModel, LlmConfigViewModel, ViewModel};
 
 pub use crux_core::Core;
 pub use crux_http as http;

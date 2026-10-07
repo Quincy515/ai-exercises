@@ -4,8 +4,8 @@ use facet::Facet;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    api::configs::AgentConfig,
-    model::configs::{AgentConfigDraft, ConfigsModel},
+    api::configs::agent::AgentConfig,
+    model::configs::agent::{AgentConfigDraft, AgentConfigModel},
 };
 
 #[derive(Facet, Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
@@ -20,8 +20,8 @@ pub struct AgentConfigViewModel {
     pub can_save: bool,
 }
 
-impl From<&ConfigsModel> for AgentConfigViewModel {
-    fn from(model: &ConfigsModel) -> Self {
+impl From<&AgentConfigModel> for AgentConfigViewModel {
+    fn from(model: &AgentConfigModel) -> Self {
         Self {
             data: model.data.clone(),
             draft: model.draft.clone(),

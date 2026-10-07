@@ -1,4 +1,4 @@
-import { Button } from "../../components/ui/button";
+import { ConfigFeedback } from "./config-feedback";
 import {
   Field,
   FieldDescription,
@@ -10,7 +10,7 @@ import {
 import { Input } from "../../components/ui/input";
 import { Kbd } from "../../components/ui/kbd";
 import { agentConfigFields } from "./events";
-import type { AgentConfigController } from "./use-agent-config";
+import type { AgentConfigController } from "./use-configs";
 
 export const AGENT_CONFIG_FORM_ID = "agent-config-form";
 
@@ -19,20 +19,7 @@ export function AgentConfigPanel({
 }: {
   config: AgentConfigController;
 }) {
-  const {
-    data,
-    draft,
-    ready,
-    loading,
-    saving,
-    dirty,
-    saved,
-    error,
-    edit,
-    refresh,
-    reset,
-    save,
-  } = config;
+  const { data, draft, ready, loading, saving, error, edit, save } = config;
   const busy = loading || saving || (!ready && !error);
 
   return (
@@ -54,50 +41,7 @@ export function AgentConfigPanel({
           <FieldDescription className="text-sm">
             修改 Agent 的运行参数，点击保存后生效。
           </FieldDescription>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <p role="status" className="text-sm text-muted-foreground">
-              {saving
-                ? "正在保存配置…"
-                : busy
-                  ? "正在加载配置…"
-                  : error
-                    ? "请检查配置提示"
-                    : saved
-                      ? "保存成功"
-                      : dirty
-                        ? "有未保存的修改"
-                        : data
-                          ? "已读取服务器配置"
-                          : "等待加载配置"}
-            </p>
-            <div className="flex gap-2">
-              {dirty && (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  disabled={loading || saving}
-                  onClick={reset}
-                >
-                  撤销修改
-                </Button>
-              )}
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={!ready || loading || saving || dirty}
-                onClick={refresh}
-              >
-                {error && !data ? "重试" : "刷新"}
-              </Button>
-            </div>
-          </div>
-          {error && (
-            <p role="alert" className="text-sm text-destructive">
-              {error}
-            </p>
-          )}
+          <ConfigFeedback config={config} hasData={data !== null} />
           {/* 原始输入交给 Rust 校验；noValidate 保证错误通过统一 ViewModel 展示。 */}
           <FieldGroup>
             <Field>

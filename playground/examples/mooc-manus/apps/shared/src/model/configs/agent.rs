@@ -1,37 +1,37 @@
 //! 设置业务：管理编辑草稿、输入校验和读写请求的状态转换。
 
 use crux_core::{Command, render::render};
-use crux_http::{HttpError, Response};
+use crux_http::Response;
 use facet::Facet;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    api::configs::{AgentConfig, get_agent_config, update_agent_config},
+    api::configs::agent::{AgentConfig, get_agent_config, update_agent_config},
     effects::Effect,
 };
 
 #[derive(Facet, Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[repr(C)]
-pub enum ConfigsEvent {
-    GetAgentConfig {
+pub enum AgentConfigEvent {
+    Get {
         base_url: String,
     },
-    EditAgentConfig {
+    Edit {
         field: AgentConfigField,
         value: String,
     },
-    ResetAgentConfig,
-    SaveAgentConfig {
+    Reset,
+    Save {
         base_url: String,
     },
 
     // 请求结果仅在 Core 内流转。
     #[serde(skip)]
     #[facet(skip)]
-    AgentConfigReceived(#[facet(opaque)] crux_http::Result<Response<AgentConfig>>),
+    Received(#[facet(opaque)] crux_http::Result<Response<AgentConfig>>),
     #[serde(skip)]
     #[facet(skip)]
-    AgentConfigSaved(#[facet(opaque)] crux_http::Result<Response<AgentConfig>>),
+    Saved(#[facet(opaque)] crux_http::Result<Response<AgentConfig>>),
 }
 
 #[derive(Facet, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +82,7 @@ fn parse_field(value: &str, label: &str, min: i64, max: i64) -> Result<i64, Stri
 
 /// 设置模块的运行状态，由 ViewModel 转换为页面数据。
 #[derive(Default)]
-pub struct ConfigsModel {
+pub struct AgentConfigModel {
     pub(crate) data: Option<AgentConfig>,
     pub(crate) draft: AgentConfigDraft,
     pub(crate) loading: bool,
@@ -91,18 +91,18 @@ pub struct ConfigsModel {
     pub(crate) saved: bool,
 }
 
-impl ConfigsModel {
-    pub fn update(&mut self, event: ConfigsEvent) -> Command<Effect, ConfigsEvent> {
+impl AgentConfigModel {
+    pub fn update(&mut self, event: AgentConfigEvent) -> Command<Effect, AgentConfigEvent> {
         match event {
-            ConfigsEvent::GetAgentConfig { base_url } => self.fetch(&base_url),
-            ConfigsEvent::EditAgentConfig { field, value } => self.edit(field, value),
-            ConfigsEvent::ResetAgentConfig => self.reset(),
-            ConfigsEvent::SaveAgentConfig { base_url } => self.save(&base_url),
-            ConfigsEvent::AgentConfigReceived(result) => {
+            AgentConfigEvent::Get { base_url } => self.fetch(&base_url),
+            AgentConfigEvent::Edit { field, value } => self.edit(field, value),
+            AgentConfigEvent::Reset => self.reset(),
+            AgentConfigEvent::Save { base_url } => self.save(&base_url),
+            AgentConfigEvent::Received(result) => {
                 self.loading = false;
                 self.receive(result, false)
             }
-            ConfigsEvent::AgentConfigSaved(result) => {
+            AgentConfigEvent::Saved(result) => {
                 self.saving = false;
                 self.receive(result, true)
             }
@@ -119,7 +119,7 @@ impl ConfigsModel {
         self.dirty() && !self.loading && !self.saving
     }
 
-    fn fetch(&mut self, base_url: &str) -> Command<Effect, ConfigsEvent> {
+    fn fetch(&mut self, base_url: &str) -> Command<Effect, AgentConfigEvent> {
         // 串行读写，避免刷新覆盖尚未保存的草稿。
         if self.loading || self.saving || self.dirty() {
             return Command::done();
@@ -137,10 +137,14 @@ impl ConfigsModel {
         self.error = None;
         self.saved = false;
 
-        render().and(request.build().then_send(ConfigsEvent::AgentConfigReceived))
+        render().and(request.build().then_send(AgentConfigEvent::Received))
     }
 
-    fn edit(&mut self, field: AgentConfigField, value: String) -> Command<Effect, ConfigsEvent> {
+    fn edit(
+        &mut self,
+        field: AgentConfigField,
+        value: String,
+    ) -> Command<Effect, AgentConfigEvent> {
         if self.data.is_none() || self.loading || self.saving {
             return Command::done();
         }
@@ -154,7 +158,7 @@ impl ConfigsModel {
         render()
     }
 
-    fn reset(&mut self) -> Command<Effect, ConfigsEvent> {
+    fn reset(&mut self) -> Command<Effect, AgentConfigEvent> {
         if self.loading || self.saving {
             return Command::done();
         }
@@ -168,7 +172,7 @@ impl ConfigsModel {
         render()
     }
 
-    fn save(&mut self, base_url: &str) -> Command<Effect, ConfigsEvent> {
+    fn save(&mut self, base_url: &str) -> Command<Effect, AgentConfigEvent> {
         if !self.can_save() {
             return Command::done();
         }
@@ -189,37 +193,15 @@ impl ConfigsModel {
         self.error = None;
         self.saved = false;
 
-        render().and(request.build().then_send(ConfigsEvent::AgentConfigSaved))
+        render().and(request.build().then_send(AgentConfigEvent::Saved))
     }
 
     fn receive(
         &mut self,
         result: crux_http::Result<Response<AgentConfig>>,
         saved: bool,
-    ) -> Command<Effect, ConfigsEvent> {
-        let action = if saved { "保存" } else { "读取" };
-        let config = match result {
-            Ok(mut response) => response
-                .take_body()
-                .ok_or_else(|| "服务返回了空响应，请重试。".to_string()),
-            Err(HttpError::Http { code: 422, .. }) if saved => {
-                Err("配置未通过服务端校验，请检查输入范围后重试。".to_string())
-            }
-            Err(HttpError::Http { code, .. }) => {
-                Err(format!("{action} Agent 配置失败（HTTP {code}），请重试。"))
-            }
-            Err(HttpError::Json(_)) => Err("配置响应格式有误，请检查接口字段。".to_string()),
-            Err(HttpError::Timeout) if saved => {
-                Err("保存请求超时，结果尚未确认，请稍后重试或重新打开设置核对。".to_string())
-            }
-            Err(HttpError::Timeout) => Err("请求超时，请重试。".to_string()),
-            Err(HttpError::Io(_)) if saved => {
-                Err("保存时网络异常，结果尚未确认，请稍后重试或重新打开设置核对。".to_string())
-            }
-            Err(HttpError::Io(_)) => Err("网络请求失败，请检查后端服务和网络连接。".to_string()),
-            Err(HttpError::Url(_)) => Err("服务地址无效，请检查 API 地址配置。".to_string()),
-            Err(_) => Err(format!("{action} Agent 配置失败，请重试。")),
-        };
+    ) -> Command<Effect, AgentConfigEvent> {
+        let config = super::receive_config(result, saved, "Agent");
 
         match config {
             Ok(config) => {
@@ -247,15 +229,15 @@ mod tests {
 
     use crate::{AppCore, Effect, Event, Model};
 
-    use super::{AgentConfig, AgentConfigDraft, AgentConfigField, ConfigsEvent};
+    use super::{AgentConfig, AgentConfigDraft, AgentConfigEvent, AgentConfigField};
 
     const BASE_URL: &str = "http://localhost:5150";
     const JSON: &str = r#"{"max_iterations":20,"max_retries":3,"max_search_results":10}"#;
 
     fn get() -> Event {
-        Event::Configs(ConfigsEvent::GetAgentConfig {
+        Event::Configs(crate::ConfigsEvent::Agent(AgentConfigEvent::Get {
             base_url: BASE_URL.to_string(),
-        })
+        }))
     }
 
     fn finish_request(
@@ -270,9 +252,9 @@ mod tests {
         let event = command.expect_one_event();
         assert!(matches!(
             event,
-            Event::Configs(
-                ConfigsEvent::AgentConfigReceived(_) | ConfigsEvent::AgentConfigSaved(_)
-            )
+            Event::Configs(crate::ConfigsEvent::Agent(
+                AgentConfigEvent::Received(_) | AgentConfigEvent::Saved(_)
+            ))
         ));
         let mut command = app.update(event, model);
         command.expect_one_effect().expect_render();
@@ -468,7 +450,9 @@ mod tests {
         response.take_body();
 
         let mut command = app.update(
-            Event::Configs(ConfigsEvent::AgentConfigReceived(Ok(response))),
+            Event::Configs(crate::ConfigsEvent::Agent(AgentConfigEvent::Received(Ok(
+                response,
+            )))),
             &mut model,
         );
         command.expect_one_effect().expect_render();
@@ -484,9 +468,9 @@ mod tests {
         for base_url in ["", "invalid", "file:///tmp/settings"] {
             let mut model = Model::default();
             let mut command = app.update(
-                Event::Configs(ConfigsEvent::GetAgentConfig {
+                Event::Configs(crate::ConfigsEvent::Agent(AgentConfigEvent::Get {
                     base_url: base_url.to_string(),
-                }),
+                })),
                 &mut model,
             );
             command.expect_one_effect().expect_render();
@@ -509,16 +493,16 @@ mod tests {
     }
 
     fn edit(field: AgentConfigField, value: &str) -> Event {
-        Event::Configs(ConfigsEvent::EditAgentConfig {
+        Event::Configs(crate::ConfigsEvent::Agent(AgentConfigEvent::Edit {
             field,
             value: value.to_string(),
-        })
+        }))
     }
 
     fn save() -> Event {
-        Event::Configs(ConfigsEvent::SaveAgentConfig {
+        Event::Configs(crate::ConfigsEvent::Agent(AgentConfigEvent::Save {
             base_url: BASE_URL.to_string(),
-        })
+        }))
     }
 
     #[test]
@@ -735,7 +719,7 @@ mod tests {
                 get(),
                 save(),
                 edit(AgentConfigField::MaxIterations, "99"),
-                Event::Configs(ConfigsEvent::ResetAgentConfig),
+                Event::Configs(crate::ConfigsEvent::Agent(AgentConfigEvent::Reset)),
             ] {
                 assert!(app.update(event, &mut model).is_done());
                 assert_eq!(app.view(&model).agent_config, before);
@@ -763,9 +747,12 @@ mod tests {
         assert!(app.update(get(), &mut model).is_done());
         assert_eq!(app.view(&model).agent_config, before);
 
-        app.update(Event::Configs(ConfigsEvent::ResetAgentConfig), &mut model)
-            .expect_one_effect()
-            .expect_render();
+        app.update(
+            Event::Configs(crate::ConfigsEvent::Agent(AgentConfigEvent::Reset)),
+            &mut model,
+        )
+        .expect_one_effect()
+        .expect_render();
         let state = app.view(&model).agent_config;
         assert_eq!(state.draft.max_search_results, "10");
         assert!(!state.dirty && !state.can_save && !state.saved);
@@ -816,9 +803,9 @@ mod tests {
             .expect_one_effect()
             .expect_render();
         app.update(
-            Event::Configs(ConfigsEvent::SaveAgentConfig {
+            Event::Configs(crate::ConfigsEvent::Agent(AgentConfigEvent::Save {
                 base_url: "file:///tmp/settings".to_string(),
-            }),
+            })),
             &mut model,
         )
         .expect_one_effect()
