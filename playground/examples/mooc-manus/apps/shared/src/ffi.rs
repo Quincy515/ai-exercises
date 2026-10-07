@@ -177,8 +177,8 @@ mod tests {
 
     use super::{CoreFfi, CruxShell};
     use crate::{
-        AgentConfigEvent, AgentConfigField, ConfigsEvent, Event, LlmConfigEvent, LlmConfigField,
-        ViewModel, effects::EffectFfi,
+        A2aConfigEvent, AgentConfigEvent, AgentConfigField, ConfigsEvent, Event, LlmConfigEvent,
+        LlmConfigField, ViewModel, effects::EffectFfi,
     };
 
     struct RecordingShell(mpsc::Sender<Vec<u8>>);
@@ -363,6 +363,54 @@ mod tests {
         assert_eq!(
             view.llm_config.data.unwrap().max_tokens,
             Some(i64::MAX as u64)
+        );
+    }
+
+    #[test]
+    fn native_a2a_create_resolves_null_then_refreshes_the_list() {
+        let (tx, rx) = mpsc::channel();
+        let core = CoreFfi::new(Arc::new(RecordingShell(tx)));
+        let base_url = "http://localhost:5150".to_string();
+        let event = Event::Configs(ConfigsEvent::A2a(A2aConfigEvent::Get {
+            base_url: base_url.clone(),
+        }));
+        assert!(core.update(&encode(&event)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let request = receive(&rx);
+        let empty = HttpResult::Ok(HttpResponse::ok().body(r#"{"a2a_servers":[]}"#).build());
+        assert!(core.resolve(request.id.0, &encode(&empty)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let event = Event::Configs(ConfigsEvent::A2a(A2aConfigEvent::EditUrl {
+            value: "https://remote.example.test".to_string(),
+        }));
+        assert!(core.update(&encode(&event)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let event = Event::Configs(ConfigsEvent::A2a(A2aConfigEvent::Create { base_url }));
+        assert!(core.update(&encode(&event)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let request = receive(&rx);
+        let EffectFfi::Http(http) = request.effect else {
+            panic!("expected POST");
+        };
+        assert_eq!(http.method, "POST");
+        assert_eq!(
+            http.url,
+            "http://localhost:5150/api/app_configs/a2a-servers"
+        );
+        let response = HttpResult::Ok(HttpResponse::ok().body("null").build());
+        assert!(core.resolve(request.id.0, &encode(&response)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let refresh = receive(&rx);
+        assert!(matches!(refresh.effect, EffectFfi::Http(request) if request.method == "GET"));
+        let view: ViewModel = BincodeFfiFormat::deserialize(&core.view()).unwrap();
+        assert!(view.a2a_config.saving && view.a2a_config.loading && view.a2a_config.created);
+        assert!(core.resolve(refresh.id.0, &encode(&empty)).is_empty());
+        assert!(matches!(receive(&rx).effect, EffectFfi::Render(_)));
+        let view: ViewModel = BincodeFfiFormat::deserialize(&core.view()).unwrap();
+        assert!(view.a2a_config.loaded && !view.a2a_config.saving && !view.a2a_config.loading);
+        assert_eq!(
+            view.a2a_config.notice.as_deref(),
+            Some("已添加远程Agent配置。")
         );
     }
 }

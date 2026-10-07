@@ -6,6 +6,7 @@ import {
   AgentConfigViewModel,
   LlmConfigDraft,
   LlmConfigViewModel,
+  A2aConfigViewModel,
 } from "shared_types/app.js";
 import { Core } from "../dist/crux-tests/lib/crux/core.js";
 import { cruxEvents as events } from "../dist/crux-tests/lib/crux/use-crux.js";
@@ -65,6 +66,17 @@ test(
           false,
           false,
         ),
+        a2a_config: new A2aConfigViewModel(
+          [],
+          "",
+          false,
+          false,
+          false,
+          null,
+          null,
+          false,
+          false,
+        ),
       });
       core.update(events.Increment());
       assert.deepEqual(core.view(), {
@@ -88,6 +100,17 @@ test(
           null,
           false,
           false,
+          false,
+          false,
+        ),
+        a2a_config: new A2aConfigViewModel(
+          [],
+          "",
+          false,
+          false,
+          false,
+          null,
+          null,
           false,
           false,
         ),
@@ -124,6 +147,17 @@ test(
           null,
           false,
           false,
+          false,
+          false,
+        ),
+        a2a_config: new A2aConfigViewModel(
+          [],
+          "",
+          false,
+          false,
+          false,
+          null,
+          null,
           false,
           false,
         ),

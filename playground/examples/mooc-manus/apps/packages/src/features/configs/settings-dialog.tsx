@@ -13,8 +13,9 @@ import {
 } from "../../components/ui/dialog";
 import { Separator } from "../../components/ui/separator";
 import { AGENT_CONFIG_FORM_ID, AgentConfigPanel } from "./agent-config-panel";
-import { A2ASetting, MCPSetting } from "./other-settings-panels";
+import { MCPSetting } from "./other-settings-panels";
 import { useConfigs } from "./use-configs";
+import { A2aConfigPanel } from "./a2a-config-panel";
 import { LLM_CONFIG_FORM_ID, LlmConfigPanel } from "./llm-config-panel";
 
 const menus = [
@@ -36,7 +37,8 @@ function SettingsContent({
 }) {
   const configs = useConfigs(active);
   const config = active === "llm-setting" ? configs.llm : configs.agent;
-  const saving = configs.agent.saving || configs.llm.saving;
+  const saving =
+    configs.agent.saving || configs.llm.saving || configs.a2a.saving;
   useLayoutEffect(() => {
     onSavingChange(saving);
     return () => onSavingChange(false);
@@ -74,7 +76,7 @@ function SettingsContent({
             <AgentConfigPanel config={configs.agent} />
           )}
           {active === "llm-setting" && <LlmConfigPanel config={configs.llm} />}
-          {active === "a2a-setting" && <A2ASetting />}
+          {active === "a2a-setting" && <A2aConfigPanel config={configs.a2a} />}
           {active === "mcp-setting" && <MCPSetting />}
         </div>
       </div>
@@ -83,22 +85,26 @@ function SettingsContent({
           disabled={saving}
           render={<Button variant="outline" className="cursor-pointer" />}
         >
-          取消
+          {active === "a2a-setting" ? "关闭" : "取消"}
         </DialogClose>
-        <Button
-          type="submit"
-          form={
-            active === "llm-setting" ? LLM_CONFIG_FORM_ID : AGENT_CONFIG_FORM_ID
-          }
-          className="cursor-pointer"
-          disabled={
-            (active !== "common-setting" && active !== "llm-setting") ||
-            !config.ready ||
-            !config.canSave
-          }
-        >
-          {saving ? "保存中…" : "保存"}
-        </Button>
+        {active !== "a2a-setting" && (
+          <Button
+            type="submit"
+            form={
+              active === "llm-setting"
+                ? LLM_CONFIG_FORM_ID
+                : AGENT_CONFIG_FORM_ID
+            }
+            className="cursor-pointer"
+            disabled={
+              (active !== "common-setting" && active !== "llm-setting") ||
+              !config.ready ||
+              !config.canSave
+            }
+          >
+            {saving ? "保存中…" : "保存"}
+          </Button>
+        )}
       </DialogFooter>
     </>
   );

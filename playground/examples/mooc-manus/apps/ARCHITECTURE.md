@@ -2,7 +2,7 @@
 
 本文件是 `apps/` 的统一架构依据，适用于设置、认证、会话、文件、健康状态及后续业务。每次修改代码都必须遵守职责、依赖方向、生命周期与验证要求。根级 `AGENTS.md` 负责执行入口，子目录规则补充具体约束。
 
-本规范于 2026-10-03 对照本地 Crux 官方 `weather` 示例（提交 `30337489`）确定，2026-10-07 同步 Agent 与 LLM 配置读写。目录树描述生产目标；Agent 与 LLM 配置按 Rust 三层拆分，并由前端 `features/configs/` 统一装配。其余业务按实际需求实现，迁移进度见第 6 节。
+本规范于 2026-10-03 对照本地 Crux 官方 `weather` 示例（提交 `30337489`）确定，2026-10-07 同步 Agent、LLM 与 A2A 配置接入。目录树描述生产目标；Agent、LLM 与 A2A 配置按 Rust 三层拆分，并由前端 `features/configs/` 统一装配。其余业务按实际需求实现，迁移进度见第 6 节。
 
 ## 1. 官方示例与项目选择
 
@@ -17,9 +17,13 @@
 
 项目保留已有 `effects.rs` 和 `capabilities/`，HTTP 客户端集中到 `api/`。API 层独立于业务 Model/Event 是本项目的额外约束。`weather` 的 `Outcome`、生命周期枚举、深层目录和演示密钥存储按业务需要评估；当前配置读写沿用直接返回 `Command` 的更新函数。
 
-本次 LLM 接入按现有设置边界扩展：`api/configs/`、`model/configs/`、`view/configs/` 各自用 `mod.rs` 聚合 `agent.rs` 和 `llm.rs`；`ConfigsEvent` 使用 Agent/Llm 子事件并通过 `map_event` 委派。设置弹窗的 `useConfigs()` 持有一个 Core，两类配置保持独立状态，共享现有 HTTP Shell。普通 HTTP 失败仅回传所属 Rust 模型，全局错误保留初始化与协议故障。
+设置资源按现有边界扩展：`api/configs/`、`model/configs/`、`view/configs/` 各自用 `mod.rs` 聚合 `agent.rs`、`llm.rs`、`a2a.rs`；`ConfigsEvent` 使用 Agent/Llm/A2a 子事件并通过 `map_event` 委派。设置弹窗的 `useConfigs()` 持有一个 Core，各类配置保持独立状态，共享现有 HTTP Shell。普通 HTTP 失败仅回传所属 Rust 模型，全局错误保留初始化与协议故障。
 
 LLM 响应 DTO 中的密钥信息仅为 `api_key_configured`，更新请求 DTO 单独接收可选密钥。新密钥只存在于输入框、模块临时私有状态与写请求，成功、撤销或关闭后清除；ViewModel、Debug 与验证证据保持脱敏。空密钥按后端契约保留原值。应用级 Provider 与统一启动配置仍在认证或跨业务联动前完成。
+
+A2A 配置在同一三层 `configs/a2a.rs` 中扩展，设置弹窗继续使用一个 Core。列表、新增、启停、删除分别走现有接口；写操作即时生效，成功后刷新列表。写请求串行，JSON `null` 表示写确认，随后 GET 刷新；启停和删除先更新已确认行。5xx、超时、I/O 或响应格式异常使写结果待核实，继续写入需先刷新，刷新后仍提醒核对；已确认写入与随后刷新失败分别反馈。
+
+A2A 列表由后端读取远程 Agent Card 后返回，当前接口只展示卡片获取成功的配置。客户端按这个契约展示并说明可达性边界；远程连接与协议调用继续由后端负责。验证仅增删本次本机临时 Agent，保留原有服务配置。
 
 ## 2. 最终目标目录
 
@@ -50,7 +54,8 @@ apps/
 │       │   ├── configs/
 │       │   │   ├── mod.rs
 │       │   │   ├── agent.rs          # Agent DTO、GET/POST
-│       │   │   └── llm.rs            # 安全响应 DTO、独立写请求 DTO
+│       │   │   ├── llm.rs            # 安全响应 DTO、独立写请求 DTO
+│       │   │   └── a2a.rs            # 列表及新增/启停/删除请求
 │       │   ├── auth.rs               # 认证接口
 │       │   ├── sessions.rs           # 会话接口
 │       │   ├── files.rs              # 文件接口
@@ -58,9 +63,10 @@ apps/
 │       ├── model/
 │       │   ├── mod.rs                # 根 Event/Model、模块分发与协调
 │       │   ├── configs/
-│       │   │   ├── mod.rs            # 聚合 Agent/Llm 子事件与状态
+│       │   │   ├── mod.rs            # 聚合 Agent/Llm/A2a 子事件与状态
 │       │   │   ├── agent.rs
-│       │   │   └── llm.rs            # 草稿、校验、私有密钥与读写
+│       │   │   ├── llm.rs            # 草稿、校验、私有密钥与读写
+│       │   │   └── a2a.rs            # URL 草稿、串行操作、写确认与刷新
 │       │   ├── auth.rs               # 登录、退出、认证失效
 │       │   ├── sessions.rs           # 会话与聊天流程
 │       │   ├── files.rs              # 上传、下载及文件操作状态
@@ -70,7 +76,8 @@ apps/
 │       │   ├── configs/
 │       │   │   ├── mod.rs
 │       │   │   ├── agent.rs
-│       │   │   └── llm.rs            # 安全视图、密钥变更布尔状态
+│       │   │   ├── llm.rs            # 安全视图、密钥变更布尔状态
+│       │   │   └── a2a.rs            # 列表、操作状态与结果提示
 │       │   ├── auth.rs
 │       │   ├── sessions.rs
 │       │   ├── files.rs
@@ -89,10 +96,11 @@ apps/
 │   │   │   │   ├── settings-dialog.tsx
 │   │   │   │   ├── agent-config-panel.tsx
 │   │   │   │   ├── llm-config-panel.tsx
+│   │   │   │   ├── a2a-config-panel.tsx
 │   │   │   │   ├── config-feedback.tsx # 共用状态、刷新、撤销与错误提示
-│   │   │   │   ├── use-configs.ts     # 单 Core、两个独立控制器
+│   │   │   │   ├── use-configs.ts     # 单 Core、各设置独立控制器
 │   │   │   │   ├── events.ts         # 生成事件的设置模块包装
-│   │   │   │   ├── other-settings-panels.tsx # A2A/MCP 课程占位
+│   │   │   │   ├── other-settings-panels.tsx # MCP 课程占位
 │   │   │   │   └── index.ts          # @apps/frontend/configs 公开入口
 │   │   │   ├── sessions/
 │   │   │   │   ├── chat.tsx / new-session.tsx / novnc.tsx
@@ -138,7 +146,7 @@ apps/
 └── deploy/                          # Web 静态部署与 nginx 代理
 ```
 
-单个业务变大后，把 `<业务>.rs` 改为 `<业务>/mod.rs` 并按真实子流程拆分。设置三层现已使用 `configs/{mod,agent,llm}.rs`，后续可增加 `mcp_servers.rs`、`a2a_servers.rs`；对应前端设置面板随业务增加。接口数量本身不决定文件数量，一个业务流程可以组合多个接口。
+单个业务变大后，把 `<业务>.rs` 改为 `<业务>/mod.rs` 并按真实子流程拆分。设置三层现已使用 `configs/{mod,agent,llm,a2a}.rs`，后续按相同方式接入 MCP；对应前端设置面板随业务增加。接口数量本身不决定文件数量，一个业务流程可以组合多个接口。
 
 测试就近放在 Rust 模块的 `#[cfg(test)]` 中，较长时拆为同模块的 `tests.rs`；根模型测试验证跨模块协调，`ffi.rs` 测试验证协议。Shell 测试沿用现有 `packages/tests/`；新增测试位置或 TSX 编译范围时同步更新测试命令和 `tests/tsconfig.json`，确保测试被实际执行。
 
@@ -181,7 +189,7 @@ Effect → Shell 执行能力 → resolve → 模块内部事件 → model
 5. **请求有终止条件。** 普通 HTTP Shell 默认 30 秒超时，覆盖请求及响应体读取，并与 Core 卸载取消联动；SSE 使用独立生命周期。模型决定重试策略，错误与取消路径也要结束 loading/saving。保存超时或网络中断时结果尚未确认，保留草稿并提示核对；写操作由用户手动重试。
 6. **共享业务数据由 Rust 维护。** TanStack Router 负责路由；同一份业务数据保持单一状态来源。已有 TanStack Query 演示代码列入发布整理项。
 
-Provider 的引入必须与取消策略、错误隔离和生命周期测试一起完成；当前每个 `useCrux()` 单独持有 Core 的实现是第 6 节登记的迁移项。当前设置弹窗仅在内容组件调用一次 `useConfigs()`，Agent/LLM 表单与底部保存按钮共享 Core，各子模型独立管理草稿与读写状态。面板切换保留各自草稿，保存只提交当前面板。普通关闭会卸载内容、丢弃未保存草稿，重开后重新 GET；保存期间统一阻止编辑、切换面板和关闭，待成功、失败或超时后恢复操作。
+Provider 的引入必须与取消策略、错误隔离和生命周期测试一起完成；当前每个 `useCrux()` 单独持有 Core 的实现是第 6 节登记的迁移项。当前设置弹窗仅在内容组件调用一次 `useConfigs()`，Agent/LLM 表单与 A2A 列表共享 Core，各子模型独立管理草稿与读写状态。Agent/LLM 的底部保存只提交当前表单；A2A 操作即时生效，底部提供关闭。普通关闭会卸载内容、丢弃未保存草稿，重开后重新 GET；保存期间统一阻止编辑、切换面板和关闭，待成功、失败或超时后恢复操作。
 
 ## 5. 配置、持久化、认证和平台边界
 
@@ -197,10 +205,12 @@ Provider 的引入必须与取消策略、错误隔离和生命周期测试一�
 
 已完成的设置切片：
 
-- [api/configs](shared/src/api/configs/mod.rs)、[model/configs](shared/src/model/configs/mod.rs)、[view/configs](shared/src/view/configs/mod.rs) 各自聚合 Agent/LLM 子模块。API 构造 GET/POST；Model 管理字符串草稿、校验、读写去重与恢复；View 输出 data/draft/loading/saving/error/saved/dirty/can_save。根 ViewModel 提供 `agent_config` 和 `llm_config`，`app.rs` 继续保持委派入口。
-- [features/configs](packages/src/features/configs/index.ts) 集中设置弹窗、Agent/LLM 表单、`useConfigs()` 与事件包装，通过 `@apps/frontend/configs` 导出。通用 `lib/crux` 保留桥接与平台 I/O；旧设置组件和业务 Hook 已迁出。
+- [api/configs](shared/src/api/configs/mod.rs)、[model/configs](shared/src/model/configs/mod.rs)、[view/configs](shared/src/view/configs/mod.rs) 各自聚合 Agent/LLM/A2A 子模块。API 构造 GET/POST；Model 管理草稿、校验、读写去重与恢复；View 按各资源流程输出页面数据。根 ViewModel 提供 `agent_config`、`llm_config`、`a2a_config`，`app.rs` 继续保持委派入口。
+- [features/configs](packages/src/features/configs/index.ts) 集中设置弹窗、Agent/LLM 表单、A2A 列表、`useConfigs()` 与事件包装，通过 `@apps/frontend/configs` 导出。通用 `lib/crux` 保留桥接与平台 I/O；旧设置组件和业务 Hook 已迁出。
 - [http.ts](packages/src/lib/crux/http.ts) 已加入普通 HTTP 默认 30 秒截止时间与实例取消清理；[core.ts](packages/src/lib/crux/core.ts) 将普通 HTTP 失败回传所属 Rust 模型，全局错误保留初始化、FFI 与协议故障。设置保存根据服务端返回值确认结果，失败保留草稿，超时/网络异常显示结果待核实提示。
 - [LLM Model](shared/src/model/configs/llm.rs) 维护可空字段与私有密钥草稿；[LLM View](shared/src/view/configs/llm.rs) 中的密钥信息仅为配置/变更布尔值。新密钥在成功、撤销、关闭后清除；空密钥保留服务端原值，其他四字段留空提交 `null`，由后端应用默认值。
+
+- [A2A Model](shared/src/model/configs/a2a.rs) 管理列表、新增草稿与即时操作，区分已确认写入、列表刷新失败和结果待核实；[A2A UI](packages/src/features/configs/a2a-config-panel.tsx) 复用同一设置 Core。地址仅接受 HTTP(S) 且无用户信息、查询参数与片段，资源 ID 按单个路径段编码。删除确认弹窗由父面板控制并挂在列表外，等待 POST 与后续 GET 结束后关闭；`finalFocus` 将焦点恢复到「刷新」按钮，按钮禁用时回到父面板。
 
 以下为剩余迁移项。新业务按目标落位；既有偏差按表分批消除。
 
@@ -210,14 +220,14 @@ Provider 的引入必须与取消策略、错误隔离和生命周期测试一�
 | [use-crux.ts](packages/src/lib/crux/use-crux.ts) 每次挂载 new Core | 引入应用根 Provider，useCrux 消费共享 Context | 认证、会话等多个业务联动前完成 |
 | [core.ts](packages/src/lib/crux/core.ts) 当前使用实例级取消 | Provider 同批完成请求归属、业务取消/失效响应及其他能力错误归属；补真实 Provider 挂载测试 | 与共享 Core 一起验收 |
 | 会话页面与业务组件仍分散在 `packages/src/` 与 `components/` | 逐步迁到 `features/sessions/`，保留已有公开入口 | 扩展会话模块时迁移，新增业务直接按目标落位 |
-| ConfigsModel 已聚合 Agent/LLM 独立状态，事件逐次传 base URL | 启动配置统一注入；MCP/A2A 按同一子模块方式接入 | 认证或跨业务联动前统一配置，其他设置按需求接入 |
+| ConfigsModel 已聚合 Agent/LLM/A2A 独立状态，事件逐次传 base URL | 启动配置统一注入；MCP 按同一子模块方式接入 | 认证或跨业务联动前统一配置，其他设置按需求接入 |
 | [capabilities/sse.rs](shared/src/capabilities/sse.rs) / [Shell SSE](packages/src/lib/crux/sse.ts) 当前为 URL + GET，解码错误不可观察 | 支持后端 POST SSE 契约、事件名、可观察错误、取消/结束 | 会话实时业务接入前完成 |
 | Electron 使用 file 页面，当前 [main.ts](electron-app/src/main.ts) 无条件打开 DevTools | 明确生产地址与受限传输路径，DevTools 限开发；验收安装包请求与导航 | 桌面发布前完成 |
-| 首页/会话仍含演示数据，MCP/A2A 配置保存仍是占位 | 各模块逐项完成真实数据、交互与失败恢复，演示路由/数据退出生产入口 | 对应业务上线前完成 |
+| 首页/会话仍含演示数据，MCP 配置保存仍是占位 | 各模块逐项完成真实数据、交互与失败恢复，演示路由/数据退出生产入口 | 对应业务上线前完成 |
 
 `@apps/frontend/configs` 公开导出 `ManusSettings` 与 `useConfigs`，业务组件通过当前设置弹窗提供的 controller 消费同一 Core。`@apps/frontend/chat`、`/new-session`、`/novnc`、`/layout` 等公开入口可保留名称，通过 `package.json` 的 `exports` 指向迁移后的文件；共享包内部仍使用相对导入。移动 Hook 后同步测试编译范围，避免测试继续覆盖旧文件。
 
-验证证据按当前 checkout 的实际执行结果记录。配置写流程使用 `settings-save --allow-config-write true`，记录原值，保存后重新 GET 核对，再恢复原值；未确认的写请求必须记为失败且结果待核实。LLM 验证单独记录，实际写入保持密钥留空并恢复非密钥字段，密钥替换在明确标记的模拟传输边界验证，证据脱敏。剩余生产迁移项各自完成验证后更新本表。
+验证证据按当前 checkout 的实际执行结果记录。配置写流程使用 `settings-save --allow-config-write true`，记录原值，保存后重新 GET 核对，再恢复原值；未确认的写请求必须记为失败且结果待核实。LLM 验证单独记录，实际写入保持密钥留空并恢复非密钥字段，密钥替换在明确标记的模拟传输边界验证，证据脱敏。A2A 联调通过本机临时 Card 测试项完成增删与启停，保持既有配置，仅验证配置与卡片展示。剩余生产迁移项各自完成验证后更新本表。
 
 ## 7. 每次修改的执行要求
 

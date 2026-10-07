@@ -1,5 +1,6 @@
 //! 设置根模块：聚合各资源状态，通过子事件委派业务更新。
 
+pub mod a2a;
 pub mod agent;
 pub mod llm;
 
@@ -9,6 +10,7 @@ use facet::Facet;
 use serde::{Deserialize, Serialize};
 
 use crate::effects::Effect;
+use a2a::{A2aConfigEvent, A2aConfigModel};
 use agent::{AgentConfigEvent, AgentConfigModel};
 use llm::{LlmConfigEvent, LlmConfigModel};
 
@@ -17,12 +19,14 @@ use llm::{LlmConfigEvent, LlmConfigModel};
 pub enum ConfigsEvent {
     Agent(AgentConfigEvent),
     Llm(LlmConfigEvent),
+    A2a(A2aConfigEvent),
 }
 
 #[derive(Default)]
 pub struct ConfigsModel {
     pub(crate) agent: AgentConfigModel,
     pub(crate) llm: LlmConfigModel,
+    pub(crate) a2a: A2aConfigModel,
 }
 
 impl ConfigsModel {
@@ -30,11 +34,12 @@ impl ConfigsModel {
         match event {
             ConfigsEvent::Agent(event) => self.agent.update(event).map_event(ConfigsEvent::Agent),
             ConfigsEvent::Llm(event) => self.llm.update(event).map_event(ConfigsEvent::Llm),
+            ConfigsEvent::A2a(event) => self.a2a.update(event).map_event(ConfigsEvent::A2a),
         }
     }
 }
 
-// 两种设置接口共用固定错误分类，避免将后端响应或传输错误中的敏感内容展示出来。
+// 设置接口共用固定错误分类，避免将后端响应或传输错误中的敏感内容展示出来。
 fn receive_config<T>(
     result: crux_http::Result<Response<T>>,
     saved: bool,

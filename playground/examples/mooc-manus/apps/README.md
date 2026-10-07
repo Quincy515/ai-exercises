@@ -49,7 +49,7 @@ Rust 保存字符串草稿，点击保存时统一校验，清空、非整数或
 点击「取消」或关闭弹窗会丢弃未保存草稿，重新打开时读取服务器配置。
 保存期间禁用字段、切换面板和关闭，避免提交途中丢失状态；成功后以服务端返回值更新表单并显示「保存成功」。
 失败时保留草稿供用户手动重试。HTTP 默认 30 秒超时，保存超时或网络中断会提示结果尚未确认，可重新打开设置核对。
-A2A、MCP 面板沿用课程占位，保存按钮保持禁用。模型提供商读写见下节。
+MCP 面板沿用课程占位，保存按钮保持禁用。模型提供商和 A2A 配置见下节。
 
 ```text
 AgentConfigPanel → useConfigs().agent → useCrux
@@ -103,9 +103,34 @@ pnpm --filter electron-app start
 新的密钥在密码框、Rust 私有临时状态和提交链路中短暂保留，成功、撤销或关闭后清除；ViewModel 仅暴露 `api_key_changed` 状态，Debug 隐去输入和响应内容。
 保存失败保留当前草稿供重试，超时或断网提示结果待核实。配置接口成功表示服务端已保存参数，提供商连接与模型调用按后续业务验证。
 
-[use-configs.ts](packages/src/features/configs/use-configs.ts) 在一个设置弹窗内持有一个 Core，返回独立的 `agent`、`llm` 控制器。
-切换面板保留各自草稿；底部保存只提交当前面板。任何配置正在保存时统一阻止切换与关闭。
+[use-configs.ts](packages/src/features/configs/use-configs.ts) 在一个设置弹窗内持有一个 Core，返回独立的 `agent`、`llm`、`a2a` 控制器。
+Agent/LLM 切换面板保留各自草稿，底部保存只提交当前表单。A2A 使用即时操作，底部显示「关闭」。任何配置正在保存时统一阻止切换与关闭。
 两端通过同一个 `ManusSettings` 复用表单与事件，[config-feedback.tsx](packages/src/features/configs/config-feedback.tsx) 复用读取、撤销及错误提示。普通 HTTP 失败经 `resolve` 回到所属 Rust 模型，全局错误仅报告初始化、FFI 等客户端故障。
+
+### A2A Agent 配置：列表、新增、启停与删除
+
+「设置 → A2A Agent配置」读取远程 Agent 列表，新增、开关和删除确认立即提交。
+当前面板底部提供「关闭」，每项操作完成后自动刷新列表。
+
+| 操作 | 接口 | 请求体与响应 |
+| --- | --- | --- |
+| 列表 | `GET /api/app_configs/a2a-servers` | 返回 `{ a2a_servers: [...] }` |
+| 新增 | `POST /api/app_configs/a2a-servers` | `{ base_url }` → JSON `null` |
+| 启停 | `POST /api/app_configs/a2a-servers/{id}/enabled` | `{ enabled }` → JSON `null` |
+| 删除 | `POST /api/app_configs/a2a-servers/{id}/delete` | 空请求体 → JSON `null` |
+
+列表字段包含 `id`、`name`、`description`、`input_modes`、`output_modes`、`streaming`、`push_notifications` 和 `enabled`。
+新增地址由 Rust 校验为带主机的 HTTP(S) URL，限制用户名/密码、查询参数、片段与控制字符，提交前去掉末尾 `/`。
+资源 `id` 经 URL 路径段编码，启停和删除始终定位一个资源。
+
+[api/configs/a2a.rs](shared/src/api/configs/a2a.rs) 构造四个请求；[model/configs/a2a.rs](shared/src/model/configs/a2a.rs) 管理新增草稿、串行写入、结果提示和后续刷新；[view/configs/a2a.rs](shared/src/view/configs/a2a.rs) 输出列表与状态。
+[a2a-config-panel.tsx](packages/src/features/configs/a2a-config-panel.tsx) 通过 `useConfigs().a2a` 渲染列表、新增表单、开关和删除确认。保存期间统一阻止关闭、切换面板与重复提交。
+删除确认弹窗由父面板控制并挂在列表外，等待 POST 与后续 GET 结束后关闭；`finalFocus` 将焦点恢复到「刷新」按钮，按钮禁用时回到父面板。
+
+写入成功后先记录已确认结果，再 GET 刷新；启停和删除会先更新已确认的本地行。后续读取失败时保留「已更新/已删除」提示，用户只需刷新列表。
+5xx、超时、网络中断或响应格式异常会标记结果待核实，先禁用继续写入并提供刷新核对；刷新成功后仍提示核对上次结果，避免重复新增。
+
+后端列表会读取远程 Agent Card，只返回卡片获取成功的条目。已添加的服务暂未显示时，应检查地址与连接后刷新；空列表仅表示当前没有可展示卡片。远程 Card 获取和协议执行由后端负责，客户端继续遵守现有接口边界。
 
 ### 按 weather 的职责划分扩展业务
 
@@ -120,31 +145,34 @@ shared/src/
 │   └── configs/
 │       ├── mod.rs     # 设置接口模块声明
 │       ├── agent.rs   # Agent DTO、GET/POST
-│       └── llm.rs     # LLM 安全响应、独立写请求
+│       ├── llm.rs     # LLM 安全响应、独立写请求
+│       └── a2a.rs     # A2A 列表、新增、启停与删除
 ├── model/
 │   ├── mod.rs         # 根 Event/Model、模块事件分发
 │   └── configs/
-│       ├── mod.rs     # 聚合 Agent/Llm 子事件与状态
+│       ├── mod.rs     # 聚合 Agent/Llm/A2a 子事件与状态
 │       ├── agent.rs   # Agent 草稿、校验、读写
-│       └── llm.rs     # LLM 草稿、校验、私有密钥与读写
+│       ├── llm.rs     # LLM 草稿、校验、私有密钥与读写
+│       └── a2a.rs     # URL 草稿、串行操作、写确认与刷新
 ├── view/
 │   ├── mod.rs         # 根 ViewModel、视图汇总
 │   └── configs/
-│       ├── mod.rs     # 导出两个设置 ViewModel
+│       ├── mod.rs     # 导出各设置 ViewModel
 │       ├── agent.rs
-│       └── llm.rs     # 仅输出可安全展示的数据
+│       ├── llm.rs     # 仅输出可安全展示的数据
+│       └── a2a.rs     # 列表、加载/操作状态与结果提示
 └── capabilities/      # 自定义能力实现，如 SSE
 ```
 
 `AppCore` 通过 `model.update(event)` 更新业务，通过 `model.into()` 生成视图。
-根 `Event::Configs` 携带设置事件；`ConfigsEvent::Agent` / `Llm` 委派到各自子模型，Command 经两层 `map_event` 接回根层。
-根 ViewModel 保留 `agent_config` 并增加 `llm_config`，两个配置互相独立。
+根 `Event::Configs` 携带设置事件；`ConfigsEvent::Agent` / `Llm` / `A2a` 委派到各自子模型，Command 经两层 `map_event` 接回根层。
+根 ViewModel 分别提供 `agent_config`、`llm_config`、`a2a_config`，各配置状态互相独立。
 API 模块独立于业务 Model/Event；状态更新留在 `model/`，页面输出转换留在 `view/`。
 
 后续认证、会话、文件和健康检查按实际业务分别增加 `api/<模块>.rs`、`model/<模块>.rs`、
 `view/<模块>.rs`，并在根模块注册。例如会话对应 `api/sessions.rs`、`model/sessions.rs`、`view/sessions.rs`。
 一次业务流程可以组合多个接口；根层按业务模块和跨模块协调组织。
-设置模块已拆成 `configs/{mod,agent,llm}.rs`；新增设置资源在同层扩展，其他业务按实际复杂度拆子目录。
+设置模块已拆成 `configs/{mod,agent,llm,a2a}.rs`；新增设置资源在同层扩展，其他业务按实际复杂度拆子目录。
 
 现有计数器作为教学示例保留在模型层。跨 FFI 的 Event/ViewModel 需要 Facet 与 Serde；内部模型按实际需要派生类型。
 `packages/src/app/` 负责共享布局；`packages/src/features/configs/` 负责设置业务 UI、Hook 与事件包装；`packages/src/lib/crux/` 提供通用 Shell 与 Hook。
@@ -383,7 +411,7 @@ BoltFFI 0.31.0 自动收集浏览器与 Node 入口、map 和 WASM 辅助模块�
   保留 Forge 对应的 Vite 6，Web 使用 Vite 8。
 - 依赖安装配置和锁文件统一维护在本目录。
 
-当前首页与会话详情属于课程基础 UI，Agent 与模型提供商配置通过 `useConfigs` / `useCrux` 接入 Rust HTTP 流程。
+当前首页与会话详情属于课程基础 UI，Agent、模型提供商与 A2A 配置通过 `useConfigs` / `useCrux` 接入 Rust HTTP 流程。
 模型层保留计数器业务示例，现有 WASM 和 Crux 测试继续验证桥接层。
 
 ## 在组件中使用 Crux
@@ -521,4 +549,11 @@ node .agents/skills/verify-mooc-manus/scripts/verify.mjs run --features settings
 
 在独占开发后端执行，期间暂停其他配置编辑。脚本记录原值，检查非法输入、真实保存、关闭重开后的 GET，再通过 UI 恢复原值；证据包含 `original-config.json`、`api-responses.json` 与 `config-cleanup.json`。遇到其他客户端的新值会停止覆盖；写请求结果无法确认时记录失败和待核实状态。结束后同时核对配置恢复结果与进程清理结果。此脚本覆盖 Web 首页保存路径，其他入口与 Electron 按目标平台单独验证。
 
-模型提供商验证需覆盖 GET 回显、空密钥保留、输入校验、保存失败重试及 Agent/LLM 状态隔离。实际写入前记录四个非密钥字段，保持密钥留空，完成后恢复原值并重新 GET 核对。密钥替换使用传输边界模拟测试，证据仅保留脱敏字段与布尔状态。上述 `settings-save` 命令仍用于 Agent 配置，LLM 的页面与目标平台验证单独记录。
+模型提供商验证需覆盖 GET 回显、空密钥保留、输入校验、保存失败重试及 Agent/LLM 状态隔离。实际写入前记录四个非密钥字段，保持密钥留空，完成后恢复原值并重新 GET 核对。密钥替换使用传输边界模拟测试，证据仅保留脱敏字段与布尔状态。上述 `settings-save` 命令用于 Agent 配置，LLM 使用以下独立流程，目标平台结果分别记录：
+
+```sh
+node .agents/skills/verify-mooc-manus/scripts/verify.mjs run --features llm --port 4317
+node .agents/skills/verify-mooc-manus/scripts/verify.mjs run --features llm-save --allow-config-write true --port 4317
+```
+
+A2A 联调使用本机临时 Agent Card 服务，通过真实后端完成新增、禁用、启用、删除和重新读取。每次只操作本轮创建的测试 ID，保留已有配置；清理时确认测试项移除、临时服务退出、证据仍可读取。此流程验证配置与 Card 展示，远程 Agent 任务调用按后续业务单独验证。写入结果不确定时先刷新核对，避免重复创建测试配置。

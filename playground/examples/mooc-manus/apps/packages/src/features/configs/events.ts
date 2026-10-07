@@ -2,6 +2,13 @@ import {
   eventConfigs,
   configsEventAgent,
   configsEventLlm,
+  configsEventA2a,
+  a2aConfigEventGet,
+  a2aConfigEventEditUrl,
+  a2aConfigEventResetDraft,
+  a2aConfigEventCreate,
+  a2aConfigEventSetEnabled,
+  a2aConfigEventDelete,
   agentConfigEventGet,
   agentConfigEventEdit,
   agentConfigEventReset,
@@ -55,4 +62,20 @@ export const llmConfigEvents = {
   Reset: () => eventConfigs(configsEventLlm(llmConfigEventReset())),
   Save: (baseUrl: string) =>
     eventConfigs(configsEventLlm(llmConfigEventSave(baseUrl))),
+} as const;
+
+export const a2aConfigEvents = {
+  Get: (baseUrl: string) =>
+    eventConfigs(configsEventA2a(a2aConfigEventGet(baseUrl))),
+  EditUrl: (value: string) =>
+    eventConfigs(configsEventA2a(a2aConfigEventEditUrl(value))),
+  ResetDraft: () => eventConfigs(configsEventA2a(a2aConfigEventResetDraft())),
+  Create: (baseUrl: string) =>
+    eventConfigs(configsEventA2a(a2aConfigEventCreate(baseUrl))),
+  SetEnabled: (baseUrl: string, id: string, enabled: boolean) =>
+    eventConfigs(
+      configsEventA2a(a2aConfigEventSetEnabled(baseUrl, id, enabled)),
+    ),
+  Delete: (baseUrl: string, id: string) =>
+    eventConfigs(configsEventA2a(a2aConfigEventDelete(baseUrl, id))),
 } as const;
