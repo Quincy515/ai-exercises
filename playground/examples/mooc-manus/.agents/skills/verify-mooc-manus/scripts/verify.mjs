@@ -10,6 +10,7 @@ import { driveFlows, driverInfo } from './flows.mjs';
 import { requireConfigWriteAuthorization } from './config-write.mjs';
 import { llmPath, readLlmConfig } from './llm-policy.mjs';
 import { a2aPath, readA2aList } from './a2a-policy.mjs';
+import { mcpPath, readMcpList } from './mcp-policy.mjs';
 import { inspectNativeBackend } from './a2a-card-fixture.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
@@ -135,6 +136,17 @@ async function doctor(state, features = state.features ?? ['settings', 'sessions
     delete a2aBackend.body;
     if (features.includes('a2a-write')) a2aLocalBackend = inspectNativeBackend(repo);
   }
+  let mcpBackend, mcpLocalBackend;
+  if (features.some(feature => ['mcp', 'mcp-write'].includes(feature))) {
+    mcpBackend = await get(backend + mcpPath);
+    try { mcpBackend.mcp_servers = readMcpList(mcpBackend.body); mcpBackend.contract = true; }
+    catch { mcpBackend.contract = false; mcpBackend.reason = 'MCP response does not satisfy the public metadata contract'; }
+    delete mcpBackend.body;
+    if (features.includes('mcp-write')) {
+      mcpLocalBackend = inspectNativeBackend(repo);
+      mcpLocalBackend.reason = mcpLocalBackend.reason.replaceAll('A2A', 'MCP');
+    }
+  }
   let driver;
   try {
     const info = driverInfo(repo, state.driverOptions);
@@ -143,10 +155,11 @@ async function doctor(state, features = state.features ?? ['settings', 'sessions
   const ok = Boolean(ownership && buildUnchanged && driver.available && page.available && page.body.includes('Mooc Manus'));
   return { checkedAt: new Date().toISOString(), ok, ownership, buildUnchanged,
     head: state.source.head, workingTreeDigest: state.source.digest, url: state.url,
-    pageStatus: page.status, backend: api, driver, ...(llmBackend ? { llmBackend } : {}), ...(a2aBackend ? { a2aBackend } : {}), ...(a2aLocalBackend ? { a2aLocalBackend } : {}),
+    pageStatus: page.status, backend: api, driver, ...(llmBackend ? { llmBackend } : {}), ...(a2aBackend ? { a2aBackend } : {}), ...(a2aLocalBackend ? { a2aLocalBackend } : {}), ...(mcpBackend ? { mcpBackend } : {}), ...(mcpLocalBackend ? { mcpLocalBackend } : {}),
     eligible: { settings: Boolean(ok && api.available && api.contract), sessions: ok, files: ok,
       ...(llmBackend ? { llm: Boolean(ok && llmBackend.available && llmBackend.contract) } : {}),
-      ...(a2aBackend ? { a2a: Boolean(ok && a2aBackend.available && a2aBackend.contract) } : {}) } };
+      ...(a2aBackend ? { a2a: Boolean(ok && a2aBackend.available && a2aBackend.contract) } : {}),
+      ...(mcpBackend ? { mcp: Boolean(ok && mcpBackend.available && mcpBackend.contract) } : {}) } };
 }
 
 export function viteLaunchCommand(root = repo, port = 4317) {
@@ -303,13 +316,13 @@ async function main() {
     options[key.slice(2)] = args.shift();
   }
   if (!['run', 'launch', 'doctor', 'drive', 'cleanup'].includes(verb)) {
-    console.log('Usage: verify.mjs run|launch|doctor|drive|cleanup [--run output/playwright/verify-mooc-manus/ID] [--port 4317] [--features settings,sessions,files|settings-save|llm|llm-save|a2a|a2a-write] [--allow-config-write true] [--playwright-module /path/to/playwright] [--channel chrome]');
+    console.log('Usage: verify.mjs run|launch|doctor|drive|cleanup [--run output/playwright/verify-mooc-manus/ID] [--port 4317] [--features settings,sessions,files|settings-save|llm|llm-save|a2a|a2a-write|mcp|mcp-write] [--allow-config-write true] [--playwright-module /path/to/playwright] [--channel chrome]');
     process.exit(verb === '--help' || !verb ? 0 : 1);
   }
   let state;
   try {
     const features = (options.features ?? 'settings,sessions,files').split(',');
-    if (!features.length || features.some(f => !['settings', 'sessions', 'files', 'settings-save', 'llm', 'llm-save', 'a2a', 'a2a-write'].includes(f))) throw new Error('Unknown feature');
+    if (!features.length || features.some(f => !['settings', 'sessions', 'files', 'settings-save', 'llm', 'llm-save', 'a2a', 'a2a-write', 'mcp', 'mcp-write'].includes(f))) throw new Error('Unknown feature');
     if (['launch', 'run', 'drive'].includes(verb)) requireConfigWriteAuthorization(features, options['allow-config-write'] === 'true');
     const run = resolveRunDirectory(options.run ?? path.join(evidenceRoot, new Date().toISOString().replace(/[:.]/g, '-') + '-' + randomUUID().slice(0, 8)));
     if (['doctor', 'drive', 'cleanup'].includes(verb) && !options.run) throw new Error('--run is required');

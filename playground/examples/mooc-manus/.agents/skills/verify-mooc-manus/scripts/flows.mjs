@@ -8,6 +8,8 @@ import { allowedConfigWrite, ConfigWriteJournal, forwardAuthorizedConfigWrite, r
 import { driveSettingsSave } from './settings-save.mjs';
 import { driveLlm } from './llm-flows.mjs';
 import { driveA2a } from './a2a-flows.mjs';
+import { driveMcp } from './mcp-flows.mjs';
+import { mcpPath, mcpWriteEvidence } from './mcp-policy.mjs';
 import { a2aPath } from './a2a-policy.mjs';
 import { llmFields } from './llm-policy.mjs';
 import { excludeLlmDevStream, forwardLlmRead } from './llm-transport.mjs';
@@ -39,8 +41,8 @@ export async function driveFlows({ state, health, features, modulePath, channel,
   const report = { startedAt: new Date().toISOString(), head: state.source.head,
     workingTreeDigest: state.source.digest, surface: 'Web', url: state.url,
     driver: { entry: driver.entry, version: driver.version, channel: driver.channel },
-    mocks: features.includes('a2a-write'),
-    ...(features.includes('a2a-write') ? { mockScope: 'Local controlled Agent Card only; business backend HTTP and UI remain real' } : {}), apiWriteGuard: true, configWriteOptIn: allowConfigWrite,
+    mocks: features.some(feature => ['a2a-write', 'mcp-write'].includes(feature)),
+    ...(features.some(feature => ['a2a-write', 'mcp-write'].includes(feature)) ? { mockScope: 'Local controlled Agent Card or MCP protocol fixture only; business backend HTTP and UI remain real' } : {}), apiWriteGuard: true, configWriteOptIn: allowConfigWrite,
     configWriteTransport: 'real backend via Playwright route.fetch; redirects and retries disabled', features: [] };
   let browser;
   let currentFeature;
@@ -50,11 +52,13 @@ export async function driveFlows({ state, health, features, modulePath, channel,
       currentFeature = feature;
       const isLlm = ['llm', 'llm-save'].includes(feature);
       const isA2a = ['a2a', 'a2a-write'].includes(feature);
-      const guardedConfig = isLlm || isA2a;
+      const isMcp = ['mcp', 'mcp-write'].includes(feature);
+      const guardedConfig = isLlm || isA2a || isMcp;
+      const privateEvidence = isLlm || isMcp;
       const directory = path.join(state.run, feature);
       fs.mkdirSync(directory);
       const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, serviceWorkers: 'block' });
-      if (!isLlm) await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
+      if (!privateEvidence) await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
       const page = await context.newPage();
       page.setDefaultTimeout(15000);
       const errors = [], network = [], blockedWrites = [], authorizedWrites = [], ignoredDevRequests = [];
@@ -62,10 +66,10 @@ export async function driveFlows({ state, health, features, modulePath, channel,
       const writeGuard = { expected: null, attempts: 0, requests: new Map() };
       writeGuard.journal = new ConfigWriteJournal(entries => fs.writeFileSync(
         path.join(directory, 'post-outcomes.json'), JSON.stringify(entries, null, 2) + '\n'),
-      guardedConfig ? reason => String(reason).split('\n')[0] : undefined);
+      isMcp ? () => 'MCP write outcome unknown; raw diagnostics excluded' : guardedConfig ? reason => String(reason).split('\n')[0] : undefined);
       let sequence = 0;
-      const result = { id: feature, status: 'passed', boundary: ['settings', 'settings-save', 'llm', 'llm-save', 'a2a', 'a2a-write'].includes(feature) ? 'live API + Rust/WASM + UI' : 'built-in demo data + real UI interactions',
-        entrypointsCovered: [], checks: [], ...(guardedConfig ? { readTransport: 'real backend via Playwright route.fetch for all GET/HEAD; redirects and retries disabled' } : {}), ...(isLlm ? { tracePolicy: 'disabled: raw LLM network bodies excluded; whitelist JSON and masked screenshots retained' } : {}) };
+      const result = { id: feature, status: 'passed', boundary: ['settings', 'settings-save', 'llm', 'llm-save', 'a2a', 'a2a-write', 'mcp', 'mcp-write'].includes(feature) ? 'live API + Rust/WASM + UI' : 'built-in demo data + real UI interactions',
+        entrypointsCovered: [], checks: [], ...(guardedConfig ? { readTransport: 'real backend via Playwright route.fetch for all GET/HEAD; redirects and retries disabled' } : {}), ...(privateEvidence ? { tracePolicy: 'disabled: raw configuration bodies excluded; whitelist JSON and masked screenshots retained' } : {}) };
       const record = item => fs.appendFileSync(path.join(directory, 'actions.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...item }) + '\n');
       const step = async (action, fn) => {
         record({ action, phase: 'begin' });
@@ -76,11 +80,16 @@ export async function driveFlows({ state, health, features, modulePath, channel,
       const capture = async label => {
         const prefix = `${String(++sequence).padStart(2, '0')}-${label}`;
         await page.screenshot({ path: path.join(directory, prefix + '.png'), animations: 'disabled',
-          ...(isLlm ? { mask: [page.locator('#api_key')] } : {}) });
+          ...(privateEvidence ? { mask: [page.locator('#api_key'), ...(isMcp ? [page.getByLabel('MCP服务器配置', { exact: true })] : [])] } : {}) });
         if (isLlm) {
           const fields = {};
           for (const key of llmFields) if (await page.locator('#llm-config-form #' + key).count()) fields[key] = await page.locator('#llm-config-form #' + key).inputValue();
           fs.writeFileSync(path.join(directory, prefix + '.ui.json'), JSON.stringify({ fields, apiKeyValue: 'omitted' }, null, 2) + '\n');
+        } else if (isMcp) {
+          const rows = await page.locator('[data-mcp-name]').evaluateAll(nodes => nodes.map(node => ({
+            server_name: node.getAttribute('data-mcp-name'), transport: node.getAttribute('data-mcp-transport'),
+            enabled: node.querySelector('[role="switch"]')?.getAttribute('aria-checked') === 'true' })));
+          fs.writeFileSync(path.join(directory, prefix + '.ui.json'), JSON.stringify({ mcp_servers: rows, editor: 'omitted' }, null, 2) + '\n');
         } else fs.writeFileSync(path.join(directory, prefix + '.aria.txt'), await page.locator('body').ariaSnapshot());
         record({ evidence: prefix });
       };
@@ -119,8 +128,9 @@ export async function driveFlows({ state, health, features, modulePath, channel,
       });
       await page.route(guardedConfig ? '**/*' : '**/api/**', route => trackRouteHandler(pendingRoutes, async () => {
         const requested = new URL(route.request().url());
-        const allowedApi = ['/api/app_configs/agent', ...(isLlm ? ['/api/app_configs/llm'] : []), ...(isA2a ? [a2aPath] : [])].includes(requested.pathname)
-          || (isA2a && new RegExp(`^${a2aPath}/[0-9a-f-]+/(enabled|delete)$`, 'i').test(requested.pathname));
+        const allowedApi = ['/api/app_configs/agent', ...(isLlm ? ['/api/app_configs/llm'] : []), ...(isA2a ? [a2aPath] : []), ...(isMcp ? [mcpPath] : [])].includes(requested.pathname)
+          || (isA2a && new RegExp(`^${a2aPath}/[0-9a-f-]+/(enabled|delete)$`, 'i').test(requested.pathname))
+          || (isMcp && new RegExp(`^${mcpPath}/[^/]+/(enabled|delete)$`).test(requested.pathname));
         if (guardedConfig && (requested.origin !== new URL(state.url).origin
           || (requested.pathname.startsWith('/api/') && !allowedApi))) {
           blockedWrites.push({ method: route.request().method(), url: requested.origin + requested.pathname, reason: 'Configuration verification permits only local configuration APIs' });
@@ -133,17 +143,18 @@ export async function driveFlows({ state, health, features, modulePath, channel,
           try { payload = route.request().postDataJSON(); } catch { /* Non-JSON writes fail closed. */ }
           if (allowedConfigWrite({ feature, allowConfigWrite, baseUrl: state.url,
             url: route.request().url(), method: route.request().method(), payload, body: route.request().postData(), expected: writeGuard.expected })) {
+            const evidencePayload = isMcp ? mcpWriteEvidence(writeGuard.expected) : payload;
             writeGuard.expected = null; // A UI save authorizes exactly one request.
-            const entry = writeGuard.journal.begin({ url: route.request().url(), payload });
+            const entry = writeGuard.journal.begin({ url: route.request().url(), payload: evidencePayload });
             writeGuard.requests.set(route.request(), entry);
             authorizedWrites.push(entry);
-            record({ action: '允许本次配置写入', method: 'POST', values: payload });
+            record({ action: '允许本次配置写入', method: 'POST', values: evidencePayload });
             await forwardAuthorizedConfigWrite(route, writeGuard.journal, entry);
             return;
           }
           blockedWrites.push({ method: route.request().method(), url: guardedConfig ? requested.origin + requested.pathname : route.request().url() });
           await route.abort('blockedbyclient');
-        } else if (guardedConfig) await forwardLlmRead(route, blockedWrites, isA2a ? 'A2A' : 'LLM');
+        } else if (guardedConfig) await forwardLlmRead(route, blockedWrites, isMcp ? 'MCP' : isA2a ? 'A2A' : 'LLM');
         else await route.continue();
       }, error => errors.push(guardedConfig ? 'Configuration route handler failed; raw detail excluded from evidence' : error.message)));
       try {
@@ -200,6 +211,9 @@ export async function driveFlows({ state, health, features, modulePath, channel,
         }
         if (isLlm) {
           await driveLlm({ feature, page, state, health, result, step, capture, record, directory, writeGuard, allowConfigWrite, goto });
+        }
+        if (isMcp) {
+          await driveMcp({ feature, page, state, health, result, step, capture, directory, writeGuard, allowConfigWrite, goto });
         }
         if (isA2a) {
           await driveA2a({ feature, page, state, health, result, step, capture, record, directory, writeGuard, allowConfigWrite, goto });
@@ -263,14 +277,14 @@ export async function driveFlows({ state, health, features, modulePath, channel,
         assert.deepEqual(blockedWrites, [], 'Unexpected blocked request; feature map may be outdated');
         assert.deepEqual(errors, [], 'Unexpected page script errors');
       } catch (error) {
-        result.status = 'failed'; result.reason = guardedConfig ? error.message.split('\n')[0] : error.stack;
-        record({ phase: 'failed', error: guardedConfig ? error.message.split('\n')[0] : error.message });
+        result.status = 'failed'; result.reason = isMcp ? 'MCP verification failed; inspect safe actions and response metadata' : guardedConfig ? error.message.split('\n')[0] : error.stack;
+        record({ phase: 'failed', error: isMcp ? 'MCP verification failed; raw diagnostics excluded' : guardedConfig ? error.message.split('\n')[0] : error.message });
         try { await capture('failure'); } catch { /* Keep the other proof artifacts. */ }
       } finally {
-        try { if (!isLlm) await context.tracing.stop({ path: path.join(directory, 'trace.zip') }); }
+        try { if (!privateEvidence) await context.tracing.stop({ path: path.join(directory, 'trace.zip') }); }
         catch (error) { result.status = 'failed'; result.traceError = error.message; }
         try { await context.close(); }
-        catch (error) { result.status = 'failed'; result.contextError = error.message; }
+        catch (error) { result.status = 'failed'; result.contextError = isMcp ? 'MCP context cleanup failed; raw diagnostics excluded' : error.message; }
         await settleRouteHandlers(pendingRoutes);
         writeGuard.journal.finalize();
         result.postOutcomes = writeGuard.journal.entries;
@@ -285,7 +299,7 @@ export async function driveFlows({ state, health, features, modulePath, channel,
       }
     }
   } catch (error) {
-    report.infrastructureError = error.stack;
+    report.infrastructureError = ['mcp', 'mcp-write'].includes(currentFeature) ? 'MCP infrastructure failure; raw diagnostics excluded' : error.stack;
     for (const id of features) if (!report.features.some(item => item.id === id)) {
       report.features.push({ id, status: id === (currentFeature ?? features[0]) ? 'failed' : 'unverified', reason: 'Harness infrastructure failure' });
     }
