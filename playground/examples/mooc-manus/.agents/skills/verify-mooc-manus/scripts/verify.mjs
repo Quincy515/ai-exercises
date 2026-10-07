@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { driveFlows, driverInfo } from './flows.mjs';
 import { requireConfigWriteAuthorization } from './config-write.mjs';
+import { llmPath, readLlmConfig } from './llm-policy.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
 const evidenceRoot = path.join(repo, 'output/playwright/verify-mooc-manus');
@@ -103,7 +104,7 @@ async function get(url) {
   } catch (error) { return { available: false, url, error: error.message }; }
 }
 
-async function doctor(state) {
+async function doctor(state, features = state.features ?? ['settings', 'sessions', 'files']) {
   const ownership = !state.stoppedAt && owned(state) && listeners(state.port).length > 0;
   const buildUnchanged = snapshot().digest === state.source.digest;
   const page = ownership ? await get(state.url) : { available: false, error: 'Owned listener absent' };
@@ -116,6 +117,14 @@ async function doctor(state) {
   // Only the three public values are recorded, never arbitrary backend error bodies.
   delete api.body;
   if (api.contract) api.config = Object.fromEntries(['max_iterations', 'max_retries', 'max_search_results'].map(k => [k, config[k]]));
+  let llmBackend;
+  if (features.some(feature => ['llm', 'llm-save'].includes(feature))) {
+    llmBackend = await get(backend + llmPath);
+    try { llmBackend.config = readLlmConfig(llmBackend.body); llmBackend.contract = true; }
+    catch (error) { llmBackend.contract = false; llmBackend.reason = error.code === 'LLM_UNSAFE_MAX_TOKENS'
+      ? error.message : 'LLM response does not satisfy the public configuration contract'; }
+    delete llmBackend.body;
+  }
   let driver;
   try {
     const info = driverInfo(repo, state.driverOptions);
@@ -124,8 +133,9 @@ async function doctor(state) {
   const ok = Boolean(ownership && buildUnchanged && driver.available && page.available && page.body.includes('Mooc Manus'));
   return { checkedAt: new Date().toISOString(), ok, ownership, buildUnchanged,
     head: state.source.head, workingTreeDigest: state.source.digest, url: state.url,
-    pageStatus: page.status, backend: api, driver,
-    eligible: { settings: Boolean(ok && api.available && api.contract), sessions: ok, files: ok } };
+    pageStatus: page.status, backend: api, driver, ...(llmBackend ? { llmBackend } : {}),
+    eligible: { settings: Boolean(ok && api.available && api.contract), sessions: ok, files: ok,
+      ...(llmBackend ? { llm: Boolean(ok && llmBackend.available && llmBackend.contract) } : {}) } };
 }
 
 export function viteLaunchCommand(root = repo, port = 4317) {
@@ -178,6 +188,7 @@ async function launch(run, port, options) {
   child.unref();
   const state = { schema: 'verify-mooc-manus/v1', repo, run, port, url: `http://127.0.0.1:${port}`,
     pid: child.pid, processIdentity: processIdentity(child.pid), source,
+    features: (options.features ?? 'settings,sessions,files').split(','),
     driverOptions: { modulePath: options['playwright-module'], channel: options.channel },
     command: [launchCommand.bin, ...launchCommand.args], cwd: launchCommand.cwd, packageDevScript: launchCommand.devScript, overrides: { VITE_API_BASE_URL: '' }, startedAt: new Date().toISOString() };
   try {
@@ -257,7 +268,7 @@ export function recordBuildConsistency(run, expectedDigest, final, report) {
 }
 
 async function drive(state, features, options) {
-  const health = await doctor(state);
+  const health = await doctor(state, features);
   json(path.join(state.run, 'drive-doctor.json'), health);
   if (!health.ok) throw new Error('Doctor failed; inspect drive-doctor.json before driving');
   if (fs.existsSync(path.join(state.run, 'results.json'))) throw new Error('Drive already recorded; use a new run to preserve proof');
@@ -281,13 +292,13 @@ async function main() {
     options[key.slice(2)] = args.shift();
   }
   if (!['run', 'launch', 'doctor', 'drive', 'cleanup'].includes(verb)) {
-    console.log('Usage: verify.mjs run|launch|doctor|drive|cleanup [--run output/playwright/verify-mooc-manus/ID] [--port 4317] [--features settings,sessions,files|settings-save] [--allow-config-write true] [--playwright-module /path/to/playwright] [--channel chrome]');
+    console.log('Usage: verify.mjs run|launch|doctor|drive|cleanup [--run output/playwright/verify-mooc-manus/ID] [--port 4317] [--features settings,sessions,files|settings-save|llm|llm-save] [--allow-config-write true] [--playwright-module /path/to/playwright] [--channel chrome]');
     process.exit(verb === '--help' || !verb ? 0 : 1);
   }
   let state;
   try {
     const features = (options.features ?? 'settings,sessions,files').split(',');
-    if (!features.length || features.some(f => !['settings', 'sessions', 'files', 'settings-save'].includes(f))) throw new Error('Unknown feature');
+    if (!features.length || features.some(f => !['settings', 'sessions', 'files', 'settings-save', 'llm', 'llm-save'].includes(f))) throw new Error('Unknown feature');
     if (['launch', 'run', 'drive'].includes(verb)) requireConfigWriteAuthorization(features, options['allow-config-write'] === 'true');
     const run = resolveRunDirectory(options.run ?? path.join(evidenceRoot, new Date().toISOString().replace(/[:.]/g, '-') + '-' + randomUUID().slice(0, 8)));
     if (['doctor', 'drive', 'cleanup'].includes(verb) && !options.run) throw new Error('--run is required');
@@ -295,7 +306,7 @@ async function main() {
     else state = readState(run);
     let result;
     if (verb === 'launch') result = { run, url: state.url, pid: state.pid };
-    if (verb === 'doctor') { result = await doctor(state); if (!result.ok) process.exitCode = 1; }
+    if (verb === 'doctor') { result = await doctor(state, options.features ? features : undefined); if (!result.ok) process.exitCode = 1; }
     if (verb === 'cleanup') result = await cleanup(state);
     if (verb === 'drive' || verb === 'run') {
       try {

@@ -6,6 +6,9 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { excludeLlmDevStream, forwardLlmRead } from './llm-transport.mjs';
+import { applyFinalSafetyGate, settleRouteHandlers, trackRouteHandler } from './route-lifecycle.mjs';
+import { llmInputMatches, llmPayload, llmRestoreDecision, llmTarget, readLlmConfig, sameLlmConfig, validLlmPayload } from './llm-policy.mjs';
 import { recordBuildConsistency, resolveRunDirectory, sourceFingerprint, viteLaunchCommand } from './verify.mjs';
 import { allowedConfigWrite, ConfigWriteJournal, forwardAuthorizedConfigWrite, requireConfigWriteAuthorization, restoreConfigAfterWrites, restoreDecision, withinPostDeadline } from './config-write.mjs';
 
@@ -345,4 +348,250 @@ test('authorized write transport error records unknown and aborts the browser re
   assert.equal(fulfills, 0);
   assert.equal(entry.outcome, 'outcome-unknown');
   assert.match(entry.reason, /socket hang up/);
+});
+
+const llmOriginal = { base_url: null, model_name: null, temperature: null, max_tokens: null, api_key_configured: true };
+const llmWritePolicy = overrides => ({ feature: 'llm-save', allowConfigWrite: true, baseUrl: 'http://127.0.0.1:4317',
+  url: 'http://127.0.0.1:4317/api/app_configs/llm', method: 'POST', payload: llmPayload(llmOriginal), expected: llmPayload(llmOriginal), ...overrides });
+
+test('llm-save refuses missing explicit authorization before any instance lookup', () => {
+  assert.throws(() => requireConfigWriteAuthorization(['llm-save'], false), /llm-save requires explicit/);
+  const script = fileURLToPath(new URL('./verify.mjs', import.meta.url));
+  for (const verb of ['launch', 'run', 'drive']) {
+    const result = spawnSync(process.execPath, [script, verb, '--features', 'llm-save'], { encoding: 'utf8' });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /llm-save requires explicit --allow-config-write true/);
+  }
+});
+
+test('LLM response evidence is a five-field whitelist and drops secrets and unknown nested data', () => {
+  const decoded = readLlmConfig(JSON.stringify({ ...llmOriginal, api_key: 'NEVER-LOG-THIS-KEY', nested: { secret: 'PRIVATE' } }));
+  assert.deepEqual(decoded, llmOriginal);
+  assert.equal(JSON.stringify(decoded).includes('NEVER-LOG'), false);
+  assert.deepEqual(Object.keys(decoded).sort(), ['api_key_configured', 'base_url', 'max_tokens', 'model_name', 'temperature']);
+  assert.throws(() => readLlmConfig('NEVER-LOG-THIS-KEY'), error => {
+    assert.equal(error.message.includes('NEVER-LOG'), false); return true;
+  });
+});
+
+test('LLM unsafe max_tokens blocks before any rounded value can enter evidence', () => {
+  const text = '{"base_url":null,"model_name":null,"temperature":null,"max_tokens":9223372036854775807,"api_key_configured":true,"api_key":"NEVER-LOG-THIS-KEY"}';
+  assert.throws(() => readLlmConfig(text), error => {
+    assert.equal(error.code, 'LLM_UNSAFE_MAX_TOKENS');
+    assert.equal(error.message.includes('922337'), false);
+    assert.equal(error.message.includes('NEVER-LOG'), false);
+    return true;
+  });
+});
+
+test('LLM write guard rejects every api_key property, including empty and null', () => {
+  assert.equal(allowedConfigWrite(llmWritePolicy()), true);
+  for (const api_key of ['', null, 'NEVER-SEND-THIS-KEY']) {
+    const payload = { ...llmPayload(llmOriginal), api_key };
+    assert.equal(allowedConfigWrite(llmWritePolicy({ payload })), false);
+    assert.equal(allowedConfigWrite(llmWritePolicy({ payload, expected: payload })), false);
+  }
+  assert.equal(allowedConfigWrite(llmWritePolicy({ payload: llmOriginal })), false, 'Response key status does not belong in a write');
+});
+
+test('LLM write guard permits only opted-in same-origin exact endpoint and expected public fields', () => {
+  for (const overrides of [{ feature: 'llm' }, { feature: 'settings-save' }, { allowConfigWrite: false },
+    { method: 'PUT' }, { method: 'DELETE' }, { url: 'https://model.example/api/app_configs/llm' },
+    { url: 'http://127.0.0.1:4317/api/app_configs/agent' }, { url: 'http://127.0.0.1:4317/api/app_configs/llm?key=hidden' },
+    { payload: { ...llmPayload(llmOriginal), max_tokens: 1 } },
+  ]) assert.equal(allowedConfigWrite(llmWritePolicy(overrides)), false);
+});
+
+test('LLM public payload validates nullable fields and integer and temperature boundaries', () => {
+  for (const values of [llmPayload(llmOriginal), { base_url: 'https://example.test/v1', model_name: 'model', temperature: -2, max_tokens: 0 },
+    { base_url: null, model_name: null, temperature: 2, max_tokens: Number.MAX_SAFE_INTEGER }]) assert.equal(validLlmPayload(values), true);
+  for (const delta of [{ max_tokens: -1 }, { max_tokens: 1.5 }, { max_tokens: Number.MAX_SAFE_INTEGER + 1 },
+    { temperature: 3 }, { temperature: Infinity }, { temperature: '1' }, { model_name: 7 }]) {
+    assert.equal(validLlmPayload({ ...llmPayload(llmOriginal), ...delta }), false);
+  }
+});
+
+test('LLM target changes only max_tokens and keeps a nullable original recoverable', () => {
+  assert.deepEqual(llmTarget(llmOriginal), { ...llmOriginal, max_tokens: 1 });
+  assert.equal(llmOriginal.max_tokens, null);
+  assert.equal(llmTarget({ ...llmOriginal, max_tokens: 0 }).max_tokens, 1);
+  assert.equal(llmTarget({ ...llmOriginal, max_tokens: Number.MAX_SAFE_INTEGER }).max_tokens, Number.MAX_SAFE_INTEGER - 1);
+});
+
+test('LLM compensation restores explicit nulls while omitting api_key entirely', async () => {
+  const journal = new ConfigWriteJournal();
+  const target = llmTarget(llmOriginal);
+  journal.complete(journal.begin({ url: llmWritePolicy().url, payload: llmPayload(target) }), 200);
+  let current = { ...target };
+  const writes = [];
+  const progress = await restoreConfigAfterWrites({ journal, original: llmOriginal, target,
+    equals: sameLlmConfig, decide: llmRestoreDecision,
+    read: async () => current, write: async values => {
+      const payload = llmPayload(values);
+      writes.push(payload); current = { ...payload, api_key_configured: true };
+    } });
+  assert.deepEqual(writes, [{ base_url: null, model_name: null, temperature: null, max_tokens: null }]);
+  assert.equal(progress.restored, true);
+  assert.equal(progress.after.api_key_configured, true);
+});
+
+test('LLM third-party field or key status changes prevent automatic restore', async () => {
+  const target = llmTarget(llmOriginal);
+  for (const current of [{ ...target, model_name: 'someone-else' }, { ...target, api_key_configured: false }]) {
+    const journal = new ConfigWriteJournal();
+    journal.complete(journal.begin({ url: llmWritePolicy().url, payload: llmPayload(target) }), 200);
+    let writes = 0;
+    await assert.rejects(restoreConfigAfterWrites({ journal, original: llmOriginal, target,
+      equals: sameLlmConfig, decide: llmRestoreDecision, read: async () => current, write: async () => { writes++; } }), /cleanup conflict/);
+    assert.equal(writes, 0);
+  }
+});
+
+test('unknown LLM POST result prevents even an immediate GET from claiming restoration', async () => {
+  const target = llmTarget(llmOriginal), journal = new ConfigWriteJournal();
+  const entry = journal.begin({ url: llmWritePolicy().url, payload: llmPayload(target) });
+  journal.unknown(entry, 'POST timeout');
+  let io = 0;
+  await assert.rejects(restoreConfigAfterWrites({ journal, original: llmOriginal, target,
+    equals: sameLlmConfig, decide: llmRestoreDecision, read: async () => { io++; return llmOriginal; }, write: async () => { io++; } }), /outcome-unknown/);
+  assert.equal(io, 0);
+});
+
+test('LLM temperature accepts f32-equivalent scientific and decimal renderings only', () => {
+  for (const [actual, expected] of [['0.0000001', 1e-7], ['1e-7', 1e-7], ['-0.0000001', -1e-7],
+    ['-1e-7', -1e-7], ['0', 0], ['-0', 0], ['0.7', 0.7], ['0.699999988079071', 0.7]]) {
+    assert.equal(llmInputMatches('temperature', actual, expected), true, `${actual} / ${expected}`);
+  }
+  for (const [actual, expected] of [['', 0], [' ', 0], ['NaN', 0], ['Infinity', 0], ['1e40', 1e40],
+    ['0.0000002', 1e-7], ['0.8', 0.7], ['0.7', NaN], ['0.7', Infinity]]) {
+    assert.equal(llmInputMatches('temperature', actual, expected), false, `${actual} / ${expected}`);
+  }
+});
+
+test('LLM nullable, string and max_tokens input matching preserves exact text and integer precision', () => {
+  for (const field of ['base_url', 'model_name', 'temperature', 'max_tokens']) {
+    assert.equal(llmInputMatches(field, '', null), true);
+    assert.equal(llmInputMatches(field, ' ', null), false);
+    assert.equal(llmInputMatches(field, '0', null), false);
+  }
+  assert.equal(llmInputMatches('model_name', 'model-name', 'model-name'), true);
+  assert.equal(llmInputMatches('model_name', 'model-name ', 'model-name'), false);
+  assert.equal(llmInputMatches('max_tokens', '9007199254740991', Number.MAX_SAFE_INTEGER), true);
+  assert.equal(llmInputMatches('max_tokens', '9007199254740990', Number.MAX_SAFE_INTEGER), false);
+  assert.equal(llmInputMatches('max_tokens', '9.007199254740991e15', Number.MAX_SAFE_INTEGER), false);
+  assert.equal(llmInputMatches('max_tokens', '01', 1), false);
+  assert.equal(llmInputMatches('api_key', '', null), false);
+});
+
+for (const method of ['GET', 'HEAD']) {
+  test(`LLM ${method} forwards the same real 200 response with redirects and retries disabled`, async () => {
+    const response = { status: () => 200 }, calls = [], blocked = [];
+    await forwardLlmRead({ request: () => ({ method: () => method, url: () => 'http://127.0.0.1:4317/api/app_configs/llm' }),
+      fetch: async options => { calls.push(['fetch', options]); return response; },
+      fulfill: async options => { calls.push(['fulfill', options]); },
+      abort: async reason => { calls.push(['abort', reason]); },
+    }, blocked);
+    assert.deepEqual(calls, [['fetch', { maxRedirects: 0, maxRetries: 0, timeout: 10000 }], ['fulfill', { response }]]);
+    assert.deepEqual(blocked, []);
+  });
+  for (const status of [302, 307]) {
+    test(`LLM ${method} rejects ${status} and records only a sanitized source URL`, async () => {
+      const blocked = [], calls = [];
+      await forwardLlmRead({ request: () => ({ method: () => method, url: () => 'http://127.0.0.1:4317/asset.js?secret=NEVER-LOG' }),
+        fetch: async options => { calls.push(options); return { status: () => status }; },
+        fulfill: async () => { calls.push('fulfill'); },
+        abort: async reason => { calls.push(reason); },
+      }, blocked);
+      assert.deepEqual(calls, [{ maxRedirects: 0, maxRetries: 0, timeout: 10000 }, 'blockedbyclient']);
+      assert.deepEqual(blocked, [{ method, url: 'http://127.0.0.1:4317/asset.js', reason: 'LLM read redirect blocked', status }]);
+      assert.equal(JSON.stringify(blocked).includes('NEVER-LOG'), false);
+    });
+  }
+}
+
+test('LLM read transport errors use a fixed safe reason', async () => {
+  const blocked = [];
+  let aborted = false, fulfilled = false;
+  await forwardLlmRead({ request: () => ({ method: () => 'GET', url: () => 'http://127.0.0.1:4317/api/app_configs/llm?token=NEVER-LOG' }),
+    fetch: async () => { throw new Error('network detail contains NEVER-LOG'); },
+    fulfill: async () => { fulfilled = true; },
+    abort: async () => { aborted = true; },
+  }, blocked);
+  assert.equal(aborted, true);
+  assert.equal(fulfilled, false);
+  assert.deepEqual(blocked, [{ method: 'GET', url: 'http://127.0.0.1:4317/api/app_configs/llm', reason: 'LLM read transport failed' }]);
+});
+
+test('LLM read helper rejects mutating methods before network access', async () => {
+  const blocked = [];
+  let requests = 0;
+  await forwardLlmRead({ request: () => ({ method: () => 'POST', url: () => 'http://127.0.0.1:4317/api/app_configs/llm' }),
+    fetch: async () => { requests++; return { status: () => 200 }; }, fulfill: async () => {}, abort: async () => {},
+  }, blocked);
+  assert.equal(requests, 0);
+  assert.equal(blocked[0].reason, 'LLM read transport accepts only GET/HEAD');
+});
+
+test('LLM excludes only the local devtools GET stream without upstream access', async () => {
+  const ignored = [], calls = [];
+  const matched = await excludeLlmDevStream({
+    request: () => ({ method: () => 'GET', url: () => 'http://127.0.0.1:4317/__tsd/console-pipe/sse?secret=omit' }),
+    abort: async reason => { calls.push(['abort', reason]); },
+    fetch: async () => { calls.push('fetch'); }, continue: async () => { calls.push('continue'); },
+  }, 'http://127.0.0.1:4317', ignored);
+  assert.equal(matched, true);
+  assert.deepEqual(calls, [['abort', 'blockedbyclient']]);
+  assert.deepEqual(ignored, [{ method: 'GET', url: 'http://127.0.0.1:4317/__tsd/console-pipe/sse', reason: 'devtools stream excluded' }]);
+});
+
+test('devtools exclusion never broadens to other origins, methods or paths', async () => {
+  for (const [method, url] of [['HEAD', 'http://127.0.0.1:4317/__tsd/console-pipe/sse'],
+    ['POST', 'http://127.0.0.1:4317/__tsd/console-pipe/sse'], ['GET', 'http://elsewhere.test/__tsd/console-pipe/sse'],
+    ['GET', 'http://127.0.0.1:4317/__tsd/console-pipe/sse/'], ['GET', 'http://127.0.0.1:4317/api/app_configs/llm']]) {
+    const ignored = []; let aborted = false;
+    assert.equal(await excludeLlmDevStream({ request: () => ({ method: () => method, url: () => url }),
+      abort: async () => { aborted = true; } }, 'http://127.0.0.1:4317', ignored), false);
+    assert.equal(aborted, false); assert.deepEqual(ignored, []);
+  }
+});
+
+const cleanEvidence = () => ({ status: 'passed', blockedWrites: [], pageErrors: [], postOutcomes: [] });
+
+test('final safety gate waits for a late blocked route before persisting a passed result', async () => {
+  const pending = new Set(), result = cleanEvidence();
+  let release;
+  const afterClose = new Promise(resolve => { release = resolve; });
+  trackRouteHandler(pending, async () => {
+    await afterClose;
+    result.blockedWrites.push({ method: 'GET', reason: 'LLM read transport failed' });
+  }, error => result.pageErrors.push(error.message));
+  assert.equal(result.status, 'passed');
+  assert.deepEqual(result.blockedWrites, [], 'The old pre-close check would incorrectly pass');
+  const settled = settleRouteHandlers(pending);
+  release();
+  await settled;
+  applyFinalSafetyGate(result);
+  const persisted = JSON.parse(JSON.stringify(result));
+  assert.equal(pending.size, 0);
+  assert.equal(persisted.status, 'failed');
+  assert.equal(persisted.blockedWrites.length, 1);
+  assert.equal(persisted.safetyGate.checkedAfterContextClose, true);
+});
+
+test('late route exceptions and unknown POSTs fail the final gate while ignored devtools remain informational', async () => {
+  const pending = new Set(), result = cleanEvidence();
+  trackRouteHandler(pending, async () => { throw new Error('route stopped during close'); }, error => result.pageErrors.push(error.message));
+  await settleRouteHandlers(pending);
+  applyFinalSafetyGate(result);
+  assert.equal(result.status, 'failed');
+  const unknown = cleanEvidence();
+  unknown.postOutcomes.push({ outcome: 'outcome-unknown' });
+  unknown.configCleanup = { restored: true };
+  applyFinalSafetyGate(unknown);
+  assert.equal(unknown.status, 'failed');
+  assert.equal(unknown.configCleanup.restored, undefined);
+  const ignored = cleanEvidence();
+  ignored.ignoredDevRequests = [{ reason: 'devtools stream excluded' }];
+  applyFinalSafetyGate(ignored);
+  assert.equal(ignored.status, 'passed');
 });

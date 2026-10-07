@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import { allowedLlmWrite } from './llm-policy.mjs';
 
 export const configKeys = ['max_iterations', 'max_retries', 'max_search_results'];
 export const configPath = '/api/app_configs/agent';
 
 export function requireConfigWriteAuthorization(features, permission) {
-  if (features.includes('settings-save') && permission !== true) {
-    throw new Error('settings-save requires explicit --allow-config-write true for this launch/run/drive');
+  const writeFeature = features.find(feature => ['settings-save', 'llm-save'].includes(feature));
+  if (writeFeature && permission !== true) {
+    throw new Error(`${writeFeature} requires explicit --allow-config-write true for this launch/run/drive`);
   }
 }
 
@@ -25,6 +27,7 @@ export function sameConfig(left, right) {
 
 // The browser guard and exceptional cleanup share the exact endpoint/payload policy.
 export function allowedConfigWrite({ feature, allowConfigWrite, baseUrl, url, method, payload, expected }) {
+  if (feature === 'llm-save') return allowedLlmWrite({ feature, allowConfigWrite, baseUrl, url, method, payload, expected });
   return feature === 'settings-save' && allowConfigWrite === true && method === 'POST'
     && url === new URL(configPath, baseUrl).href && sameConfig(payload, expected);
 }
@@ -40,7 +43,7 @@ export function restoreDecision(current, original, target) {
 // sticky: a late response is retained as evidence and never upgrades this run.
 export class ConfigWriteJournal {
   entries = [];
-  constructor(persist = () => {}) { this.persist = persist; }
+  constructor(persist = () => {}, sanitizeReason = value => value) { this.persist = persist; this.sanitizeReason = sanitizeReason; }
   begin({ url, payload, source = 'ui' }) {
     const entry = { id: this.entries.length + 1, method: 'POST', url, payload, source,
       outcome: 'pending', authorizedAt: new Date().toISOString() };
@@ -62,7 +65,7 @@ export class ConfigWriteJournal {
   unknown(entry, reason) {
     if (entry.outcome !== 'pending') return;
     entry.outcome = 'outcome-unknown';
-    entry.reason = reason;
+    entry.reason = this.sanitizeReason(reason);
     entry.unknownAt = new Date().toISOString();
     this.persist(this.entries);
   }
@@ -83,7 +86,7 @@ export async function withinPostDeadline(operation, journal, timeoutMs = 15000) 
   } finally { clearTimeout(timer); }
 }
 
-export async function restoreConfigAfterWrites({ journal, original, target, read, write, progress = {} }) {
+export async function restoreConfigAfterWrites({ journal, original, target, read, write, progress = {}, equals = sameConfig, decide = restoreDecision }) {
   const unsettled = journal.entries.filter(entry => entry.outcome !== 'response-received');
   if (unsettled.length) {
     progress.decision = 'outcome-unknown';
@@ -92,13 +95,13 @@ export async function restoreConfigAfterWrites({ journal, original, target, read
   }
   const current = await read('最终恢复检查');
   progress.before = current;
-  progress.decision = restoreDecision(current, original, target);
+  progress.decision = decide(current, original, target);
   if (progress.decision === 'restore') {
     await write(original);
     progress.compensatingWrite = true;
   }
   const after = await read('恢复后GET确认');
-  assert.ok(sameConfig(after, original), 'Final GET differs from original values');
+  assert.ok(equals(after, original), 'Final GET differs from original values');
   progress.after = after;
   progress.restored = true;
   return progress;

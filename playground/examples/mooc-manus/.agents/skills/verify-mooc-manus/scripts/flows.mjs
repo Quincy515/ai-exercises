@@ -6,6 +6,10 @@ import os from 'node:os';
 import { createRequire } from 'node:module';
 import { allowedConfigWrite, ConfigWriteJournal, forwardAuthorizedConfigWrite, requireConfigWriteAuthorization } from './config-write.mjs';
 import { driveSettingsSave } from './settings-save.mjs';
+import { driveLlm } from './llm-flows.mjs';
+import { llmFields } from './llm-policy.mjs';
+import { excludeLlmDevStream, forwardLlmRead } from './llm-transport.mjs';
+import { applyFinalSafetyGate, settleRouteHandlers, trackRouteHandler } from './route-lifecycle.mjs';
 
 export function driverInfo(repo, { modulePath, channel = 'chrome' } = {}) {
   const require = createRequire(path.join(repo, 'apps/package.json'));
@@ -41,19 +45,22 @@ export async function driveFlows({ state, health, features, modulePath, channel,
     browser = await driver.api.chromium.launch({ channel: driver.channel, headless: true });
     for (const feature of features) {
       currentFeature = feature;
+      const isLlm = ['llm', 'llm-save'].includes(feature);
       const directory = path.join(state.run, feature);
       fs.mkdirSync(directory);
       const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, serviceWorkers: 'block' });
-      await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
+      if (!isLlm) await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
       const page = await context.newPage();
       page.setDefaultTimeout(15000);
-      const errors = [], network = [], blockedWrites = [], authorizedWrites = [];
+      const errors = [], network = [], blockedWrites = [], authorizedWrites = [], ignoredDevRequests = [];
+      const pendingRoutes = new Set();
       const writeGuard = { expected: null, attempts: 0, requests: new Map() };
       writeGuard.journal = new ConfigWriteJournal(entries => fs.writeFileSync(
-        path.join(directory, 'post-outcomes.json'), JSON.stringify(entries, null, 2) + '\n'));
+        path.join(directory, 'post-outcomes.json'), JSON.stringify(entries, null, 2) + '\n'),
+      isLlm ? reason => String(reason).split('\n')[0] : undefined);
       let sequence = 0;
-      const result = { id: feature, status: 'passed', boundary: ['settings', 'settings-save'].includes(feature) ? 'live API + Rust/WASM + UI' : 'built-in demo data + real UI interactions',
-        entrypointsCovered: [], checks: [] };
+      const result = { id: feature, status: 'passed', boundary: ['settings', 'settings-save', 'llm', 'llm-save'].includes(feature) ? 'live API + Rust/WASM + UI' : 'built-in demo data + real UI interactions',
+        entrypointsCovered: [], checks: [], ...(isLlm ? { readTransport: 'real backend via Playwright route.fetch for all GET/HEAD; redirects and retries disabled', tracePolicy: 'disabled: raw LLM network bodies excluded; whitelist JSON and masked screenshots retained' } : {}) };
       const record = item => fs.appendFileSync(path.join(directory, 'actions.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...item }) + '\n');
       const step = async (action, fn) => {
         record({ action, phase: 'begin' });
@@ -63,8 +70,13 @@ export async function driveFlows({ state, health, features, modulePath, channel,
       };
       const capture = async label => {
         const prefix = `${String(++sequence).padStart(2, '0')}-${label}`;
-        await page.screenshot({ path: path.join(directory, prefix + '.png'), animations: 'disabled' });
-        fs.writeFileSync(path.join(directory, prefix + '.aria.txt'), await page.locator('body').ariaSnapshot());
+        await page.screenshot({ path: path.join(directory, prefix + '.png'), animations: 'disabled',
+          ...(isLlm ? { mask: [page.locator('#api_key')] } : {}) });
+        if (isLlm) {
+          const fields = {};
+          for (const key of llmFields) if (await page.locator('#llm-config-form #' + key).count()) fields[key] = await page.locator('#llm-config-form #' + key).inputValue();
+          fs.writeFileSync(path.join(directory, prefix + '.ui.json'), JSON.stringify({ fields, apiKeyValue: 'omitted' }, null, 2) + '\n');
+        } else fs.writeFileSync(path.join(directory, prefix + '.aria.txt'), await page.locator('body').ariaSnapshot());
         record({ evidence: prefix });
       };
       const button = name => page.getByRole('button', { name, exact: true });
@@ -86,7 +98,7 @@ export async function driveFlows({ state, health, features, modulePath, channel,
         await page.getByRole('region', { name: '会话任务详情' }).waitFor();
         assert.equal(await button(name).getAttribute('aria-current'), 'page');
       };
-      page.on('pageerror', error => errors.push(error.message));
+      page.on('pageerror', error => errors.push(isLlm ? 'LLM page script error; raw detail excluded from evidence' : error.message));
       page.on('requestfinished', request => {
         const entry = writeGuard.requests.get(request);
         if (entry) writeGuard.journal.complete(entry);
@@ -98,9 +110,16 @@ export async function driveFlows({ state, health, features, modulePath, channel,
       page.on('response', response => {
         const entry = writeGuard.requests.get(response.request());
         if (entry) writeGuard.journal.headers(entry, response.status());
-        if (new URL(response.url()).pathname.startsWith('/api/')) network.push({ url: response.url(), status: response.status(), method: response.request().method() });
+        if (new URL(response.url()).pathname.startsWith('/api/')) network.push({ url: isLlm ? new URL(response.url()).origin + new URL(response.url()).pathname : response.url(), status: response.status(), method: response.request().method() });
       });
-      await page.route('**/api/**', async route => {
+      await page.route(isLlm ? '**/*' : '**/api/**', route => trackRouteHandler(pendingRoutes, async () => {
+        const requested = new URL(route.request().url());
+        if (isLlm && (requested.origin !== new URL(state.url).origin
+          || (requested.pathname.startsWith('/api/') && !['/api/app_configs/agent', '/api/app_configs/llm'].includes(requested.pathname)))) {
+          blockedWrites.push({ method: route.request().method(), url: requested.origin + requested.pathname, reason: 'LLM verification permits only local configuration APIs' });
+          await route.abort('blockedbyclient'); return;
+        }
+        if (isLlm && await excludeLlmDevStream(route, state.url, ignoredDevRequests)) return;
         if (!['GET', 'HEAD'].includes(route.request().method())) {
           writeGuard.attempts++;
           let payload;
@@ -115,10 +134,11 @@ export async function driveFlows({ state, health, features, modulePath, channel,
             await forwardAuthorizedConfigWrite(route, writeGuard.journal, entry);
             return;
           }
-          blockedWrites.push({ method: route.request().method(), url: route.request().url() });
+          blockedWrites.push({ method: route.request().method(), url: isLlm ? requested.origin + requested.pathname : route.request().url() });
           await route.abort('blockedbyclient');
-        } else await route.continue();
-      });
+        } else if (isLlm) await forwardLlmRead(route, blockedWrites);
+        else await route.continue();
+      }, error => errors.push(isLlm ? 'LLM route handler failed; raw detail excluded from evidence' : error.message)));
       try {
         await step('打开首页', () => goto('/'));
         await capture('before');
@@ -170,6 +190,9 @@ export async function driveFlows({ state, health, features, modulePath, channel,
         }
         if (feature === 'settings-save') {
           await driveSettingsSave({ page, state, health, result, step, capture, record, directory, writeGuard, allowConfigWrite });
+        }
+        if (isLlm) {
+          await driveLlm({ feature, page, state, health, result, step, capture, record, directory, writeGuard, allowConfigWrite, goto });
         }
         if (feature === 'sessions') {
           await step('侧栏进入会话 1', () => openSession(1));
@@ -227,20 +250,25 @@ export async function driveFlows({ state, health, features, modulePath, channel,
           result.unimplemented = ['消息区查看全部', '文件下载', '文件预览'];
         }
         await capture('after');
-        assert.deepEqual(blockedWrites, [], 'Unexpected API write; feature map may be outdated');
+        assert.deepEqual(blockedWrites, [], 'Unexpected blocked request; feature map may be outdated');
         assert.deepEqual(errors, [], 'Unexpected page script errors');
       } catch (error) {
-        result.status = 'failed'; result.reason = error.stack;
-        record({ phase: 'failed', error: error.message });
+        result.status = 'failed'; result.reason = isLlm ? error.message.split('\n')[0] : error.stack;
+        record({ phase: 'failed', error: isLlm ? error.message.split('\n')[0] : error.message });
         try { await capture('failure'); } catch { /* Keep the other proof artifacts. */ }
       } finally {
-        writeGuard.journal.finalize();
-        result.postOutcomes = writeGuard.journal.entries;
-        result.network = network; result.authorizedWrites = authorizedWrites; result.pageErrors = errors; result.blockedWrites = blockedWrites;
-        try { await context.tracing.stop({ path: path.join(directory, 'trace.zip') }); }
+        try { if (!isLlm) await context.tracing.stop({ path: path.join(directory, 'trace.zip') }); }
         catch (error) { result.status = 'failed'; result.traceError = error.message; }
         try { await context.close(); }
         catch (error) { result.status = 'failed'; result.contextError = error.message; }
+        await settleRouteHandlers(pendingRoutes);
+        writeGuard.journal.finalize();
+        result.postOutcomes = writeGuard.journal.entries;
+        result.network = network; result.authorizedWrites = authorizedWrites; result.pageErrors = errors; result.blockedWrites = blockedWrites;
+        result.ignoredDevRequests = ignoredDevRequests;
+        applyFinalSafetyGate(result);
+        if (result.configCleanup) fs.writeFileSync(path.join(directory, 'config-cleanup.json'), JSON.stringify({
+          ...result.configCleanup, cleanupError: result.cleanupError }, null, 2) + '\n');
         fs.writeFileSync(path.join(directory, 'result.json'), JSON.stringify(result, null, 2) + '\n');
         report.features.push(result);
         fs.writeFileSync(path.join(state.run, 'results.json'), JSON.stringify(report, null, 2) + '\n');
